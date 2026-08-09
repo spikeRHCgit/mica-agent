@@ -10,6 +10,12 @@ env/
 build/
 dist/
 *.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 
 .streamlit/
 
