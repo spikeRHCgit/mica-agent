@@ -34,16 +34,31 @@ class InstalledDistribution:
     python: Path
     mica: Path
     outside_repository: Path
+    home: Path
     wheel: Path
     sdist: Path
 
 
+def isolated_environment(home: Path) -> dict[str, str]:
+    environment = os.environ.copy()
+    for variable in "PYTHONPATH", "PYTHONHOME":
+        environment.pop(variable, None)
+    environment.update(
+        HOME=str(home),
+        USERPROFILE=str(home),
+        PYTHONNOUSERSITE="1",
+        PYTHONDONTWRITEBYTECODE="1",
+    )
+    return environment
+
+
 def run_command(
-    command: list[str | Path], *, cwd: Path
+    command: list[str | Path], *, cwd: Path, home: Path | None = None
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
         cwd=cwd,
+        env=isolated_environment(home) if home is not None else None,
         capture_output=True,
         text=True,
         check=False,
@@ -66,6 +81,7 @@ def installed_distribution(
     assert wheel.is_file()
     assert sdist.is_file()
 
+    home = tmp_path_factory.mktemp("home")
     environment = tmp_path_factory.mktemp("environment") / "venv"
     venv.EnvBuilder(with_pip=True).create(environment)
     scripts = environment / ("Scripts" if os.name == "nt" else "bin")
@@ -75,6 +91,7 @@ def installed_distribution(
     install = run_command(
         ["uv", "pip", "install", "--offline", "--no-deps", "--python", python, wheel],
         cwd=build_dir,
+        home=home,
     )
     assert install.returncode == 0, install.stderr
     assert mica.is_file()
@@ -83,8 +100,19 @@ def installed_distribution(
         python=python,
         mica=mica,
         outside_repository=tmp_path_factory.mktemp("outside-repository"),
+        home=home,
         wheel=wheel,
         sdist=sdist,
+    )
+
+
+def run_installed(
+    installed_distribution: InstalledDistribution, command: list[str | Path]
+) -> subprocess.CompletedProcess[str]:
+    return run_command(
+        command,
+        cwd=installed_distribution.outside_repository,
+        home=installed_distribution.home,
     )
 
 
@@ -118,13 +146,13 @@ def test_sdist_excludes_genericagent_implementation(
 def test_installed_distribution_has_no_runtime_dependencies(
     installed_distribution: InstalledDistribution,
 ) -> None:
-    result = run_command(
+    result = run_installed(
+        installed_distribution,
         [
             installed_distribution.python,
             "-c",
             "import importlib.metadata; print(importlib.metadata.requires('mica-agent'))",
         ],
-        cwd=installed_distribution.outside_repository,
     )
 
     assert result.returncode == 0
@@ -132,19 +160,45 @@ def test_installed_distribution_has_no_runtime_dependencies(
     assert result.stderr == ""
 
 
-@pytest.mark.parametrize("arguments", [(), ("--help",), ("--version",), ("--invalid",)])
-def test_installed_public_entrypoints_match(
-    installed_distribution: InstalledDistribution, arguments: tuple[str, ...]
+@pytest.mark.parametrize(
+    ("arguments", "returncode", "stdout", "stderr", "description"),
+    [
+        ((), 0, "usage: mica", "", None),
+        (("--help",), 0, "usage: mica", "", "A lightweight agent foundation"),
+        (("--version",), 0, "mica 0.1.0\n", "", None),
+        (("--invalid",), 2, "", "unrecognized arguments", None),
+    ],
+)
+def test_installed_public_entrypoints_match_contract(
+    installed_distribution: InstalledDistribution,
+    arguments: tuple[str, ...],
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    description: str | None,
 ) -> None:
-    console = run_command(
-        [installed_distribution.mica, *arguments],
-        cwd=installed_distribution.outside_repository,
+    console = run_installed(
+        installed_distribution, [installed_distribution.mica, *arguments]
     )
-    module = run_command(
+    module = run_installed(
+        installed_distribution,
         [installed_distribution.python, "-m", "mica_agent", *arguments],
-        cwd=installed_distribution.outside_repository,
     )
 
+    for result in console, module:
+        assert result.returncode == returncode
+        if arguments == ("--version",):
+            assert result.stdout == stdout
+        elif stdout:
+            assert stdout in result.stdout
+        else:
+            assert result.stdout == ""
+        if description is not None:
+            assert description in result.stdout
+        if stderr:
+            assert stderr in result.stderr
+        else:
+            assert result.stderr == ""
     assert (console.returncode, console.stdout, console.stderr) == (
         module.returncode,
         module.stdout,
@@ -155,31 +209,52 @@ def test_installed_public_entrypoints_match(
 def test_installed_import_is_silent_side_effect_free_and_outside_repository(
     installed_distribution: InstalledDistribution,
 ) -> None:
-    before = {
+    before_workspace = {
         path.relative_to(installed_distribution.outside_repository)
         for path in installed_distribution.outside_repository.rglob("*")
     }
+    before_home = {
+        path.relative_to(installed_distribution.home)
+        for path in installed_distribution.home.rglob("*")
+    }
     repository = str(PROJECT_ROOT).replace("\\", "/")
+    environment = str(installed_distribution.python.parent.parent).replace("\\", "/")
     code = (
+        "import os\n"
         "import sys\n"
+        "import threading\n"
         f"repository = {repository!r}\n"
-        "def reject_repository_access(event, arguments):\n"
+        f"environment = {environment!r}\n"
+        "threads_before = {thread.ident for thread in threading.enumerate()}\n"
+        "def reject_side_effects(event, arguments):\n"
+        "    if event in {'socket.connect', 'socket.getaddrinfo', 'subprocess.Popen'}:\n"
+        "        raise RuntimeError(f'prohibited import side effect: {event}')\n"
+        "    if event == 'open' and any(flag in str(arguments[1]) for flag in ('w', 'a', 'x', '+')):\n"
+        "        raise RuntimeError('attempted file modification')\n"
         "    if event == 'open' and str(arguments[0]).replace('\\\\', '/').startswith(repository):\n"
         "        raise RuntimeError('attempted repository access')\n"
-        "sys.addaudithook(reject_repository_access)\n"
+        "sys.addaudithook(reject_side_effects)\n"
         "import mica_agent\n"
-        "assert not str(mica_agent.__file__).replace('\\\\', '/').startswith(repository)\n"
+        "module_file = str(mica_agent.__file__).replace('\\\\', '/')\n"
+        "assert module_file.startswith(environment), module_file\n"
+        "assert not module_file.startswith(repository), module_file\n"
+        "assert {thread.ident for thread in threading.enumerate()} == threads_before\n"
+        "assert not os.path.exists(os.path.join(os.environ['HOME'], '.mica'))\n"
     )
-    result = run_command(
-        [installed_distribution.python, "-c", code],
-        cwd=installed_distribution.outside_repository,
+    result = run_installed(
+        installed_distribution, [installed_distribution.python, "-c", code]
     )
-    after = {
+    after_workspace = {
         path.relative_to(installed_distribution.outside_repository)
         for path in installed_distribution.outside_repository.rglob("*")
+    }
+    after_home = {
+        path.relative_to(installed_distribution.home)
+        for path in installed_distribution.home.rglob("*")
     }
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""
     assert result.stderr == ""
-    assert after == before
+    assert after_workspace == before_workspace
+    assert after_home == before_home
