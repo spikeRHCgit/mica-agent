@@ -14,11 +14,13 @@ from .base import (
     TemporaryServerError,
     TextDelta,
 )
+from .openai_compatible import OpenAICompatibleProvider
 
 __all__ = [
     "AuthenticationError",
     "Finish",
     "MalformedResponseError",
+    "OpenAICompatibleProvider",
     "Provider",
     "ProviderError",
     "ProviderErrorEvent",
