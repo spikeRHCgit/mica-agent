@@ -143,7 +143,7 @@ def test_sdist_excludes_genericagent_implementation(
     )
 
 
-def test_installed_distribution_has_no_runtime_dependencies(
+def test_installed_distribution_runtime_dependencies_are_only_httpx(
     installed_distribution: InstalledDistribution,
 ) -> None:
     result = run_installed(
@@ -156,7 +156,7 @@ def test_installed_distribution_has_no_runtime_dependencies(
     )
 
     assert result.returncode == 0
-    assert result.stdout == "None\n"
+    assert result.stdout == "['httpx>=0.28.1']\n"
     assert result.stderr == ""
 
 
