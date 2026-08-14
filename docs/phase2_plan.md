@@ -113,26 +113,36 @@ CLI 不直接发 HTTP 请求。CLI 负责输入、事件渲染和退出信号转
 
 ### P2-01：跨模块模型与事件契约
 
+状态：已完成。
+
 建立最小 Standard Message、Provider 响应事件、Engine Event 和终态对象，并用
 单元测试固定字段、顺序和错误语义。不得实现网络请求或 CLI 交互。
 
 ### P2-02：OpenAI-compatible Provider
+
+状态：已完成。
 
 基于 `httpx` 实现 Chat Completions 流式请求、SSE 增量解析、响应错误分类、超时
 和有限重试。使用可注入的 HTTP transport 进行自动化测试；不得添加 FakeProvider。
 
 ### P2-03：AgentEngine 与 MicaApp 装配
 
+状态：已完成。
+
 实现单次 Run 的异步编排、当前进程消息历史、取消传播和 Provider 事件到 Engine
 事件的转换。Engine 不读取配置、不写会话、不依赖前端。
 
 ### P2-04：基础 CLI 闭环
+
+状态：待实施。
 
 将 `mica cli` 接入 MicaApp，支持连续文本输入、实时事件渲染、`Ctrl+C` 中断当前
 运行和 EOF 退出。保留已有 `--help`、`--version` 和无效参数公共契约；不注册未来
 命令占位符。
 
 ### P2-05：集成验证与文档收口
+
+状态：待实施。
 
 补充跨模块自动化测试、构建验证、仓库外 CLI 烟测和真实 Provider 集成验收说明，
 更新 README 的当前能力描述，并由 master 审查所有边界和依赖变化。
