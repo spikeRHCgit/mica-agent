@@ -119,7 +119,7 @@ def bare_distribution(
     """裸安装环境：只装 Mica wheel，不安装任何运行依赖（含 httpx）。"""
     root = tmp_path_factory.mktemp("bare-environment")
     home = tmp_path_factory.mktemp("bare-home")
-    environment, python, mica = create_venv(root)
+    _environment, python, mica = create_venv(root)
 
     install = run_command(
         [
@@ -162,7 +162,7 @@ def full_distribution(
     """完整安装环境：uv 按 wheel 元数据解析并安装全部运行依赖。"""
     root = tmp_path_factory.mktemp("full-environment")
     home = tmp_path_factory.mktemp("full-home")
-    environment, python, mica = create_venv(root)
+    _environment, python, mica = create_venv(root)
 
     install = run_command(
         [
