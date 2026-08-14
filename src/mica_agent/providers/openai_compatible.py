@@ -59,7 +59,9 @@ class OpenAICompatibleProvider:
 
     重试：默认只对 ``ProviderTimeoutError`` 与 ``TemporaryServerError``
     且尚未产出任何文本的事件流重试，最多 ``max_retries`` 次；
-    ``RateLimitError`` 不做自动重试（留给上层决策）。
+    ``RateLimitError`` 不做自动重试（留给上层决策）。HTTP 响应
+    成功建立后发生的传输中断视为畸形响应
+    （``MalformedResponseError``），不重试、不重复发送请求。
     """
 
     def __init__(
@@ -154,8 +156,9 @@ class OpenAICompatibleProvider:
         """解析单个 SSE ``data`` 载荷为事件标记。
 
         返回 ``("text", content)``、``("finish", reason)`` 或
-        ``None``（心跳/忽略）；结构不符合 Chat Completions 流式
-        协议时抛 :class:`MalformedResponseError`。
+        ``None``（可忽略的事件：无文本的 delta 块等）；结构不符合
+        Chat Completions 流式协议（含缺失、为空的 ``choices``）时
+        抛 :class:`MalformedResponseError`。
         """
         try:
             obj = json.loads(data)
@@ -165,13 +168,13 @@ class OpenAICompatibleProvider:
             raise MalformedResponseError("SSE data must be a JSON object")
         choices = obj.get("choices")
         if choices is None:
-            # 无 choices 的补充事件（如 usage/keep-alive）→ 心跳，忽略。
-            return None
+            # 缺失 choices：补充事件（usage 等）不按协议出现在流中间。
+            raise MalformedResponseError("missing 'choices' field in SSE data")
         if not isinstance(choices, list):
             raise MalformedResponseError("'choices' must be a list")
         if not choices:
-            # 空 choices → 心跳，忽略。
-            return None
+            # 空 choices：流式协议要求至少一个 choice，出现即畸形。
+            raise MalformedResponseError("'choices' must not be empty")
         choice = choices[0]
         if not isinstance(choice, dict):
             raise MalformedResponseError("each choice must be a JSON object")
@@ -199,10 +202,12 @@ class OpenAICompatibleProvider:
         }
         produced = False
         for attempt in range(self._max_retries + 1):
+            established = False
             try:
                 async with self._client.stream(
                     "POST", self._endpoint, json=payload, headers=headers
                 ) as response:
+                    established = True
                     if response.status_code >= 400:
                         error = self._map_status_error(response.status_code)
                         if self._should_retry(
@@ -242,6 +247,15 @@ class OpenAICompatibleProvider:
                     )
                     return
             except httpx.TimeoutException as exc:
+                if established:
+                    # 响应已建立、SSE 消费中途超时：内容不完整 → 畸形，
+                    # 不重试（保留已产出的文本增量）。
+                    yield ProviderErrorEvent(
+                        error=MalformedResponseError(
+                            "SSE stream interrupted", cause=exc
+                        )
+                    )
+                    return
                 error = ProviderTimeoutError("request timed out", cause=exc)
                 if self._should_retry(error, attempt, self._max_retries, produced):
                     await self._sleep(self._retry_backoff)
@@ -249,6 +263,15 @@ class OpenAICompatibleProvider:
                 yield ProviderErrorEvent(error=error)
                 return
             except httpx.TransportError as exc:
+                if established:
+                    # 响应已建立、SSE 消费中途传输中断：内容不完整 →
+                    # 畸形，不重试（保留已产出的文本增量）。
+                    yield ProviderErrorEvent(
+                        error=MalformedResponseError(
+                            "SSE stream interrupted", cause=exc
+                        )
+                    )
+                    return
                 error = TemporaryServerError("transport error", cause=exc)
                 if self._should_retry(error, attempt, self._max_retries, produced):
                     await self._sleep(self._retry_backoff)

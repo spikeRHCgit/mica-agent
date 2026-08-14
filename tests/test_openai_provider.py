@@ -295,7 +295,7 @@ def test_missing_or_null_content_is_not_rendered_as_none() -> None:
     assert all(not isinstance(event, TextDelta) for event in events)
 
 
-def test_empty_choices_chunk_is_ignored_as_heartbeat() -> None:
+def test_empty_choices_chunk_is_malformed_error() -> None:
     provider = make_provider(
         lambda request: _sse_response(
             'data: {"choices":[]}\n\n',
@@ -305,7 +305,26 @@ def test_empty_choices_chunk_is_ignored_as_heartbeat() -> None:
 
     events = _run_collect(provider, _make_request())
 
-    assert events == [Finish()]
+    # 空 choices 是畸形响应；错误事件为流内最后事件，不再消费 [DONE]。
+    assert [type(event).__name__ for event in events] == ["ProviderErrorEvent"]
+    assert isinstance(events[0], ProviderErrorEvent)
+    assert isinstance(events[0].error, MalformedResponseError)
+
+
+def test_missing_choices_field_is_malformed_error() -> None:
+    provider = make_provider(
+        lambda request: _sse_response(
+            'data: {"id":"x","object":"chat.completion.chunk"}\n\n',
+            DONE_SSE,
+        )
+    )
+
+    events = _run_collect(provider, _make_request())
+
+    # 缺失 choices 的补充事件不是合法心跳；畸形错误为最后事件。
+    assert [type(event).__name__ for event in events] == ["ProviderErrorEvent"]
+    assert isinstance(events[0], ProviderErrorEvent)
+    assert isinstance(events[0].error, MalformedResponseError)
 
 
 def test_blank_lines_and_comments_are_ignored() -> None:
@@ -483,7 +502,7 @@ def test_stream_ending_without_finish_signal_is_malformed() -> None:
 
 
 class _FlakyStream(httpx.AsyncByteStream):
-    """产出部分文本后抛出超时异常的响应流。"""
+    """产出部分文本后抛出指定传输异常的响应流。"""
 
     def __init__(self, chunks: list[bytes], exc: httpx.HTTPError | None = None) -> None:
         self._chunks = chunks
@@ -639,8 +658,115 @@ def test_no_retry_after_text_has_been_produced() -> None:
         "TextDelta",
         "ProviderErrorEvent",
     ]
+    # 响应已建立后 SSE 消费中超时 → 畸形响应（内容不完整）。
     assert isinstance(events[-1], ProviderErrorEvent)
-    assert isinstance(events[-1].error, ProviderTimeoutError)
+    assert isinstance(events[-1].error, MalformedResponseError)
+
+
+def test_stream_interrupted_after_response_is_malformed_without_retry() -> None:
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(
+            200,
+            stream=_FlakyStream(
+                [b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'],
+                exc=httpx.ReadError("connection reset"),
+            ),
+            request=request,
+        )
+
+    sleep_calls: list[float] = []
+    provider = _make_flaky_provider(handler, max_retries=3, sleep_calls=sleep_calls)
+
+    events = _run_collect(provider, _make_request())
+
+    # HTTP 200 建立后传输中断 → 畸形；不重试、不重复发送请求，
+    # 已产出的文本增量保留。
+    assert calls["n"] == 1
+    assert sleep_calls == []
+    assert [type(event).__name__ for event in events] == [
+        "TextDelta",
+        "ProviderErrorEvent",
+    ]
+    assert isinstance(events[-1], ProviderErrorEvent)
+    assert isinstance(events[-1].error, MalformedResponseError)
+
+
+def test_stream_interrupted_before_any_text_is_malformed_error() -> None:
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(
+            200,
+            stream=_FlakyStream([], exc=httpx.ReadError("connection reset")),
+            request=request,
+        )
+
+    provider = make_provider(handler, max_retries=3)
+
+    events = _run_collect(provider, _make_request())
+
+    # 未产出文本时中断同样视为畸形（响应已建立）。
+    assert calls["n"] == 1
+    assert [type(event).__name__ for event in events] == ["ProviderErrorEvent"]
+    assert isinstance(events[0], ProviderErrorEvent)
+    assert isinstance(events[0].error, MalformedResponseError)
+
+
+def test_connect_timeout_exhausts_retries_with_timeout_error() -> None:
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        raise httpx.ConnectTimeout("connection timed out")
+
+    provider = make_provider(handler, max_retries=2)
+
+    events = _run_collect(provider, _make_request())
+
+    # 响应建立前的超时保持原分类并遵守重试上限。
+    assert calls["n"] == 3  # 初始尝试 + 2 次重试
+    assert len(events) == 1
+    assert isinstance(events[0], ProviderErrorEvent)
+    assert isinstance(events[0].error, ProviderTimeoutError)
+
+
+def test_transport_error_before_response_is_retried_then_succeeds() -> None:
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise httpx.ConnectError("connection refused")
+        return httpx.Response(200, text=DONE_SSE, request=request)
+
+    provider = make_provider(handler, max_retries=2)
+
+    events = _run_collect(provider, _make_request())
+
+    assert calls["n"] == 2
+    assert events == [Finish()]
+
+
+def test_transport_error_before_response_exhausts_retries() -> None:
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        raise httpx.ConnectError("connection refused")
+
+    provider = make_provider(handler, max_retries=1)
+
+    events = _run_collect(provider, _make_request())
+
+    # 响应建立前的传输错误保持 TemporaryServerError 分类并遵守重试上限。
+    assert calls["n"] == 2  # 初始尝试 + 1 次重试
+    assert len(events) == 1
+    assert isinstance(events[0], ProviderErrorEvent)
+    assert isinstance(events[0].error, TemporaryServerError)
 
 
 # ---------------------------------------------------------------------------
