@@ -232,9 +232,53 @@ def test_provider_contract_exposes_async_stream() -> None:
             yield TextDelta(text="ok")
             yield Finish()
 
+        async def aclose(self) -> None:
+            return None
+
     provider = StreamingProvider()
 
     assert isinstance(provider, Provider)
+
+
+def test_provider_protocol_declares_aclose() -> None:
+    class ClosableProvider:
+        def __init__(self) -> None:
+            self.closed = 0
+
+        async def stream(
+            self, request: ProviderRequest
+        ) -> AsyncIterator[ProviderEvent]:
+            yield Finish()
+
+        async def aclose(self) -> None:
+            self.closed += 1
+
+    provider = ClosableProvider()
+
+    # 扩展后的 Provider 契约要求 stream 与 aclose 两个成员。
+    assert isinstance(provider, Provider)
+
+
+def test_provider_aclose_is_repeatable() -> None:
+    class ClosableProvider:
+        async def stream(
+            self, request: ProviderRequest
+        ) -> AsyncIterator[ProviderEvent]:
+            yield Finish()
+
+        async def aclose(self) -> None:
+            return None
+
+    async def main() -> None:
+        provider = ClosableProvider()
+        await provider.aclose()
+        await provider.aclose()  # 重复调用必须安全
+        collected: list[ProviderEvent] = []
+        async for event in provider.stream(build_request()):
+            collected.append(event)
+        assert collected == [Finish()]
+
+    asyncio.run(main())
 
 
 def test_stream_is_consumed_with_async_for() -> None:
@@ -245,6 +289,9 @@ def test_stream_is_consumed_with_async_for() -> None:
             yield TextDelta(text="hello")
             yield TextDelta(text=" world")
             yield Finish()
+
+        async def aclose(self) -> None:
+            return None
 
     async def consume() -> list[ProviderEvent]:
         collected: list[ProviderEvent] = []
@@ -273,6 +320,9 @@ def test_classified_error_is_terminal_in_stream() -> None:
             yield TextDelta(text="partial")
             yield ProviderErrorEvent(error=AuthenticationError("authentication failed"))
 
+        async def aclose(self) -> None:
+            return None
+
     async def consume() -> list[ProviderEvent]:
         collected: list[ProviderEvent] = []
         async for event in ErroringProvider().stream(build_request()):
@@ -297,6 +347,9 @@ def test_unexpected_program_error_propagates_as_exception() -> None:
         ) -> AsyncIterator[ProviderEvent]:
             yield TextDelta(text="partial")
             raise RuntimeError("programmer bug")
+
+        async def aclose(self) -> None:
+            return None
 
     async def consume() -> list[ProviderEvent]:
         collected: list[ProviderEvent] = []

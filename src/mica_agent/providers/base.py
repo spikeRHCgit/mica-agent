@@ -163,3 +163,7 @@ class Provider(Protocol):
     """
 
     def stream(self, request: ProviderRequest) -> AsyncIterator[ProviderEvent]: ...
+
+    async def aclose(self) -> None:
+        """关闭 Provider 占用的资源；必须幂等、可重复调用。"""
+        ...
