@@ -53,15 +53,24 @@ def isolated_environment(home: Path) -> dict[str, str]:
 
 
 def run_command(
-    command: list[str | Path], *, cwd: Path, home: Path | None = None
+    command: list[str | Path],
+    *,
+    cwd: Path,
+    home: Path | None = None,
+    environment: dict[str, str] | None = None,
+    input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    resolved = isolated_environment(home) if home is not None else None
+    if environment is not None:
+        resolved = environment
     return subprocess.run(
         command,
         cwd=cwd,
-        env=isolated_environment(home) if home is not None else None,
+        env=resolved,
         capture_output=True,
         text=True,
         check=False,
+        input=input_text,
     )
 
 
@@ -95,6 +104,23 @@ def installed_distribution(
     )
     assert install.returncode == 0, install.stderr
     assert mica.is_file()
+
+    # 补充安装锁定的运行时依赖，使安装态 `mica cli` 可以真实启动；
+    # 无依赖安装的旧契约测试仍针对同一 venv 保持有效。
+    install_dependencies = run_command(
+        [
+            "uv",
+            "pip",
+            "install",
+            "--offline",
+            "--python",
+            python,
+            "httpx==0.28.1",
+        ],
+        cwd=build_dir,
+        home=home,
+    )
+    assert install_dependencies.returncode == 0, install_dependencies.stderr
 
     return InstalledDistribution(
         python=python,
@@ -258,3 +284,99 @@ def test_installed_import_is_silent_side_effect_free_and_outside_repository(
     assert result.stderr == ""
     assert after_workspace == before_workspace
     assert after_home == before_home
+
+
+FAKE_CLI_ENVIRONMENT = {
+    "MICA_API_URL": "https://api.example.test/v1",
+    "MICA_API_KEY": "sk-dummy-test-key",
+    "MICA_MODEL": "test-model",
+}
+
+
+def cli_environment(home: Path, *, fake_credentials: bool) -> dict[str, str]:
+    """隔离 CLI 环境：清除全部 MICA_*，可选注入假的非敏感连接参数。"""
+    environment = isolated_environment(home)
+    for variable in FAKE_CLI_ENVIRONMENT:
+        environment.pop(variable, None)
+    if fake_credentials:
+        environment.update(FAKE_CLI_ENVIRONMENT)
+    return environment
+
+
+def assert_no_file_side_effects(
+    root: Path, before: set[Path], after: set[Path]
+) -> None:
+    assert after == before, f"unexpected file side effects under {root}"
+
+
+def snapshot_files(root: Path) -> set[Path]:
+    return {path.relative_to(root) for path in root.rglob("*")}
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        ("console", lambda d: [d.mica, "cli"]),
+        ("module", lambda d: [d.python, "-m", "mica_agent", "cli"]),
+    ],
+)
+def test_installed_cli_exits_cleanly_on_blank_input_eof(
+    installed_distribution: InstalledDistribution,
+    entry: tuple[str, object],
+) -> None:
+    """安装态 `mica cli`：空白输入 + EOF 后退出码 0，无输出、无副作用。"""
+    dist = installed_distribution
+    command = entry[1](dist)
+    before_workspace = snapshot_files(dist.outside_repository)
+    before_home = snapshot_files(dist.home)
+
+    result = run_command(
+        command,
+        cwd=dist.outside_repository,
+        environment=cli_environment(dist.home, fake_credentials=True),
+        input_text="\n   \n\t\n",
+    )
+
+    assert_no_file_side_effects(
+        dist.outside_repository,
+        before_workspace,
+        snapshot_files(dist.outside_repository),
+    )
+    assert_no_file_side_effects(dist.home, before_home, snapshot_files(dist.home))
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert result.stderr == ""  # 无 traceback、无诊断
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        ("console", lambda d: [d.mica, "cli"]),
+        ("module", lambda d: [d.python, "-m", "mica_agent", "cli"]),
+    ],
+)
+def test_installed_cli_missing_environment_variables_exit_two(
+    installed_distribution: InstalledDistribution,
+    entry: tuple[str, object],
+) -> None:
+    """安装态 `mica cli` 缺环境变量：退出码 2，诊断一致，stdout 为空。"""
+    dist = installed_distribution
+    results = [
+        run_command(
+            entry[1](dist),
+            cwd=dist.outside_repository,
+            environment=cli_environment(dist.home, fake_credentials=False),
+        )
+        for entry in (
+            ("console", lambda d: [d.mica, "cli"]),
+            ("module", lambda d: [d.python, "-m", "mica_agent", "cli"]),
+        )
+    ]
+
+    for result in results:
+        assert result.returncode == 2, result.stderr
+        assert result.stdout == ""
+        for variable in FAKE_CLI_ENVIRONMENT:
+            assert variable in result.stderr
+    assert results[0].stderr == results[1].stderr  # 两入口诊断一致
