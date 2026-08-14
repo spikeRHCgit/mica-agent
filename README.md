@@ -12,11 +12,20 @@ Mica 是一个面向个人开发者的轻量 Agent 基座，当前正从 Generic
 
   | 变量 | 含义 |
   |---|---|
-  | `MICA_API_URL` | OpenAI-compatible 服务的基础 URL（含 `/v1`） |
+  | `MICA_API_URL` | OpenAI-compatible 服务的 base URL 或完整 Chat Completions 端点；base URL 下会自动拼接 `/chat/completions`，`/v1` 只是常见路径示例，并非强制要求 |
   | `MICA_API_KEY` | 服务 API Key |
   | `MICA_MODEL` | 模型名称 |
 
-  示例：
+  示例（Windows PowerShell）：
+
+  ```powershell
+  $env:MICA_API_URL = "https://api.example.com/v1"
+  $env:MICA_API_KEY = "sk-your-key-here"   # 仅示例占位，请勿使用真实凭据
+  $env:MICA_MODEL = "your-model"
+  mica cli
+  ```
+
+  示例（Bash/zsh）：
 
   ```bash
   export MICA_API_URL="https://api.example.com/v1"
@@ -28,7 +37,7 @@ Mica 是一个面向个人开发者的轻量 Agent 基座，当前正从 Generic
 - 支持 OpenAI-compatible Chat Completions 的流式输出（SSE），文本增量实时写出。
 - 进程内多轮历史：同一会话的后续请求携带完整前文。
 - 分类错误诊断与有限重试：鉴权、限流、超时与临时服务端错误按类别报告，仅对可重试类别重试。
-- `Ctrl+C` 可取消进行中的请求并清理退出；输入 `Ctrl+D`（EOF）正常结束。
+- `Ctrl+C` 可取消进行中的请求并清理退出；EOF 正常结束（Windows 下按 `Ctrl+Z` 再按 `Enter`，Unix/macOS 下按 `Ctrl+D`）。
 - 会话退出后**不保存**任何会话内容。
 
 当前 **没有** 配置文件、工具调用、权限系统、TUI、斜杠命令或扩展系统；也不保证兼容所有 OpenAI-compatible 服务（协议差异限定在 Provider 适配边界内处理）。

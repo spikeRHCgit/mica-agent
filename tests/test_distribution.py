@@ -5,6 +5,7 @@ import subprocess
 import tarfile
 import venv
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,13 +31,20 @@ PROHIBITED_SDIST_PATHS = {
 
 
 @dataclass(frozen=True)
+class BuiltDistribution:
+    wheel: Path
+    sdist: Path
+
+
+@dataclass(frozen=True)
 class InstalledDistribution:
     python: Path
     mica: Path
     outside_repository: Path
     home: Path
-    wheel: Path
-    sdist: Path
+
+
+EntryFactory = Callable[[InstalledDistribution], list[str | Path]]
 
 
 def isolated_environment(home: Path) -> dict[str, str]:
@@ -75,9 +83,10 @@ def run_command(
 
 
 @pytest.fixture(scope="session")
-def installed_distribution(
+def built_distribution(
     tmp_path_factory: pytest.TempPathFactory,
-) -> InstalledDistribution:
+) -> BuiltDistribution:
+    """构建产物只生成一次，供裸安装与完整安装两个 fixture 复用。"""
     build_dir = tmp_path_factory.mktemp("distribution")
     build = run_command(
         ["uv", "build", "--offline", "--out-dir", build_dir],
@@ -89,25 +98,73 @@ def installed_distribution(
     sdist = build_dir / f"mica_agent-{VERSION}.tar.gz"
     assert wheel.is_file()
     assert sdist.is_file()
+    return BuiltDistribution(wheel=wheel, sdist=sdist)
 
-    home = tmp_path_factory.mktemp("home")
-    environment = tmp_path_factory.mktemp("environment") / "venv"
+
+def create_venv(root: Path) -> tuple[Path, Path, Path]:
+    """创建全新 Python 3.11 venv，返回 (environment, python, mica 入口)。"""
+    environment = root / "venv"
     venv.EnvBuilder(with_pip=True).create(environment)
     scripts = environment / ("Scripts" if os.name == "nt" else "bin")
     python = scripts / ("python.exe" if os.name == "nt" else "python")
     mica = scripts / ("mica.exe" if os.name == "nt" else "mica")
+    return environment, python, mica
+
+
+@pytest.fixture(scope="session")
+def bare_distribution(
+    tmp_path_factory: pytest.TempPathFactory,
+    built_distribution: BuiltDistribution,
+) -> InstalledDistribution:
+    """裸安装环境：只装 Mica wheel，不安装任何运行依赖（含 httpx）。"""
+    root = tmp_path_factory.mktemp("bare-environment")
+    home = tmp_path_factory.mktemp("bare-home")
+    environment, python, mica = create_venv(root)
 
     install = run_command(
-        ["uv", "pip", "install", "--offline", "--no-deps", "--python", python, wheel],
-        cwd=build_dir,
+        [
+            "uv",
+            "pip",
+            "install",
+            "--offline",
+            "--no-deps",
+            "--python",
+            python,
+            built_distribution.wheel,
+        ],
+        cwd=root,
         home=home,
     )
     assert install.returncode == 0, install.stderr
     assert mica.is_file()
 
-    # 补充安装锁定的运行时依赖，使安装态 `mica cli` 可以真实启动；
-    # 无依赖安装的旧契约测试仍针对同一 venv 保持有效。
-    install_dependencies = run_command(
+    missing_httpx = run_command(
+        [python, "-c", "import httpx"],
+        cwd=root,
+        home=home,
+    )
+    assert missing_httpx.returncode != 0
+    assert "No module named 'httpx'" in missing_httpx.stderr
+
+    return InstalledDistribution(
+        python=python,
+        mica=mica,
+        outside_repository=tmp_path_factory.mktemp("bare-outside-repository"),
+        home=home,
+    )
+
+
+@pytest.fixture(scope="session")
+def full_distribution(
+    tmp_path_factory: pytest.TempPathFactory,
+    built_distribution: BuiltDistribution,
+) -> InstalledDistribution:
+    """完整安装环境：uv 按 wheel 元数据解析并安装全部运行依赖。"""
+    root = tmp_path_factory.mktemp("full-environment")
+    home = tmp_path_factory.mktemp("full-home")
+    environment, python, mica = create_venv(root)
+
+    install = run_command(
         [
             "uv",
             "pip",
@@ -115,20 +172,26 @@ def installed_distribution(
             "--offline",
             "--python",
             python,
-            "httpx==0.28.1",
+            built_distribution.wheel,
         ],
-        cwd=build_dir,
+        cwd=root,
         home=home,
     )
-    assert install_dependencies.returncode == 0, install_dependencies.stderr
+    assert install.returncode == 0, install.stderr
+    assert mica.is_file()
+
+    has_httpx = run_command(
+        [python, "-c", "import httpx"],
+        cwd=root,
+        home=home,
+    )
+    assert has_httpx.returncode == 0, has_httpx.stderr
 
     return InstalledDistribution(
         python=python,
         mica=mica,
-        outside_repository=tmp_path_factory.mktemp("outside-repository"),
+        outside_repository=tmp_path_factory.mktemp("full-outside-repository"),
         home=home,
-        wheel=wheel,
-        sdist=sdist,
     )
 
 
@@ -143,9 +206,9 @@ def run_installed(
 
 
 def test_wheel_contains_only_mica_package_and_metadata(
-    installed_distribution: InstalledDistribution,
+    built_distribution: BuiltDistribution,
 ) -> None:
-    with zipfile.ZipFile(installed_distribution.wheel) as wheel:
+    with zipfile.ZipFile(built_distribution.wheel) as wheel:
         members = set(wheel.namelist())
 
     assert members
@@ -156,9 +219,9 @@ def test_wheel_contains_only_mica_package_and_metadata(
 
 
 def test_sdist_excludes_genericagent_implementation(
-    installed_distribution: InstalledDistribution,
+    built_distribution: BuiltDistribution,
 ) -> None:
-    with tarfile.open(installed_distribution.sdist) as sdist:
+    with tarfile.open(built_distribution.sdist) as sdist:
         members = [Path(member.name) for member in sdist.getmembers()]
 
     assert members
@@ -170,12 +233,12 @@ def test_sdist_excludes_genericagent_implementation(
 
 
 def test_installed_distribution_runtime_dependencies_are_only_httpx(
-    installed_distribution: InstalledDistribution,
+    bare_distribution: InstalledDistribution,
 ) -> None:
     result = run_installed(
-        installed_distribution,
+        bare_distribution,
         [
-            installed_distribution.python,
+            bare_distribution.python,
             "-c",
             "import importlib.metadata; print(importlib.metadata.requires('mica-agent'))",
         ],
@@ -196,19 +259,17 @@ def test_installed_distribution_runtime_dependencies_are_only_httpx(
     ],
 )
 def test_installed_public_entrypoints_match_contract(
-    installed_distribution: InstalledDistribution,
+    bare_distribution: InstalledDistribution,
     arguments: tuple[str, ...],
     returncode: int,
     stdout: str,
     stderr: str,
     description: str | None,
 ) -> None:
-    console = run_installed(
-        installed_distribution, [installed_distribution.mica, *arguments]
-    )
+    console = run_installed(bare_distribution, [bare_distribution.mica, *arguments])
     module = run_installed(
-        installed_distribution,
-        [installed_distribution.python, "-m", "mica_agent", *arguments],
+        bare_distribution,
+        [bare_distribution.python, "-m", "mica_agent", *arguments],
     )
 
     for result in console, module:
@@ -233,18 +294,18 @@ def test_installed_public_entrypoints_match_contract(
 
 
 def test_installed_import_is_silent_side_effect_free_and_outside_repository(
-    installed_distribution: InstalledDistribution,
+    bare_distribution: InstalledDistribution,
 ) -> None:
     before_workspace = {
-        path.relative_to(installed_distribution.outside_repository)
-        for path in installed_distribution.outside_repository.rglob("*")
+        path.relative_to(bare_distribution.outside_repository)
+        for path in bare_distribution.outside_repository.rglob("*")
     }
     before_home = {
-        path.relative_to(installed_distribution.home)
-        for path in installed_distribution.home.rglob("*")
+        path.relative_to(bare_distribution.home)
+        for path in bare_distribution.home.rglob("*")
     }
     repository = str(PROJECT_ROOT).replace("\\", "/")
-    environment = str(installed_distribution.python.parent.parent).replace("\\", "/")
+    environment = str(bare_distribution.python.parent.parent).replace("\\", "/")
     code = (
         "import os\n"
         "import sys\n"
@@ -267,16 +328,14 @@ def test_installed_import_is_silent_side_effect_free_and_outside_repository(
         "assert {thread.ident for thread in threading.enumerate()} == threads_before\n"
         "assert not os.path.exists(os.path.join(os.environ['HOME'], '.mica'))\n"
     )
-    result = run_installed(
-        installed_distribution, [installed_distribution.python, "-c", code]
-    )
+    result = run_installed(bare_distribution, [bare_distribution.python, "-c", code])
     after_workspace = {
-        path.relative_to(installed_distribution.outside_repository)
-        for path in installed_distribution.outside_repository.rglob("*")
+        path.relative_to(bare_distribution.outside_repository)
+        for path in bare_distribution.outside_repository.rglob("*")
     }
     after_home = {
-        path.relative_to(installed_distribution.home)
-        for path in installed_distribution.home.rglob("*")
+        path.relative_to(bare_distribution.home)
+        for path in bare_distribution.home.rglob("*")
     }
 
     assert result.returncode == 0, result.stderr
@@ -316,17 +375,17 @@ def snapshot_files(root: Path) -> set[Path]:
 @pytest.mark.parametrize(
     "entry",
     [
-        ("console", lambda d: [d.mica, "cli"]),
-        ("module", lambda d: [d.python, "-m", "mica_agent", "cli"]),
+        pytest.param(lambda d: [d.mica, "cli"], id="console"),
+        pytest.param(lambda d: [d.python, "-m", "mica_agent", "cli"], id="module"),
     ],
 )
 def test_installed_cli_exits_cleanly_on_blank_input_eof(
-    installed_distribution: InstalledDistribution,
-    entry: tuple[str, object],
+    full_distribution: InstalledDistribution,
+    entry: EntryFactory,
 ) -> None:
-    """安装态 `mica cli`：空白输入 + EOF 后退出码 0，无输出、无副作用。"""
-    dist = installed_distribution
-    command = entry[1](dist)
+    """完整安装态 `mica cli`：空白输入 + EOF 后退出码 0，无输出、无副作用。"""
+    dist = full_distribution
+    command = entry(dist)
     before_workspace = snapshot_files(dist.outside_repository)
     before_home = snapshot_files(dist.home)
 
@@ -349,29 +408,24 @@ def test_installed_cli_exits_cleanly_on_blank_input_eof(
     assert "Traceback" not in result.stderr
 
 
-@pytest.mark.parametrize(
-    "entry",
-    [
-        ("console", lambda d: [d.mica, "cli"]),
-        ("module", lambda d: [d.python, "-m", "mica_agent", "cli"]),
-    ],
-)
 def test_installed_cli_missing_environment_variables_exit_two(
-    installed_distribution: InstalledDistribution,
-    entry: tuple[str, object],
+    full_distribution: InstalledDistribution,
 ) -> None:
-    """安装态 `mica cli` 缺环境变量：退出码 2，诊断一致，stdout 为空。"""
-    dist = installed_distribution
+    """完整安装态 `mica cli` 缺环境变量：两入口各执行一次，退出码 2、诊断一致。"""
+    dist = full_distribution
+    console: EntryFactory = lambda d: [d.mica, "cli"]
+    module: EntryFactory = lambda d: [d.python, "-m", "mica_agent", "cli"]
     results = [
         run_command(
-            entry[1](dist),
+            console(dist),
             cwd=dist.outside_repository,
             environment=cli_environment(dist.home, fake_credentials=False),
-        )
-        for entry in (
-            ("console", lambda d: [d.mica, "cli"]),
-            ("module", lambda d: [d.python, "-m", "mica_agent", "cli"]),
-        )
+        ),
+        run_command(
+            module(dist),
+            cwd=dist.outside_repository,
+            environment=cli_environment(dist.home, fake_credentials=False),
+        ),
     ]
 
     for result in results:
