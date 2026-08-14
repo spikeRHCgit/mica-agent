@@ -155,24 +155,28 @@ async def _interact(
             return
         if not line.strip():
             continue
+        has_output = False
         ends_with_newline = False
         try:
             async with aclosing(app.run(line)) as stream:
                 async for event in stream:
                     if isinstance(event, TextDelta):
+                        # 空字符串也原样写出，但不改变换行状态。
                         write_out(event.text)
-                        ends_with_newline = event.text.endswith("\n")
-                    elif isinstance(event, RunCompleted):
-                        if not ends_with_newline:
+                        if event.text:
+                            has_output = True
+                            ends_with_newline = event.text.endswith("\n")
+                    elif isinstance(event, (RunCompleted, RunFailed, RunCancelled)):
+                        # 有非空文本且未以换行结尾时才补一个必要换行；
+                        # 无文本的终态不得向 stdout 写空行。
+                        if has_output and not ends_with_newline:
                             write_out("\n")
-                    elif isinstance(event, RunFailed):
-                        if not ends_with_newline:
-                            write_out("\n")
-                        write_err(f"error: {event.category.value}: {event.message}\n")
-                    elif isinstance(event, RunCancelled):
-                        if not ends_with_newline:
-                            write_out("\n")
-                        write_err("cancelled\n")
+                        if isinstance(event, RunFailed):
+                            write_err(
+                                f"error: {event.category.value}: {event.message}\n"
+                            )
+                        elif isinstance(event, RunCancelled):
+                            write_err("cancelled\n")
         except asyncio.CancelledError:
             # 活动 Run 被取消：事件流已由 aclosing 清理，退出 CLI。
             return

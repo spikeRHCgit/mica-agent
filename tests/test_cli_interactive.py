@@ -75,15 +75,17 @@ class ScriptedProvider:
 
 
 class HangingProvider:
-    """产出部分文本后挂起的测试替身，用于活动 Run 取消。"""
+    """挂起的测试替身：可选先产出部分文本，用于活动 Run 取消。"""
 
-    def __init__(self) -> None:
+    def __init__(self, emit_delta: bool = True) -> None:
+        self._emit_delta = emit_delta
         self.requests: list[ProviderRequest] = []
         self.aclose_calls = 0
 
     async def stream(self, request: ProviderRequest) -> AsyncIterator[ProviderEvent]:
         self.requests.append(request)
-        yield ProviderTextDelta(text="partial")
+        if self._emit_delta:
+            yield ProviderTextDelta(text="partial")
         await asyncio.sleep(30)
         yield Finish()
 
@@ -309,7 +311,7 @@ def test_failed_run_renders_category_and_message_then_allows_next_turn() -> None
     assert provider.aclose_calls == 1
     assert err.text == "error: authentication: bad key\n"
     assert "error:" not in out.text
-    assert out.text == "\nok\n"  # 失败轮无文本，终态补换行；下一轮正常
+    assert out.text == "ok\n"  # 失败轮无文本：不写空行；下一轮正常
     assert len(provider.requests) == 2
 
 
@@ -427,3 +429,156 @@ def test_every_exit_path_closes_event_stream_and_app() -> None:
         code, _, _ = asyncio.run(run_core(provider, *inputs))
         assert code == 0
         assert provider.aclose_calls == 1
+
+
+# ---------------------------------------------------------------------------
+# 终态换行状态（P2-04 返工）
+# ---------------------------------------------------------------------------
+
+
+def test_failed_run_without_text_leaves_stdout_empty() -> None:
+    provider = ScriptedProvider(
+        [[ProviderErrorEvent(error=AuthenticationError("denied"))]]
+    )
+
+    code, out, err = asyncio.run(run_core(provider, "q"))
+
+    assert code == 0
+    assert out.text == ""  # 无文本：不得写空行
+    assert err.text == "error: authentication: denied\n"  # 诊断只进 stderr
+
+
+def test_empty_text_delta_does_not_change_newline_state() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderTextDelta(text="line\n"),
+                ProviderTextDelta(text=""),
+                Finish(),
+            ]
+        ]
+    )
+
+    code, out, _ = asyncio.run(run_core(provider, "q"))
+
+    assert code == 0
+    assert out.text == "line\n"  # 空 delta 原样写出但不重置换行状态
+
+
+def test_failed_run_after_partial_text_ends_line_once() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderTextDelta(text="partial"),
+                ProviderErrorEvent(error=AuthenticationError("boom")),
+            ]
+        ]
+    )
+
+    code, out, err = asyncio.run(run_core(provider, "q"))
+
+    assert code == 0
+    assert out.text == "partial\n"  # 未以换行结尾时只补一个换行
+    assert err.text == "error: authentication: boom\n"
+
+
+def test_failed_run_after_text_ending_in_newline_does_not_add_blank_line() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderTextDelta(text="partial\n"),
+                ProviderErrorEvent(error=AuthenticationError("boom")),
+            ]
+        ]
+    )
+
+    code, out, err = asyncio.run(run_core(provider, "q"))
+
+    assert code == 0
+    assert out.text == "partial\n"  # 已以换行结尾：不重复补
+    assert err.text == "error: authentication: boom\n"
+
+
+def test_cancelled_run_without_text_keeps_stdout_empty() -> None:
+    provider = HangingProvider(emit_delta=False)
+    out = Recorder()
+    err = Recorder()
+
+    async def main() -> int:
+        task = asyncio.create_task(
+            run_interactive(
+                "https://api.example.test/v1",
+                SECRET_KEY,
+                "test-model",
+                provider_factory=lambda url, key: provider,
+                read_line=InputScript("question"),
+                write_out=out,
+                write_err=err,
+            )
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        return await task
+
+    code = asyncio.run(main())
+
+    assert code == 0
+    assert provider.aclose_calls == 1
+    assert out.text == ""  # 无文本取消：不写空行
+    assert err.text == "cancelled\n"
+
+
+# ---------------------------------------------------------------------------
+# 纯空白环境变量（P2-04 返工）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("variable", "blank"),
+    [
+        ("MICA_MODEL", "   "),
+        ("MICA_MODEL", "\t\n"),
+        ("MICA_API_URL", "   "),
+        ("MICA_API_KEY", "   "),
+    ],
+)
+def test_cli_blank_environment_variable_is_rejected(
+    variable: str,
+    blank: str,
+) -> None:
+    # 审计钩子证明：空白配置被拒绝的路径上没有任何网络/子进程副作用。
+    code = (
+        "import sys\n"
+        "sys.argv = ['mica', 'cli']\n"
+        "def reject(event, arguments):\n"
+        "    if event in {'socket.connect', 'socket.getaddrinfo', 'subprocess.Popen'}:\n"
+        "        raise RuntimeError('prohibited network access')\n"
+        "    if event == 'open' and any(flag in str(arguments[1]) for flag in ('w', 'a', 'x', '+')):\n"
+        "        raise RuntimeError('prohibited write')\n"
+        "sys.addaudithook(reject)\n"
+        "import mica_agent\n"
+        "from mica_agent.cli import main\n"
+        "main()\n"
+    )
+    env = clean_environment()
+    env.update(
+        MICA_API_URL="https://api.example.test/v1",
+        MICA_API_KEY=SECRET_KEY,
+        MICA_MODEL="test-model",
+    )
+    env[variable] = blank
+    env["PYTHONPATH"] = str(SRC)
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert variable in result.stderr
+    assert result.stdout == ""
+    assert SECRET_KEY not in result.stderr
+    assert "RuntimeError" not in result.stderr  # 未触发审计拦截（无网络请求）
