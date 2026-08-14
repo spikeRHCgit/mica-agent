@@ -136,7 +136,12 @@ class AgentEngine:
 
     @staticmethod
     def _error_message(error: object) -> str:
-        """面向用户的诊断：只使用 ProviderError 已清洗的公开字符串。"""
+        """面向用户的诊断：只使用 ProviderError 已清洗的公开字符串。
+
+        空字符串与纯空白字符串统一转换为固定安全文案，保证
+        ``RunFailed.message`` 永远非空；错误类别不受影响。
+        """
         if isinstance(error, ProviderError):
-            return str(error) or "provider error"
+            message = str(error)
+            return message if message.strip() else "provider error"
         return "provider produced an unknown error"

@@ -225,6 +225,21 @@ def test_credentials_never_leak_through_run_failed_message() -> None:
     assert "Bearer" in failed.message  # 保留清洗后的可读诊断
 
 
+@pytest.mark.parametrize("message", ["", "   ", "\t\n"])
+def test_blank_provider_error_message_keeps_original_category(
+    message: str,
+) -> None:
+    # 空/纯空白诊断统一转为固定安全文案，但类别由错误类型决定。
+    engine = _engine([ProviderErrorEvent(error=AuthenticationError(message))])
+
+    events = _run_collect(engine, _request())
+
+    failed = events[-1]
+    assert isinstance(failed, RunFailed)
+    assert failed.category is ErrorCategory.AUTHENTICATION
+    assert failed.message.strip()  # 非空、非纯空白的公开诊断
+
+
 # ---------------------------------------------------------------------------
 # 畸形与未知事件
 # ---------------------------------------------------------------------------

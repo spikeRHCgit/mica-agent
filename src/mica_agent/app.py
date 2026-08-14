@@ -70,6 +70,20 @@ class MicaApp:
         await self._provider.aclose()
 
     async def run(self, prompt: str) -> AsyncIterator[EngineEvent]:
+        """启动一次 Run，产出 Engine 事件流。
+
+        调用方式：
+
+        .. code-block:: python
+
+            async for event in app.run(prompt):
+                ...
+
+        消费者若在收到终态（``RunCompleted`` / ``RunFailed`` /
+        ``RunCancelled``）之前提前停止消费，必须显式关闭事件流
+        （``await stream.aclose()`` 或 ``contextlib.aclosing``），
+        否则活动状态（并发保护）不会立即释放，历史也不会提交。
+        """
         if self._closed:
             raise AppClosedError("app is closed; cannot start a new run")
         if not isinstance(prompt, str):

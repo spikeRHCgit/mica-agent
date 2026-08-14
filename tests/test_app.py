@@ -255,27 +255,39 @@ def test_cancelled_run_rolls_back_history() -> None:
     assert app.history == ()  # 取消不提交任何内容
 
 
-def test_consumer_abandoning_stream_rolls_back_history() -> None:
+def test_consumer_closing_stream_releases_active_state_and_rolls_back() -> None:
     provider = _ScriptedProvider(
         [
             [
                 ProviderTextDelta(text="partial"),
                 ProviderTextDelta(text=" more"),
                 Finish(),
-            ]
+            ],
+            [ProviderTextDelta(text="second ok"), Finish()],
         ]
     )
     app = _make_app(provider)
 
     async def main() -> None:
+        # 显式保存事件流，消费部分事件后关闭，不依赖事件循环清理。
+        stream = app.run("question")
         collected: list[EngineEvent] = []
-        async for event in app.run("question"):
+        async for event in stream:
             collected.append(event)
-            break  # 消费者提前关闭事件流
+            if isinstance(event, TextDelta):
+                break
+        await stream.aclose()
+        # 同一事件循环内立即启动第二个 Run：活动状态必须已释放。
+        second = await _collect(app, "follow-up")
+        assert isinstance(second[-1], RunCompleted)
 
     asyncio.run(main())
 
-    assert app.history == ()  # 未收到 RunCompleted → 全部回滚
+    # 第一轮未收到 RunCompleted → 全部回滚；第二轮正常提交。
+    assert app.history == (
+        _user("follow-up"),
+        _assistant("second ok"),
+    )
 
 
 # ---------------------------------------------------------------------------
