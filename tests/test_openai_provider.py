@@ -133,6 +133,16 @@ def test_provider_conforms_to_public_contract() -> None:
     assert isinstance(provider, Provider)
 
 
+def test_provider_conforms_to_extended_protocol_with_aclose() -> None:
+    # P2-03：Provider Protocol 增加 aclose 后，生产实现必须继续符合。
+    provider = make_provider(lambda request: httpx.Response(200, request=request))
+
+    assert isinstance(provider, Provider)
+    assert hasattr(provider, "aclose")
+    asyncio.run(provider.aclose())
+    asyncio.run(provider.aclose())  # 幂等
+
+
 def test_request_uses_post_with_resolved_endpoint() -> None:
     captured: dict[str, object] = {}
 

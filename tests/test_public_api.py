@@ -10,7 +10,7 @@ import subprocess
 import sys
 
 import mica_agent
-from mica_agent import EngineEvent, ErrorCategory, RunStatus
+from mica_agent import AgentEngine, EngineEvent, ErrorCategory, MicaApp, RunStatus
 from mica_agent.events import (
     RunCancelled,
     RunCompleted,
@@ -46,6 +46,15 @@ def test_top_level_exports_models_and_events() -> None:
     assert mica_agent.EngineEvent is EngineEvent
     assert mica_agent.RunStatus is RunStatus
     assert mica_agent.ErrorCategory is ErrorCategory
+
+
+def test_top_level_exports_engine_and_app() -> None:
+    assert mica_agent.AgentEngine is AgentEngine
+    assert mica_agent.MicaApp is MicaApp
+    assert mica_agent.RunStarted is RunStarted
+    assert mica_agent.RunCompleted is RunCompleted
+    assert mica_agent.RunFailed is RunFailed
+    assert mica_agent.RunCancelled is RunCancelled
 
 
 def test_events_are_importable_from_events_module() -> None:
