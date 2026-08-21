@@ -118,6 +118,7 @@ sche_tasks/
 assets/tmwd_cdp_bridge/config.js
 assets/copilot_proxy.pyw
 **log.*
+!docs/phase*_build_log.md
 
 # Reflect (ignore new files, whitelist existing)
 reflect/*

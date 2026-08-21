@@ -17,8 +17,20 @@ from .events import (
     TextDelta,
 )
 from .models import Message, MessageRole
+from .session_contracts import (
+    CURRENT_SESSION_FORMAT_VERSION,
+    SessionError,
+    SessionFormatError,
+    SessionMeta,
+    SessionRecord,
+    SessionRecordType,
+    TurnEntry,
+    deserialize_session_record,
+    serialize_session_record,
+)
 
 __all__ = [
+    "CURRENT_SESSION_FORMAT_VERSION",
     "AgentEngine",
     "EngineEvent",
     "ErrorCategory",
@@ -30,7 +42,15 @@ __all__ = [
     "RunFailed",
     "RunStarted",
     "RunStatus",
+    "SessionError",
+    "SessionFormatError",
+    "SessionMeta",
+    "SessionRecord",
+    "SessionRecordType",
     "TextDelta",
+    "TurnEntry",
+    "deserialize_session_record",
+    "serialize_session_record",
 ]
 
 

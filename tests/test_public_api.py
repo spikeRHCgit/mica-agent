@@ -10,7 +10,22 @@ import subprocess
 import sys
 
 import mica_agent
-from mica_agent import AgentEngine, EngineEvent, ErrorCategory, MicaApp, RunStatus
+from mica_agent import (
+    CURRENT_SESSION_FORMAT_VERSION,
+    AgentEngine,
+    EngineEvent,
+    ErrorCategory,
+    MicaApp,
+    RunStatus,
+    SessionError,
+    SessionFormatError,
+    SessionMeta,
+    SessionRecord,
+    SessionRecordType,
+    TurnEntry,
+    deserialize_session_record,
+    serialize_session_record,
+)
 from mica_agent.events import (
     RunCancelled,
     RunCompleted,
@@ -38,6 +53,33 @@ from mica_agent.providers import (
 from mica_agent.providers import (
     TextDelta as ProviderTextDelta,
 )
+from mica_agent.session_contracts import (
+    CURRENT_SESSION_FORMAT_VERSION as ContractsFormatVersion,
+)
+from mica_agent.session_contracts import (
+    SessionError as ContractsSessionError,
+)
+from mica_agent.session_contracts import (
+    SessionFormatError as ContractsSessionFormatError,
+)
+from mica_agent.session_contracts import (
+    SessionMeta as ContractsSessionMeta,
+)
+from mica_agent.session_contracts import (
+    SessionRecord as ContractsSessionRecord,
+)
+from mica_agent.session_contracts import (
+    SessionRecordType as ContractsSessionRecordType,
+)
+from mica_agent.session_contracts import (
+    TurnEntry as ContractsTurnEntry,
+)
+from mica_agent.session_contracts import (
+    deserialize_session_record as contracts_deserialize_session_record,
+)
+from mica_agent.session_contracts import (
+    serialize_session_record as contracts_serialize_session_record,
+)
 
 
 def test_top_level_exports_models_and_events() -> None:
@@ -55,6 +97,18 @@ def test_top_level_exports_engine_and_app() -> None:
     assert mica_agent.RunCompleted is RunCompleted
     assert mica_agent.RunFailed is RunFailed
     assert mica_agent.RunCancelled is RunCancelled
+
+
+def test_top_level_exports_session_contracts() -> None:
+    assert CURRENT_SESSION_FORMAT_VERSION == ContractsFormatVersion == 1
+    assert SessionMeta is ContractsSessionMeta
+    assert TurnEntry is ContractsTurnEntry
+    assert SessionRecord is ContractsSessionRecord
+    assert SessionRecordType is ContractsSessionRecordType
+    assert SessionError is ContractsSessionError
+    assert SessionFormatError is ContractsSessionFormatError
+    assert serialize_session_record is contracts_serialize_session_record
+    assert deserialize_session_record is contracts_deserialize_session_record
 
 
 def test_events_are_importable_from_events_module() -> None:
@@ -87,6 +141,22 @@ def test_models_module_is_independent_of_providers_and_events() -> None:
     code = (
         "import sys\n"
         "import mica_agent.models\n"
+        "assert 'mica_agent.providers' not in sys.modules\n"
+        "assert 'mica_agent.cli' not in sys.modules\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_top_level_import_keeps_runtime_and_provider_modules_lazy() -> None:
+    code = (
+        "import sys\n"
+        "import mica_agent\n"
+        "assert 'mica_agent.app' not in sys.modules\n"
+        "assert 'mica_agent.engine' not in sys.modules\n"
         "assert 'mica_agent.providers' not in sys.modules\n"
         "assert 'mica_agent.cli' not in sys.modules\n"
     )
