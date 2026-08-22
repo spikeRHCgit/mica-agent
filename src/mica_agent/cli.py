@@ -19,14 +19,20 @@ import sys
 import threading
 from collections.abc import Awaitable, Callable
 from contextlib import aclosing
+from datetime import datetime
 from importlib.metadata import version
-from typing import TYPE_CHECKING, TypeAlias
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal, TypeAlias
 
-from .events import (
-    RunCancelled,
-    RunCompleted,
-    RunFailed,
-    TextDelta,
+from .context_builder import ContextBuilder
+from .events import RunCancelled, RunCompleted, RunFailed, TextDelta
+from .jsonl_store import JsonlSessionStore, StoredSession
+from .session_service import NoHealthySessionError, SessionService
+from .workspace import (
+    WorkspaceIdentity,
+    WorkspaceResolutionError,
+    default_data_root,
+    resolve_workspace,
 )
 
 if TYPE_CHECKING:
@@ -36,6 +42,9 @@ if TYPE_CHECKING:
 ReadLine: TypeAlias = Callable[[], Awaitable[str]]
 Write: TypeAlias = Callable[[str], None]
 ProviderFactory: TypeAlias = Callable[[str, str], "Provider"]
+TurnIdFactory: TypeAlias = Callable[[], str]
+Clock: TypeAlias = Callable[[], datetime]
+SessionMode: TypeAlias = Literal["new", "continue", "resume"]
 
 _ENVIRONMENT_VARIABLES = ("MICA_API_URL", "MICA_API_KEY", "MICA_MODEL")
 
@@ -51,16 +60,32 @@ def main() -> None:
         version=f"%(prog)s {version('mica-agent')}",
     )
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
-    subparsers.add_parser(
+    cli_parser = subparsers.add_parser(
         "cli",
         help="start the interactive chat CLI",
         description="Interactive text chat with an OpenAI-compatible provider.",
     )
+    selection = cli_parser.add_mutually_exclusive_group()
+    selection.add_argument(
+        "--continue",
+        dest="session_mode",
+        action="store_const",
+        const="continue",
+        help="continue the current workspace's last active session",
+    )
+    selection.add_argument(
+        "--resume",
+        dest="session_mode",
+        action="store_const",
+        const="resume",
+        help="choose a healthy session from the current workspace",
+    )
+    cli_parser.set_defaults(session_mode="new")
     args = parser.parse_args()
     if args.command is None:
         parser.print_help()
         return
-    sys.exit(_main_cli())
+    sys.exit(_main_cli(args.session_mode))
 
 
 def _load_config() -> tuple[str, str, str] | None:
@@ -76,7 +101,7 @@ def _load_config() -> tuple[str, str, str] | None:
     return tuple(values[name].strip() for name in _ENVIRONMENT_VARIABLES)  # type: ignore[return-value]
 
 
-def _main_cli() -> int:
+def _main_cli(session_mode: SessionMode = "new") -> int:
     """mica cli 同步入口：手动事件循环以支持 Ctrl+C 优雅退出。"""
     config = _load_config()
     if config is None:
@@ -85,7 +110,14 @@ def _main_cli() -> int:
     loop = asyncio.new_event_loop()
     try:
         asyncio.set_event_loop(loop)
-        task = loop.create_task(run_interactive(api_url, api_key, model))
+        task = loop.create_task(
+            run_interactive(
+                api_url,
+                api_key,
+                model,
+                session_mode=session_mode,
+            )
+        )
         try:
             loop.run_until_complete(task)
         except KeyboardInterrupt:
@@ -107,36 +139,224 @@ async def run_interactive(
     api_key: str,
     model: str,
     *,
+    session_mode: SessionMode = "new",
     provider_factory: ProviderFactory | None = None,
     read_line: ReadLine | None = None,
     write_out: Write | None = None,
     write_err: Write | None = None,
+    workspace: WorkspaceIdentity | None = None,
+    data_root: Path | str | None = None,
+    session_service: SessionService | None = None,
+    context_builder: ContextBuilder | None = None,
+    turn_id_factory: TurnIdFactory | None = None,
+    clock: Clock | None = None,
 ) -> int:
-    """一次完整 CLI 会话：装配 → 多轮交互 → 关闭。
-
-    Provider 与 App 只装配一次；任何退出路径（EOF、Ctrl+C、
-    正常结束）都会关闭事件流与 App。``api_key`` 只传给工厂，
-    永不进入任何输出。
-
-    App/Provider 在函数内惰性导入：``mica --version``/``--help``
-    等基础入口不依赖 httpx 即可启动。
-    """
-    from .app import MicaApp
-
+    """装配会话、上下文、Provider 与 App，再进入基础交互。"""
+    if session_mode not in {"new", "continue", "resume"}:
+        raise ValueError("session_mode must be new, continue, or resume")
     factory = provider_factory or _default_provider_factory
     read = read_line or _default_read_line
     out = write_out or _default_write
     err = write_err or _default_write_err
-    provider = factory(api_url, api_key)
-    app = MicaApp(provider=provider, model=model)
+
+    try:
+        _, service, builder = _assemble_session(
+            workspace=workspace,
+            data_root=data_root,
+            session_service=session_service,
+            context_builder=context_builder,
+        )
+    except WorkspaceResolutionError:
+        err("mica: unable to resolve the current workspace\n")
+        return 2
+    except Exception:  # noqa: BLE001 - startup diagnostics must stay safe
+        err("mica: unable to initialize session storage\n")
+        return 2
+
+    selected = await _select_session(service, session_mode, read, out, err)
+    if selected is None:
+        return 2
+    return await _run_selected_session(
+        api_url,
+        api_key,
+        model,
+        service,
+        builder,
+        selected,
+        factory,
+        read,
+        out,
+        err,
+        turn_id_factory,
+        clock,
+    )
+
+
+async def _run_selected_session(
+    api_url: str,
+    api_key: str,
+    model: str,
+    service: SessionService,
+    builder: ContextBuilder,
+    selected: StoredSession,
+    factory: ProviderFactory,
+    read: ReadLine,
+    out: Write,
+    err: Write,
+    turn_id_factory: TurnIdFactory | None,
+    clock: Clock | None,
+) -> int:
+    from .app import MicaApp
+
+    session_id = selected.meta.session_id
+    _report_cleanup(service, session_id, err)
+    try:
+        context = builder.build(service.context_snapshot(session_id))
+    except Exception:  # noqa: BLE001 - do not expose storage details
+        err("mica: unable to prepare session context\n")
+        return 2
+    for diagnostic in context.diagnostics:
+        err(f"warning: {diagnostic.message}\n")
+
+    try:
+        provider = factory(api_url, api_key)
+    except Exception:  # noqa: BLE001 - provider details may contain secrets
+        err("mica: unable to initialize provider\n")
+        return 2
+    try:
+        app = MicaApp(
+            provider=provider,
+            model=model,
+            session_service=service,
+            session_id=session_id,
+            context_builder=builder,
+            turn_id_factory=turn_id_factory,
+            clock=clock,
+        )
+    except Exception:  # noqa: BLE001 - startup diagnostics must stay safe
+        await provider.aclose()
+        err("mica: unable to initialize application\n")
+        return 2
+
     try:
         await _interact(app, read, out, err)
     except asyncio.CancelledError:
         # Ctrl+C：取消当前 Run 后完成清理并正常退出。
         pass
+    except Exception:  # noqa: BLE001 - do not expose session details
+        err("error: session unavailable\n")
+        return 2
     finally:
         await app.aclose()
     return 0
+
+
+def _assemble_session(
+    *,
+    workspace: WorkspaceIdentity | None,
+    data_root: Path | str | None,
+    session_service: SessionService | None,
+    context_builder: ContextBuilder | None,
+) -> tuple[WorkspaceIdentity, SessionService, ContextBuilder]:
+    if session_service is not None and not isinstance(session_service, SessionService):
+        raise TypeError("session_service must be a SessionService")
+    if workspace is None:
+        workspace = (
+            session_service.store.workspace
+            if session_service is not None
+            else resolve_workspace(Path.cwd())
+        )
+    elif not isinstance(workspace, WorkspaceIdentity):
+        raise TypeError("workspace must be a WorkspaceIdentity")
+    if session_service is None:
+        root = default_data_root() if data_root is None else data_root
+        session_service = SessionService(JsonlSessionStore(workspace, root))
+    elif session_service.store.workspace != workspace:
+        raise ValueError("session service workspace does not match current workspace")
+    if context_builder is None:
+        root = session_service.store.data_root if data_root is None else data_root
+        context_builder = ContextBuilder(data_root=root, workspace=workspace)
+    elif not isinstance(context_builder, ContextBuilder):
+        raise TypeError("context_builder must be a ContextBuilder")
+    if context_builder.workspace != workspace:
+        raise ValueError("context builder workspace does not match current workspace")
+    return workspace, session_service, context_builder
+
+
+async def _select_session(
+    service: SessionService,
+    session_mode: SessionMode,
+    read_line: ReadLine,
+    write_out: Write,
+    write_err: Write,
+) -> StoredSession | None:
+    if session_mode == "new":
+        try:
+            return service.create_session()
+        except Exception:  # noqa: BLE001 - do not expose storage details
+            write_err("mica: unable to create session\n")
+            return None
+    if session_mode == "continue":
+        try:
+            return service.last_active_session()
+        except NoHealthySessionError:
+            write_err(
+                "mica: no healthy session in the current workspace; "
+                "use mica cli to create one\n"
+            )
+            return None
+        except Exception:  # noqa: BLE001 - do not expose storage details
+            write_err("mica: unable to select the last active session\n")
+            return None
+
+    try:
+        listed = service.list_sessions()
+    except Exception:  # noqa: BLE001 - do not expose storage details
+        write_err("mica: unable to list sessions\n")
+        return None
+    if listed.problems:
+        write_err("warning: some session files could not be read\n")
+    if not listed.sessions:
+        write_err(
+            "mica: no healthy session in the current workspace; "
+            "use mica cli to create one\n"
+        )
+        return None
+    for index, session in enumerate(listed.sessions, start=1):
+        title = session.meta.title.strip() or "untitled session"
+        write_out(f"{index}. {title}\n")
+    try:
+        choice = await read_line()
+    except asyncio.CancelledError:
+        raise
+    except (EOFError, KeyboardInterrupt):
+        write_err("mica: session selection requires a number\n")
+        return None
+    try:
+        if not choice.isascii() or not choice.isdecimal():
+            raise ValueError
+        selected_index = int(choice)
+    except (TypeError, ValueError, OverflowError):
+        write_err("mica: invalid session selection; enter a listed number\n")
+        return None
+    if not 1 <= selected_index <= len(listed.sessions):
+        write_err("mica: invalid session selection; enter a listed number\n")
+        return None
+    return listed.sessions[selected_index - 1]
+
+
+def _report_cleanup(service: SessionService, session_id: str, write_err: Write) -> None:
+    try:
+        result = service.cleanup_expired(current_session_id=session_id)
+    except Exception:  # noqa: BLE001 - cleanup must not block a healthy session
+        write_err("warning: session cleanup was not completed\n")
+        return
+    if (
+        result.problems
+        or result.skipped_locked_session_ids
+        or result.skipped_changed_session_ids
+    ):
+        write_err("warning: some expired sessions were not cleaned\n")
 
 
 async def _interact(

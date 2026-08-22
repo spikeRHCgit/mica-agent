@@ -16,10 +16,13 @@ import subprocess
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pytest
 
 from mica_agent.cli import run_interactive
+from mica_agent.context_builder import ContextBuilder
+from mica_agent.jsonl_store import JsonlSessionStore
 from mica_agent.models import Message, MessageRole
 from mica_agent.providers import (
     AuthenticationError,
@@ -31,6 +34,8 @@ from mica_agent.providers import (
 from mica_agent.providers import (
     TextDelta as ProviderTextDelta,
 )
+from mica_agent.session_service import SessionService
+from mica_agent.workspace import resolve_workspace
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC = PROJECT_ROOT / "src"
@@ -122,12 +127,27 @@ class Recorder:
         return "".join(self.calls)
 
 
+def make_session_dependencies(
+    provider: object,
+) -> tuple[SessionService, ContextBuilder]:
+    tempdir = TemporaryDirectory(prefix="mica-cli-test-")
+    root = Path(tempdir.name)
+    workspace_path = root / "workspace"
+    workspace_path.mkdir()
+    data_root = root / "mica-data"
+    workspace = resolve_workspace(workspace_path)
+    service = SessionService(JsonlSessionStore(workspace, data_root))
+    provider._mica_test_tempdir = tempdir  # type: ignore[attr-defined]
+    return service, ContextBuilder(data_root=data_root, workspace=workspace)
+
+
 async def run_core(
     provider: object,
     *inputs: object,
 ) -> tuple[int, Recorder, Recorder]:
     out = Recorder()
     err = Recorder()
+    service, context_builder = make_session_dependencies(provider)
     code = await run_interactive(
         "https://api.example.test/v1",
         SECRET_KEY,
@@ -136,6 +156,8 @@ async def run_core(
         read_line=InputScript(*inputs),
         write_out=out,
         write_err=err,
+        session_service=service,
+        context_builder=context_builder,
     )
     return code, out, err
 
@@ -354,6 +376,7 @@ def test_ctrl_c_during_active_run_cancels_stream_and_exits() -> None:
     provider = HangingProvider()
     out = Recorder()
     err = Recorder()
+    service, context_builder = make_session_dependencies(provider)
 
     async def main() -> int:
         task = asyncio.create_task(
@@ -365,6 +388,8 @@ def test_ctrl_c_during_active_run_cancels_stream_and_exits() -> None:
                 read_line=InputScript("question"),
                 write_out=out,
                 write_err=err,
+                session_service=service,
+                context_builder=context_builder,
             )
         )
         await asyncio.sleep(0.05)  # 等待 Provider 产出部分文本并挂起
@@ -389,22 +414,9 @@ def test_api_key_never_appears_in_any_output() -> None:
             [ProviderErrorEvent(error=AuthenticationError("denied"))],
         ]
     )
-    out = Recorder()
-    err = Recorder()
+    code, out, err = asyncio.run(run_core(provider, "first", "second"))
 
-    async def main() -> None:
-        code = await run_interactive(
-            "https://api.example.test/v1",
-            SECRET_KEY,
-            "test-model",
-            provider_factory=lambda url, key: provider,
-            read_line=InputScript("first", "second"),
-            write_out=out,
-            write_err=err,
-        )
-        assert code == 0
-
-    asyncio.run(main())
+    assert code == 0
 
     assert SECRET_KEY not in out.text
     assert SECRET_KEY not in err.text
@@ -503,6 +515,7 @@ def test_cancelled_run_without_text_keeps_stdout_empty() -> None:
     provider = HangingProvider(emit_delta=False)
     out = Recorder()
     err = Recorder()
+    service, context_builder = make_session_dependencies(provider)
 
     async def main() -> int:
         task = asyncio.create_task(
@@ -514,6 +527,8 @@ def test_cancelled_run_without_text_keeps_stdout_empty() -> None:
                 read_line=InputScript("question"),
                 write_out=out,
                 write_err=err,
+                session_service=service,
+                context_builder=context_builder,
             )
         )
         await asyncio.sleep(0.05)

@@ -1,18 +1,24 @@
-"""MicaApp：进程内装配入口（P2-03）。
-
-App 负责校验输入、维护当前进程的消息历史、通过 AgentEngine
-运行单次 Run，并在 Run 成功时原子提交用户消息与完整助手回复。
-Engine 与 Provider 都通过公共契约使用，不读取 Provider 私有状态。
-"""
+"""MicaApp：Session Service 驱动的最小应用装配入口。"""
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import asyncio
+from collections.abc import AsyncIterator, Callable
+from contextlib import aclosing
+from datetime import UTC, datetime
+from uuid import uuid4
 
+from .context_builder import ContextBuilder
 from .engine import AgentEngine, RunIdFactory
-from .events import EngineEvent, RunCompleted, TextDelta
+from .events import EngineEvent, ErrorCategory, RunCompleted, RunFailed, TextDelta
 from .models import Message, MessageRole
 from .providers import Provider, ProviderRequest
+from .session_contracts import TurnEntry
+from .session_service import SessionService
+
+TurnIdFactory = Callable[[], str]
+Clock = Callable[[], datetime]
+_STORAGE_FAILURE_MESSAGE = "session persistence failed"
 
 
 class MicaAppError(Exception):
@@ -28,39 +34,60 @@ class AppClosedError(MicaAppError):
 
 
 class MicaApp:
-    """连接 CLI、Engine、Provider 与进程内历史的最小装配。"""
+    """连接 Session Service、Context Builder、Engine 与 Provider。"""
 
     def __init__(
         self,
         provider: Provider,
         model: str,
         *,
+        session_service: SessionService,
+        session_id: str,
+        context_builder: ContextBuilder,
         system_prompt: str | None = None,
         run_id_factory: RunIdFactory | None = None,
+        turn_id_factory: TurnIdFactory | None = None,
+        clock: Clock | None = None,
     ) -> None:
         if not isinstance(model, str):
             raise TypeError(f"model must be a str, got {type(model).__name__}")
         if not model.strip():
             raise ValueError("model must be a non-empty, non-blank string")
+        if not isinstance(session_service, SessionService):
+            raise TypeError("session_service must be a SessionService")
+        if not isinstance(session_id, str):
+            raise TypeError(
+                f"session_id must be a str, got {type(session_id).__name__}"
+            )
+        if not session_id.strip():
+            raise ValueError("session_id must be a non-empty, non-blank string")
+        if not isinstance(context_builder, ContextBuilder):
+            raise TypeError("context_builder must be a ContextBuilder")
         if system_prompt is not None and not isinstance(system_prompt, str):
             raise TypeError(
                 f"system_prompt must be a str or None, got {type(system_prompt).__name__}"
             )
         self._model = model
         self._provider = provider
+        self._session_service = session_service
+        self._session_id = session_id
+        self._context_builder = context_builder
+        self._system_prompt = system_prompt
+        self._turn_id_factory = turn_id_factory or (lambda: uuid4().hex)
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._engine = AgentEngine(provider=provider, run_id_factory=run_id_factory)
-        self._history: list[Message] = []
-        if system_prompt is not None:
-            self._history.append(
-                Message(role=MessageRole.SYSTEM, content=system_prompt)
-            )
         self._active_run = False
         self._closed = False
 
     @property
+    def session_id(self) -> str:
+        """当前 App 绑定的会话 ID。"""
+        return self._session_id
+
+    @property
     def history(self) -> tuple[Message, ...]:
-        """当前已提交历史的不可变快照。"""
-        return tuple(self._history)
+        """从 Session Service 重新取得的不可变持久化历史快照。"""
+        return self._session_service.context_snapshot(self._session_id)
 
     async def aclose(self) -> None:
         """关闭 Provider 并标记 App 不可再运行；重复调用安全。"""
@@ -70,20 +97,7 @@ class MicaApp:
         await self._provider.aclose()
 
     async def run(self, prompt: str) -> AsyncIterator[EngineEvent]:
-        """启动一次 Run，产出 Engine 事件流。
-
-        调用方式：
-
-        .. code-block:: python
-
-            async for event in app.run(prompt):
-                ...
-
-        消费者若在收到终态（``RunCompleted`` / ``RunFailed`` /
-        ``RunCancelled``）之前提前停止消费，必须显式关闭事件流
-        （``await stream.aclose()`` 或 ``contextlib.aclosing``），
-        否则活动状态（并发保护）不会立即释放，历史也不会提交。
-        """
+        """启动一次 Run，并仅在 RunCompleted 后提交完整 TurnEntry。"""
         if self._closed:
             raise AppClosedError("app is closed; cannot start a new run")
         if not isinstance(prompt, str):
@@ -92,23 +106,70 @@ class MicaApp:
             raise ValueError("prompt must be a non-empty, non-blank string")
         if self._active_run:
             raise AppBusyError("another run is already active")
+
         self._active_run = True
         user_message = Message(role=MessageRole.USER, content=prompt)
-        request = ProviderRequest(
-            model=self._model,
-            messages=tuple(self._history) + (user_message,),
-        )
         parts: list[str] = []
         try:
-            async for event in self._engine.run(request):
-                if isinstance(event, TextDelta):
-                    parts.append(event.text)
-                elif isinstance(event, RunCompleted):
-                    # 原子提交：只有正常完成后同时提交用户与完整助手消息。
-                    self._history.append(user_message)
-                    self._history.append(
-                        Message(role=MessageRole.ASSISTANT, content="".join(parts))
-                    )
-                yield event
+            session_messages = self._session_service.context_snapshot(self._session_id)
+            context = self._context_builder.build(session_messages)
+            prefix = (
+                (Message(role=MessageRole.SYSTEM, content=self._system_prompt),)
+                if self._system_prompt is not None
+                else ()
+            )
+            request = ProviderRequest(
+                model=self._model,
+                messages=prefix + context.messages + (user_message,),
+            )
+            async with aclosing(self._engine.run(request)) as events:
+                async for event in events:
+                    if isinstance(event, TextDelta):
+                        parts.append(event.text)
+                    elif isinstance(
+                        event, RunCompleted
+                    ) and not self._commit_completed_turn(
+                        event, user_message, "".join(parts)
+                    ):
+                        yield RunFailed(
+                            run_id=event.run_id,
+                            seq=event.seq,
+                            category=ErrorCategory.STORAGE,
+                            message=_STORAGE_FAILURE_MESSAGE,
+                        )
+                        return
+                    yield event
         finally:
             self._active_run = False
+
+    def _commit_completed_turn(
+        self,
+        event: RunCompleted,
+        user_message: Message,
+        assistant_text: str,
+    ) -> bool:
+        try:
+            turn = TurnEntry(
+                turn_id=self._turn_id_factory(),
+                run_id=event.run_id,
+                user_message=user_message,
+                assistant_message=Message(
+                    role=MessageRole.ASSISTANT,
+                    content=assistant_text,
+                ),
+                completed_at=self._clock(),
+            )
+            self._session_service.commit_turn(self._session_id, turn)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - persistence boundary is intentionally safe
+            return False
+        return True
+
+
+__all__ = [
+    "AppBusyError",
+    "AppClosedError",
+    "MicaApp",
+    "MicaAppError",
+]

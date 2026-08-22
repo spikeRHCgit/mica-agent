@@ -239,7 +239,7 @@ Context Builder 输出新的不可变标准消息序列。它可以在会话消�
 
 ### P3-05：`MicaApp` 与基础 CLI 持久化闭环
 
-状态：待实施；依赖 P3-04。
+状态：已完成；依赖 P3-04。
 
 将 `MicaApp._history` 的真相职责迁移到 Session Service，接入成功轮原子提交，并为
 `mica cli` 增加默认新会话、`--continue` 和 `--resume`。保持第二阶段 Provider、Engine、

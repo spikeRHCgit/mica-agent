@@ -53,6 +53,7 @@ class ErrorCategory(Enum):
     TIMEOUT = "timeout"
     TEMPORARY = "temporary"
     MALFORMED = "malformed"
+    STORAGE = "storage"
     UNKNOWN = "unknown"
 
 

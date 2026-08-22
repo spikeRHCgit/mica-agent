@@ -10,11 +10,14 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import httpx
 import pytest
 
 from mica_agent.app import AppBusyError, AppClosedError, MicaApp
+from mica_agent.context_builder import ContextBuilder
 from mica_agent.events import (
     EngineEvent,
     RunCancelled,
@@ -23,6 +26,7 @@ from mica_agent.events import (
     RunStarted,
     TextDelta,
 )
+from mica_agent.jsonl_store import JsonlSessionStore
 from mica_agent.models import Message, MessageRole
 from mica_agent.providers import (
     AuthenticationError,
@@ -35,6 +39,8 @@ from mica_agent.providers import (
 from mica_agent.providers import (
     TextDelta as ProviderTextDelta,
 )
+from mica_agent.session_service import SessionService
+from mica_agent.workspace import resolve_workspace
 
 
 class _ScriptedProvider:
@@ -55,17 +61,51 @@ class _ScriptedProvider:
         self.aclose_calls += 1
 
 
+def _make_session_components(
+    provider: object,
+) -> tuple[SessionService, str, ContextBuilder]:
+    tempdir = TemporaryDirectory(prefix="mica-app-test-")
+    root = Path(tempdir.name)
+    workspace_path = root / "workspace"
+    workspace_path.mkdir()
+    data_root = root / "mica-data"
+    workspace = resolve_workspace(workspace_path)
+    service = SessionService(JsonlSessionStore(workspace, data_root))
+    session = service.create_session()
+    # Keep the temporary directory alive for the duration of the provider/app.
+    provider._mica_test_tempdir = tempdir  # type: ignore[attr-defined]
+    return (
+        service,
+        session.meta.session_id,
+        ContextBuilder(
+            data_root=data_root,
+            workspace=workspace,
+        ),
+    )
+
+
 def _make_app(
     provider: _ScriptedProvider,
     *,
     model: str = "test-model",
     system_prompt: str | None = None,
 ) -> MicaApp:
+    service, session_id, context_builder = _make_session_components(provider)
+    run_number = 0
+
+    def run_id_factory() -> str:
+        nonlocal run_number
+        run_number += 1
+        return "run-test" if run_number == 1 else f"run-test-{run_number}"
+
     return MicaApp(
         provider=provider,
         model=model,
+        session_service=service,
+        session_id=session_id,
+        context_builder=context_builder,
         system_prompt=system_prompt,
-        run_id_factory=lambda: "run-test",
+        run_id_factory=run_id_factory,
     )
 
 
@@ -195,9 +235,12 @@ def test_system_prompt_is_first_and_appears_once() -> None:
         _assistant(""),
         _user("q2"),
     )
-    assert [
-        message for message in app.history if message.role is MessageRole.SYSTEM
-    ] == [Message(role=MessageRole.SYSTEM, content="be brief")]
+    assert app.history == (
+        _user("q1"),
+        _assistant(""),
+        _user("q2"),
+        _assistant("ok"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -496,11 +539,22 @@ def test_full_stack_via_openai_provider_and_mock_transport() -> None:
         base_url="https://api.example.test/v1",
         transport=httpx.MockTransport(handler),
     )
+    service, session_id, context_builder = _make_session_components(provider)
+    run_number = 0
+
+    def run_id_factory() -> str:
+        nonlocal run_number
+        run_number += 1
+        return "run-test" if run_number == 1 else f"run-test-{run_number}"
+
     app = MicaApp(
         provider=provider,
         model="test-model",
+        session_service=service,
+        session_id=session_id,
+        context_builder=context_builder,
         system_prompt="be brief",
-        run_id_factory=lambda: "run-test",
+        run_id_factory=run_id_factory,
     )
 
     first = _run_collect(app, "hello")
@@ -526,7 +580,6 @@ def test_full_stack_via_openai_provider_and_mock_transport() -> None:
     ]
     # 进程内 history 与提交规则一致。
     assert app.history == (
-        Message(role=MessageRole.SYSTEM, content="be brief"),
         _user("hello"),
         _assistant("hi!"),
         _user("again"),

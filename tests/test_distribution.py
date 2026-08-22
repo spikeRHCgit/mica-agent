@@ -11,6 +11,10 @@ from pathlib import Path
 
 import pytest
 
+from mica_agent.jsonl_store import JsonlSessionStore
+from mica_agent.session_service import SessionService
+from mica_agent.workspace import resolve_workspace
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 VERSION = "0.1.0"
 PACKAGE_ROOT = f"mica_agent-{VERSION}"
@@ -383,11 +387,15 @@ def test_installed_cli_exits_cleanly_on_blank_input_eof(
     full_distribution: InstalledDistribution,
     entry: EntryFactory,
 ) -> None:
-    """完整安装态 `mica cli`：空白输入 + EOF 后退出码 0，无输出、无副作用。"""
+    """完整安装态 `mica cli`：空白输入 + EOF 保留一个空健康会话。"""
     dist = full_distribution
     command = entry(dist)
     before_workspace = snapshot_files(dist.outside_repository)
-    before_home = snapshot_files(dist.home)
+    store = JsonlSessionStore(
+        resolve_workspace(dist.outside_repository), dist.home / ".mica"
+    )
+    before_sessions = SessionService(store).list_sessions().sessions
+    before_ids = {session.meta.session_id for session in before_sessions}
 
     result = run_command(
         command,
@@ -396,16 +404,24 @@ def test_installed_cli_exits_cleanly_on_blank_input_eof(
         input_text="\n   \n\t\n",
     )
 
+    after_workspace = snapshot_files(dist.outside_repository)
+    after_sessions = SessionService(store).list_sessions().sessions
+    after_ids = {session.meta.session_id for session in after_sessions}
+    new_ids = after_ids - before_ids
     assert_no_file_side_effects(
         dist.outside_repository,
         before_workspace,
-        snapshot_files(dist.outside_repository),
+        after_workspace,
     )
-    assert_no_file_side_effects(dist.home, before_home, snapshot_files(dist.home))
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""
     assert result.stderr == ""  # 无 traceback、无诊断
     assert "Traceback" not in result.stderr
+    assert len(new_ids) == 1
+    new_session = next(
+        session for session in after_sessions if session.meta.session_id in new_ids
+    )
+    assert new_session.turns == ()
 
 
 def test_installed_cli_missing_environment_variables_exit_two(

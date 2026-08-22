@@ -67,6 +67,18 @@ def test_invalid_argument_reports_diagnostic(command: tuple[str, ...]) -> None:
     assert result.stdout == ""
 
 
+@pytest.mark.parametrize(
+    "command",
+    [("mica",), (sys.executable, "-m", "mica_agent")],
+)
+def test_restore_flags_are_mutually_exclusive(command: tuple[str, ...]) -> None:
+    result = run_command(command, "cli", "--continue", "--resume")
+
+    assert result.returncode == 2
+    assert "not allowed with argument" in result.stderr
+    assert result.stdout == ""
+
+
 def test_public_entrypoints_have_matching_behavior() -> None:
     for arguments in ((), ("--help",), ("--version",), ("--not-a-real-option",)):
         console = run_command(("mica",), *arguments)

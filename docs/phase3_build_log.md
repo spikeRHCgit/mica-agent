@@ -88,3 +88,24 @@
 ### 交付与未来学习入口
 
 本任务交付 Context Builder、稳定公共导出和覆盖顺序、缺失、空文件、错误诊断、大小边界、无缓存、输入与结果不变性、JSONL 不变性、显式路径注入及轻量导入边界的测试。P3-05 可在会话创建或恢复装配时将 `SessionService.context_snapshot()` 传入 `ContextBuilder.build()`，再负责应用层与 CLI 的持久化闭环，不改变本模块的读取和组合职责。
+
+## P3-05：MicaApp 与基础 CLI 持久化闭环
+
+### 任务目标
+
+把应用层的会话真相迁移到 `SessionService`，让成功 Run 在退出后可由新 App/CLI 恢复；同时提供当前工作区的新建、继续和编号恢复入口，不提前接入最终 TUI、斜杠命令或配置系统。
+
+### 设计与实现结构
+
+- `MicaApp` 显式绑定 `SessionService`、session ID 和 `ContextBuilder`，不再维护可写的 `_history`。每轮请求通过 `context_snapshot()` 和 `ContextBuilder.build()` 重新组合上下文；兼容用的 `system_prompt` 仅作为非持久化前缀。
+- Engine 的 `TextDelta` 只进入本轮缓冲区；App 在收到 `RunCompleted` 后才以注入的 turn ID 工厂和 UTC 时钟构造完整 `TurnEntry`，并通过 `SessionService.commit_turn()` 一次提交。
+- App 对写入失败拦截待转发的 `RunCompleted`，改发同 run ID、同序号的 `RunFailed(ErrorCategory.STORAGE)`；失败、取消和事件流提前关闭均不写入半轮。Engine 和 Provider 契约保持不变。
+- CLI 在环境变量校验后解析当前 `Path.cwd()` 工作区，装配注入式 Store/Service/Context Builder；默认立即创建并持久化空会话（即使随后空白输入 EOF），`--continue` 选择最后活跃健康会话，`--resume` 仅展示健康会话并读取 1-based 编号。选定后执行受保护的过期清理和上下文预检，再创建 Provider，不保留提前创建的 Provider 生命周期。
+
+### 关键取舍
+
+App 的 `history` 只是从 Service 派生的不可变快照，不参与状态写入；AGENTS 只进入每次 ProviderRequest，不进入 JSONL。CLI 的选择、Provider 工厂、输入输出、工作区、数据根、Service、Context Builder、turn ID 工厂和时钟均保留测试注入边界，正式入口才读取默认数据根；Provider 只在会话选定且上下文预检完成后创建，后续 App 启动失败由统一关闭路径收口。会话扫描、清理和 AGENTS 诊断只输出固定安全文案，避免传播路径、原始异常、凭据或上下文内容。
+
+### 交付成果与未来学习入口
+
+交付了 App/真实 JSONL Store/Context Builder 的成功恢复链路、两轮历史、失败/取消/提前关闭、写入失败当下 JSONL 字节与 turns 不变、恢复轮单独持久化的测试，以及 CLI 新建、默认空白 EOF 空会话、继续、编号恢复、非法选择、无健康会话、互斥参数和 AGENTS 预检测试。P3-06 可在此基础上完成仓库外 wheel 验证与阶段收口；最终 TUI 和配置系统继续位于后续阶段。
