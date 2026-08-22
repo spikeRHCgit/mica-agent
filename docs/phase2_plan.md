@@ -59,7 +59,7 @@ mica cli
 - ExtensionAPI、MCP、Skill、npm 启动器和分发安装链路。
 - Anthropic 原生协议或其他非 OpenAI-compatible 协议实现。
 - FakeProvider 产品实现；测试替身只存在于 HTTP 传输边界。
-- GenericAgent 旧代码、旧配置、旧会话和旧 API 的兼容迁移。
+- 历史应用的代码、配置、会话和 API 兼容迁移。
 
 ## 4. 阶段契约
 
@@ -176,7 +176,7 @@ CLI 不直接发 HTTP 请求。CLI 负责输入、事件渲染和退出信号转
 - Engine、Provider、App 和 CLI 之间没有反向依赖或私有状态泄漏。
 - 流式文本、失败、取消和重试语义都有自动化测试证据。
 - `uv run pytest`、Ruff 检查、格式检查和 `uv build --offline` 全部通过。
-- 构建产物在仓库外仍可启动基础 CLI，且不导入 GenericAgent。
+- 构建产物在仓库外仍可启动基础 CLI，且不依赖仓库内其他应用模块。
 - 真实 Provider 集成验收通过，或明确记录为外部服务兼容性阻塞。
 - README 和本阶段计划与实际能力一致。
 

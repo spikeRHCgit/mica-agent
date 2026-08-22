@@ -22,20 +22,6 @@ from mica_agent.workspace import resolve_workspace
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 VERSION = "0.1.0"
 PACKAGE_ROOT = f"mica_agent-{VERSION}"
-PROHIBITED_SDIST_PATHS = {
-    "agent_loop.py",
-    "agentmain.py",
-    "ga.py",
-    "llmcore.py",
-    "TMWebDriver.py",
-    "simphtml.py",
-    "ga_cli",
-    "frontends",
-    "memory",
-    "reflect",
-    "plugins",
-    "assets",
-}
 
 
 @dataclass(frozen=True)
@@ -319,7 +305,7 @@ def test_wheel_contains_only_mica_package_and_metadata(
     }
 
 
-def test_sdist_excludes_genericagent_implementation(
+def test_sdist_contains_only_mica_source_package(
     built_distribution: BuiltDistribution,
 ) -> None:
     with tarfile.open(built_distribution.sdist) as sdist:
@@ -328,8 +314,12 @@ def test_sdist_excludes_genericagent_implementation(
     assert members
     assert all(member.parts[0] == PACKAGE_ROOT for member in members)
     packaged_paths = [member.parts[1:] for member in members if len(member.parts) > 1]
-    assert not any(
-        parts and parts[0] in PROHIBITED_SDIST_PATHS for parts in packaged_paths
+    source_paths = [parts for parts in packaged_paths if parts and parts[0] == "src"]
+    assert source_paths
+    assert all(
+        parts == ("src",)
+        or (len(parts) > 1 and parts[1] in {"mica_agent", "mica_agent.egg-info"})
+        for parts in source_paths
     )
 
 

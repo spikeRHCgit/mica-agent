@@ -1,6 +1,6 @@
 # Mica
 
-Mica 是一个面向个人开发者的轻量 Agent 基座，当前正从 GenericAgent 的冻结参考源码中独立重建。
+Mica 是一个面向个人开发者的轻量 Agent 基座。
 
 > 当前状态：第三阶段文本对话与持久化会话闭环已具备。`mica cli` 可以连接 OpenAI-compatible 服务，按当前工作区创建、恢复和继续会话；工具、权限、TUI 与扩展系统尚未实现。
 
@@ -76,8 +76,5 @@ uv build --offline
 - `PROJECT_PLAN.md`：Mica 的正式项目方向和长期架构边界。
 - `docs/phase1_plan.md`：第一阶段的范围、验收标准和未包含内容。
 - `docs/phase2_plan.md`：第二阶段（Engine、Provider、App、CLI 闭环）的范围与验收标准。
-- `docs/phase3_plan.md`：当前阶段（工作区隔离、JSONL 会话、恢复与上下文）的范围与验收标准。
-
-## GenericAgent 参考源码
-
-根目录中的 GenericAgent 旧源码仅作为冻结参考。它不再是根构建项目的一部分，也不保证通过当前安装流程提供旧 `ga` 入口。
+- `docs/phase3_plan.md`：第三阶段（工作区隔离、JSONL 会话、恢复与上下文）的范围与验收标准。
+- `docs/phase4_plan.md`：第四阶段（仓库收口与旧实现清理）的范围与验收标准。
