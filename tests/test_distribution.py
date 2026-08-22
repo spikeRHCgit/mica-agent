@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import tarfile
+import threading
 import venv
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Self
 
 import pytest
 
@@ -49,6 +53,99 @@ class InstalledDistribution:
 
 
 EntryFactory = Callable[[InstalledDistribution], list[str | Path]]
+
+
+class LoopbackSSEServer:
+    """为已安装 CLI 提供确定性 OpenAI-compatible SSE 响应。"""
+
+    def __init__(self, response_texts: tuple[str, ...]) -> None:
+        self._responses = tuple(self._make_response(text) for text in response_texts)
+        self.requests: list[dict[str, object]] = []
+        self._lock = threading.Lock()
+        owner = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self) -> None:
+                if self.path != "/v1/chat/completions":
+                    self.send_error(404)
+                    return
+                try:
+                    length = int(self.headers["Content-Length"] or "0")
+                    payload = json.loads(self.rfile.read(length))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    self.send_error(400)
+                    return
+                if not isinstance(payload, dict):
+                    self.send_error(400)
+                    return
+                with owner._lock:
+                    response_index = len(owner.requests)
+                    owner.requests.append(payload)
+                if response_index >= len(owner._responses):
+                    self.send_error(500)
+                    return
+                body = owner._responses[response_index]
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *args: object) -> None:
+                return
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server.daemon_threads = True
+        self._thread = threading.Thread(
+            target=self._server.serve_forever,
+            name="mica-p3-06-loopback",
+            daemon=True,
+        )
+
+    @staticmethod
+    def _make_response(text: str) -> bytes:
+        def chunk(delta: dict[str, object], finish_reason: str | None) -> str:
+            return (
+                "data: "
+                + json.dumps(
+                    {
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": delta,
+                                "finish_reason": finish_reason,
+                            }
+                        ]
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n\n"
+            )
+
+        return (
+            chunk({"role": "assistant"}, None)
+            + chunk({"content": text}, None)
+            + chunk({}, "stop")
+            + "data: [DONE]\n\n"
+        ).encode("utf-8")
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self._server.server_port}/v1"
+
+    def __enter__(self) -> Self:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+        if self._thread.is_alive():
+            raise RuntimeError("loopback SSE server did not stop")
 
 
 def isolated_environment(home: Path) -> dict[str, str]:
@@ -422,6 +519,110 @@ def test_installed_cli_exits_cleanly_on_blank_input_eof(
         session for session in after_sessions if session.meta.session_id in new_ids
     )
     assert new_session.turns == ()
+
+
+def test_installed_wheel_restores_session_from_unicode_workspace(
+    full_distribution: InstalledDistribution,
+) -> None:
+    """仓库外已安装 wheel 的成功轮可由 ``--continue`` 恢复。"""
+    dist = full_distribution
+    workspace = dist.outside_repository / "工作区 with spaces"
+    workspace.mkdir()
+    before_workspace = snapshot_files(workspace)
+    data_root = dist.home / ".mica"
+    workspace_identity = resolve_workspace(workspace)
+    store = JsonlSessionStore(workspace_identity, data_root)
+    service = SessionService(store)
+    assert service.list_sessions().sessions == ()
+
+    first_prompt = "first fixed prompt"
+    second_prompt = "second fixed prompt"
+    fake_key = "sk-p3-06-loopback-only"
+    environment = cli_environment(dist.home, fake_credentials=True)
+    environment.update(
+        {
+            "MICA_API_KEY": fake_key,
+            "MICA_MODEL": "p3-06-loopback-model",
+        }
+    )
+    assert environment["HOME"] == str(dist.home)
+    assert environment["USERPROFILE"] == str(dist.home)
+    assert "PYTHONPATH" not in environment
+
+    with LoopbackSSEServer(("first model reply", "second model reply")) as server:
+        environment["MICA_API_URL"] = server.base_url
+        first = run_command(
+            [dist.mica, "cli"],
+            cwd=workspace,
+            environment=environment,
+            input_text=first_prompt + "\n",
+        )
+
+        assert first.returncode == 0, first.stderr
+        assert first.stdout == "first model reply\n"
+        assert first.stderr == ""
+        assert "Traceback" not in first.stderr
+        assert fake_key not in first.stderr
+        assert str(workspace) not in first.stderr
+
+        after_first = service.list_sessions()
+        assert after_first.problems == ()
+        assert len(after_first.sessions) == 1
+        first_session = after_first.sessions[0]
+        assert first_session.meta.workspace_path == str(
+            workspace_identity.workspace_path
+        )
+        assert [
+            (
+                turn.user_message.content,
+                turn.assistant_message.content,
+            )
+            for turn in first_session.turns
+        ] == [(first_prompt, "first model reply")]
+        assert store.session_directory.is_relative_to(data_root)
+        assert len(tuple(store.session_directory.glob("*.jsonl"))) == 1
+
+        second = run_command(
+            [dist.mica, "cli", "--continue"],
+            cwd=workspace,
+            environment=environment,
+            input_text=second_prompt + "\n",
+        )
+
+        assert second.returncode == 0, second.stderr
+        assert second.stdout == "second model reply\n"
+        assert second.stderr == ""
+        assert "Traceback" not in second.stderr
+        assert fake_key not in second.stderr
+        assert str(workspace) not in second.stderr
+
+        assert len(server.requests) == 2
+        assert server.requests[0]["messages"] == [
+            {"role": "user", "content": first_prompt},
+        ]
+        assert server.requests[1]["messages"] == [
+            {"role": "user", "content": first_prompt},
+            {"role": "assistant", "content": "first model reply"},
+            {"role": "user", "content": second_prompt},
+        ]
+
+    after_second = service.list_sessions()
+    assert after_second.problems == ()
+    assert len(after_second.sessions) == 1
+    second_session = after_second.sessions[0]
+    assert second_session.meta.session_id == first_session.meta.session_id
+    assert [
+        (
+            turn.user_message.content,
+            turn.assistant_message.content,
+        )
+        for turn in second_session.turns
+    ] == [
+        (first_prompt, "first model reply"),
+        (second_prompt, "second model reply"),
+    ]
+    assert snapshot_files(workspace) == before_workspace
+    assert not (workspace / ".mica").exists()
 
 
 def test_installed_cli_missing_environment_variables_exit_two(

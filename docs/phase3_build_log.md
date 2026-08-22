@@ -109,3 +109,23 @@ App 的 `history` 只是从 Service 派生的不可变快照，不参与状态�
 ### 交付成果与未来学习入口
 
 交付了 App/真实 JSONL Store/Context Builder 的成功恢复链路、两轮历史、失败/取消/提前关闭、写入失败当下 JSONL 字节与 turns 不变、恢复轮单独持久化的测试，以及 CLI 新建、默认空白 EOF 空会话、继续、编号恢复、非法选择、无健康会话、互斥参数和 AGENTS 预检测试。P3-06 可在此基础上完成仓库外 wheel 验证与阶段收口；最终 TUI 和配置系统继续位于后续阶段。
+
+## P3-06：集成验证、README 与阶段收口
+
+### 任务目标
+
+为已安装 wheel 补齐仓库外的真实持久化恢复证据，并让 README 与第三阶段实际能力一致；不扩展到工具、TUI、配置或最终会话命令界面。
+
+### 设计与测试结构
+
+- 在既有完整 wheel/venv fixture 上增加标准库 loopback HTTP/SSE 服务，记录已安装 CLI 发出的两次 Chat Completions 请求并返回确定的成功流；测试通过已安装的 `mica` 入口，不导入仓库源码或 monkeypatch App、CLI、Store 私有实现。
+- 测试在仓库外创建包含 Unicode 与空格的工作区，并将 HOME、USERPROFILE、数据根和 Python 导入环境隔离到临时目录；通过公开的 `JsonlSessionStore`、`SessionService` 和 workspace resolver 检查 JSONL 位置、工作区元数据、轮次完整性与会话复用。
+- 首次成功轮退出后，第二次 `mica cli --continue` 必须复用同一健康会话；loopback 请求只包含既有 user/assistant 历史和新的 user 消息，工作区没有 `AGENTS.md` 时不凭空加入额外上下文。
+
+### 关键取舍
+
+使用本机 loopback 而非真实网络或凭据，既验证了安装态 Provider、SSE、CLI、App、Service 和 Store 的真实边界，又避免外部服务不确定性。测试只断言稳定的用户可观察行为和公开持久化结果，不把测试输入、完整响应、密钥或 JSONL 内容写入构建日志。异常写入可靠性继续由既有 Store 失败恢复测试覆盖，不新增依赖平台权限行为的脆弱测试。
+
+### 交付成果与未来学习入口
+
+交付仓库外 wheel 的成功对话、JSONL 落盘、同工作区 `--continue` 恢复和完整两轮上下文自动化证据；README 已说明新建、继续、选择、成功轮提交边界、默认数据位置与未包含范围。后续可从 `docs/phase3_plan.md` 的阶段达标标准继续学习，并由 master 统一更新阶段计划状态。
