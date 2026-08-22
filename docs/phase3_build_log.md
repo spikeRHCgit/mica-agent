@@ -47,3 +47,24 @@
 ### 交付与未来学习入口
 
 本任务交付工作区解析模块、跨平台文件锁、JSONL Store、必要的顶层稳定导出，以及工作区、Unicode slug、确定性序列化、格式损坏、原子替换失败后恢复、扫描、删除和跨线程/跨进程并发测试。P3-03 可在 `JsonlSessionStore` 的 create/load/append/rewrite/delete/scan 原语之上实现重命名、复制、回退、清空、列表排序和清理等 Session Service 业务操作。
+
+## P3-03：Session Service 会话操作
+
+### 任务目标
+
+在既有工作区身份、JSONL Store 与标准会话契约之上建立唯一的会话业务语义拥有者，提供会话创建、恢复、排序选择、完整轮提交、变更、只读上下文和过期清理能力，不接入 App、CLI、Engine 或 Provider。
+
+### 设计与结构
+
+- `SessionService` 通过注入的 `JsonlSessionStore`、UTC 时钟和 session ID 工厂构造元数据，并将创建、加载、列表、最后活跃选择、提交、重命名、分支、回退、清空、删除和上下文快照集中在业务层。
+- `SessionListResult` 保留健康会话与 `ScanProblem`；健康会话统一按 `updated_at` 降序、`session_id` 升序排列。`CleanupResult` 分离已删除、受保护跳过、锁定跳过、并发变化跳过和诊断问题。
+- 分支保留源会话的创建时间、标题和不可变历史轮次，只生成新 ID；新 `updated_at` 使用源值、保留 turn 的最新时间和当前时钟的安全较大值。回退删除指定轮及其后续内容，清空只移除轮次；三类元数据变更统一使用同一不可回拨更新时间策略。
+- 上下文快照只从每个 `TurnEntry` 产生 user/assistant 两条标准 `Message`，按持久化顺序返回新的 tuple，不加载 AGENTS 或 Provider 私有对象。
+
+### 关键取舍
+
+为满足清理“不等待锁”的边界，Store 增加窄的 `SessionDeleteStatus` 与 `try_delete()` 文件操作 primitive：它先非阻塞取得同一 session 锁，再在锁内重载并校验 `expected_snapshot`，只有快照仍相等时才删除；因此可区分成功、锁定、文件不存在和并发变化，格式损坏与 I/O 继续作为诊断错误暴露。Store 扫描支持零等待锁超时，借助 JSONL 的 copy-on-write 在锁定时读取完整旧快照，随后由 Service 决定 30 天阈值、当前会话保护和变化跳过等业务策略。
+
+### 交付与未来学习入口
+
+本任务交付 `SessionService`、列表与清理结果对象、业务错误边界、非阻塞删除 primitive、稳定公共导出及完整服务测试，覆盖时间/ID 注入、排序诊断、成功轮、历史变更、分支时间契约、回退/清空活动时间、上下文不可变性、过期边界、保护会话、锁定会话、锁内快照重检、并发变化跳过和删除前损坏诊断。P3-04 可在 `context_snapshot()` 的标准消息边界上增加独立的 AGENTS 加载与诊断组合，不改变本服务的会话真相职责。

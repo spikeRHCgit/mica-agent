@@ -10,6 +10,7 @@ import tempfile
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 from ._file_lock import locked_file
@@ -54,6 +55,15 @@ class SessionStorageIOError(SessionStorageError):
 
     def __init__(self, operation: str) -> None:
         super().__init__(f"session storage operation failed: {operation}")
+
+
+class SessionDeleteStatus(Enum):
+    """非阻塞单会话删除尝试的结果。"""
+
+    DELETED = "deleted"
+    LOCKED = "locked"
+    NOT_FOUND = "not_found"
+    CHANGED = "changed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -386,12 +396,56 @@ class JsonlSessionStore:
             except OSError as exc:
                 raise SessionStorageIOError("delete") from exc
 
+    def try_delete(
+        self,
+        session_id: str,
+        *,
+        expected_snapshot: StoredSession | None = None,
+    ) -> SessionDeleteStatus:
+        """不等待锁地尝试删除，并可在锁内校验预期快照。"""
+        if expected_snapshot is not None and not isinstance(
+            expected_snapshot, StoredSession
+        ):
+            raise TypeError("expected_snapshot must be a StoredSession or None")
+        path = self.path_for_session(session_id)
+        try:
+            with locked_file(self._lock_path_for_session(session_id), timeout=0):
+                try:
+                    path.stat()
+                except FileNotFoundError:
+                    return SessionDeleteStatus.NOT_FOUND
+                except OSError as exc:
+                    raise SessionStorageIOError("delete") from exc
+                if expected_snapshot is not None:
+                    try:
+                        current = self._load_path(path, requested_session_id=session_id)
+                    except SessionNotFoundError:
+                        return SessionDeleteStatus.NOT_FOUND
+                    if current != expected_snapshot:
+                        return SessionDeleteStatus.CHANGED
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    return SessionDeleteStatus.NOT_FOUND
+                except OSError as exc:
+                    raise SessionStorageIOError("delete") from exc
+                return SessionDeleteStatus.DELETED
+        except TimeoutError:
+            return SessionDeleteStatus.LOCKED
+        except OSError as exc:
+            raise SessionStorageIOError("delete") from exc
+
     def _scan_file_id(self, path: Path) -> str:
         if _SESSION_FILENAME_RE.fullmatch(path.name):
             return path.name
         return hashlib.sha256(path.name.encode("utf-8")).hexdigest()[:16]
 
-    def scan(self) -> ScanResult:
+    def scan(self, *, lock_timeout: float | None = None) -> ScanResult:
+        if lock_timeout is not None and lock_timeout < 0:
+            raise ValueError("lock_timeout must not be negative")
+        effective_lock_timeout = (
+            self.lock_timeout if lock_timeout is None else lock_timeout
+        )
         directory = self.session_directory
         if not directory.is_dir():
             return ScanResult((), ())
@@ -415,11 +469,14 @@ class JsonlSessionStore:
                 if _SESSION_FILENAME_RE.fullmatch(path.name):
                     try:
                         with locked_file(
-                            path.with_name(f"{path.name}.lock"), self.lock_timeout
+                            path.with_name(f"{path.name}.lock"), effective_lock_timeout
                         ):
                             snapshot = self._load_path(path)
                     except TimeoutError:
-                        raise SessionLockTimeoutError() from None
+                        # Writers use copy-on-write, so an unlocked read still sees
+                        # a complete old or new snapshot. Cleanup can then use
+                        # try_delete() to make the non-blocking lock decision.
+                        snapshot = self._load_path(path)
                 else:
                     snapshot = self._load_path(path)
                 healthy.append(snapshot)
@@ -443,6 +500,7 @@ __all__ = [
     "ScanProblem",
     "ScanResult",
     "SessionAlreadyExistsError",
+    "SessionDeleteStatus",
     "SessionLockTimeoutError",
     "SessionNotFoundError",
     "SessionStorageError",

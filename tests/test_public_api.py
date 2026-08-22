@@ -111,6 +111,26 @@ def test_top_level_exports_session_contracts() -> None:
     assert deserialize_session_record is contracts_deserialize_session_record
 
 
+def test_top_level_exports_session_service_boundaries() -> None:
+    from mica_agent.jsonl_store import SessionDeleteStatus
+    from mica_agent.session_service import (
+        CleanupResult,
+        NoHealthySessionError,
+        SessionListResult,
+        SessionService,
+        SessionServiceError,
+        TurnNotFoundError,
+    )
+
+    assert mica_agent.SessionService is SessionService
+    assert mica_agent.SessionListResult is SessionListResult
+    assert mica_agent.CleanupResult is CleanupResult
+    assert mica_agent.SessionServiceError is SessionServiceError
+    assert mica_agent.NoHealthySessionError is NoHealthySessionError
+    assert mica_agent.TurnNotFoundError is TurnNotFoundError
+    assert mica_agent.SessionDeleteStatus is SessionDeleteStatus
+
+
 def test_top_level_exports_workspace_and_store_boundaries() -> None:
     from mica_agent.jsonl_store import JsonlSessionStore as StoreClass
     from mica_agent.workspace import WorkspaceIdentity as IdentityClass

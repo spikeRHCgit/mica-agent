@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from mica_agent.jsonl_store import (
     JsonlSessionStore,
     ScanResult,
     SessionAlreadyExistsError,
+    SessionDeleteStatus,
     SessionFormatError,
     SessionLockTimeoutError,
     SessionNotFoundError,
@@ -393,6 +395,41 @@ store.append_turn(session_id, turn)
     loaded = store.load(meta.session_id)
     assert {turn.turn_id for turn in loaded.turns} == {"turn-1", "turn-2"}
     assert store.path_for_session(meta.session_id).read_bytes().count(b"\n") == 3
+
+
+def test_try_delete_is_nonblocking_and_distinguishes_lock(tmp_path: Path) -> None:
+    store, identity = make_store(tmp_path)
+    meta = make_meta(identity, session_id="try-delete")
+    store.create(meta)
+
+    from mica_agent._file_lock import FileLock
+
+    lock_path = store._lock_path_for_session(meta.session_id)
+    with FileLock(lock_path, timeout=1):
+        assert store.try_delete(meta.session_id) is SessionDeleteStatus.LOCKED
+    assert store.try_delete(meta.session_id) is SessionDeleteStatus.DELETED
+    assert store.try_delete(meta.session_id) is SessionDeleteStatus.NOT_FOUND
+
+
+def test_try_delete_skips_changed_expected_snapshot(tmp_path: Path) -> None:
+    store, identity = make_store(tmp_path)
+    meta = make_meta(identity, session_id="changed")
+    store.create(meta)
+    old_snapshot = store.load(meta.session_id)
+    new_snapshot = store.rewrite(
+        StoredSession(
+            replace(old_snapshot.meta, title="new title"),
+            old_snapshot.turns,
+        )
+    )
+
+    status = store.try_delete(
+        meta.session_id,
+        expected_snapshot=old_snapshot,
+    )
+
+    assert status is SessionDeleteStatus.CHANGED
+    assert store.load(meta.session_id) == new_snapshot
 
 
 def test_delete_only_removes_one_session_and_keeps_lock_file(tmp_path: Path) -> None:
