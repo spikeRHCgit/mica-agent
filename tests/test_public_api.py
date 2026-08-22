@@ -82,6 +82,24 @@ from mica_agent.session_contracts import (
 )
 
 
+def test_top_level_exports_context_builder() -> None:
+    from mica_agent.context_builder import (
+        MAX_AGENTS_FILE_BYTES,
+        AgentFileSource,
+        ContextBuilder,
+        ContextBuildResult,
+        ContextDiagnostic,
+        ContextDiagnosticKind,
+    )
+
+    assert mica_agent.MAX_AGENTS_FILE_BYTES == MAX_AGENTS_FILE_BYTES
+    assert mica_agent.AgentFileSource is AgentFileSource
+    assert mica_agent.ContextBuildResult is ContextBuildResult
+    assert mica_agent.ContextBuilder is ContextBuilder
+    assert mica_agent.ContextDiagnostic is ContextDiagnostic
+    assert mica_agent.ContextDiagnosticKind is ContextDiagnosticKind
+
+
 def test_top_level_exports_models_and_events() -> None:
     assert mica_agent.Message is ModelsMessage
     assert mica_agent.MessageRole is ModelsMessageRole

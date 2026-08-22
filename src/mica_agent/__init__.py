@@ -6,6 +6,14 @@ AgentEngine 与 MicaApp 装配入口。Engine/App 通过模块级
 等轻量子模块导入不触发 Provider 网络栈加载。
 """
 
+from .context_builder import (
+    MAX_AGENTS_FILE_BYTES,
+    AgentFileSource,
+    ContextBuilder,
+    ContextBuildResult,
+    ContextDiagnostic,
+    ContextDiagnosticKind,
+)
 from .events import (
     EngineEvent,
     ErrorCategory,
@@ -61,8 +69,14 @@ from .workspace import (
 
 __all__ = [
     "CURRENT_SESSION_FORMAT_VERSION",
+    "MAX_AGENTS_FILE_BYTES",
     "AgentEngine",
+    "AgentFileSource",
     "CleanupResult",
+    "ContextBuildResult",
+    "ContextBuilder",
+    "ContextDiagnostic",
+    "ContextDiagnosticKind",
     "EngineEvent",
     "ErrorCategory",
     "JsonlSessionStore",

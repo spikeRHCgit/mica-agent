@@ -68,3 +68,23 @@
 ### 交付与未来学习入口
 
 本任务交付 `SessionService`、列表与清理结果对象、业务错误边界、非阻塞删除 primitive、稳定公共导出及完整服务测试，覆盖时间/ID 注入、排序诊断、成功轮、历史变更、分支时间契约、回退/清空活动时间、上下文不可变性、过期边界、保护会话、锁定会话、锁内快照重检、并发变化跳过和删除前损坏诊断。P3-04 可在 `context_snapshot()` 的标准消息边界上增加独立的 AGENTS 加载与诊断组合，不改变本服务的会话真相职责。
+
+## P3-04：上下文重建与 AGENTS.md 加载
+
+### 任务目标
+
+建立供应商无关的 Context Builder，在不接入 App、CLI、Engine 或 Provider 的前提下，按固定顺序读取全局与当前工作区 `AGENTS.md`，并与 Session Service 提供的标准 `Message` 历史组合为新的不可变上下文。
+
+### 设计与结构
+
+- `ContextBuilder` 显式接收 `data_root`、`WorkspaceIdentity` 和可选的单文件字节上限；全局路径固定为 `<data_root>/AGENTS.md`，工作区路径固定为 `<workspace_path>/AGENTS.md`。
+- 每次 `build()` 先验证输入历史，再按 global、workspace 顺序重新读取文件；有效非空内容各生成一条 `MessageRole.SYSTEM`，最后原序追加会话消息。
+- `ContextBuildResult`、`ContextDiagnostic` 及两个枚举均为不可变标准对象；诊断只保留稳定来源、错误类型和固定安全描述，不携带路径、内容或原始异常。
+
+### 关键取舍
+
+使用集中常量 `MAX_AGENTS_FILE_BYTES = 64 * 1024`，二进制读取最多 `limit + 1` 字节；超过上限立即跳过，合格后才严格 UTF-8 解码，因此不会截断或部分使用超限内容。缺失文件正常跳过；目录、权限/I/O、无效 UTF-8 和超限分别生成结构化诊断，并继续处理另一来源。Builder 不缓存内容、不创建目录、不写入 Store 或 JSONL，也不导入运行时/Provider 模块。
+
+### 交付与未来学习入口
+
+本任务交付 Context Builder、稳定公共导出和覆盖顺序、缺失、空文件、错误诊断、大小边界、无缓存、输入与结果不变性、JSONL 不变性、显式路径注入及轻量导入边界的测试。P3-05 可在会话创建或恢复装配时将 `SessionService.context_snapshot()` 传入 `ContextBuilder.build()`，再负责应用层与 CLI 的持久化闭环，不改变本模块的读取和组合职责。
