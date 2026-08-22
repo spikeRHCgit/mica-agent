@@ -16,6 +16,19 @@ from .events import (
     RunStatus,
     TextDelta,
 )
+from .jsonl_store import (
+    JsonlSessionStore,
+    JsonlStore,
+    ScanProblem,
+    ScanResult,
+    SessionAlreadyExistsError,
+    SessionLockTimeoutError,
+    SessionNotFoundError,
+    SessionStorageError,
+    SessionStorageIOError,
+    StoredSession,
+    session_filename,
+)
 from .models import Message, MessageRole
 from .session_contracts import (
     CURRENT_SESSION_FORMAT_VERSION,
@@ -28,12 +41,22 @@ from .session_contracts import (
     deserialize_session_record,
     serialize_session_record,
 )
+from .workspace import (
+    WorkspaceIdentity,
+    WorkspaceResolutionError,
+    default_data_root,
+    resolve_workspace,
+    resolve_workspace_identity,
+    workspace_slug,
+)
 
 __all__ = [
     "CURRENT_SESSION_FORMAT_VERSION",
     "AgentEngine",
     "EngineEvent",
     "ErrorCategory",
+    "JsonlSessionStore",
+    "JsonlStore",
     "Message",
     "MessageRole",
     "MicaApp",
@@ -42,15 +65,30 @@ __all__ = [
     "RunFailed",
     "RunStarted",
     "RunStatus",
+    "ScanProblem",
+    "ScanResult",
+    "SessionAlreadyExistsError",
     "SessionError",
     "SessionFormatError",
+    "SessionLockTimeoutError",
     "SessionMeta",
+    "SessionNotFoundError",
     "SessionRecord",
     "SessionRecordType",
+    "SessionStorageError",
+    "SessionStorageIOError",
+    "StoredSession",
     "TextDelta",
     "TurnEntry",
+    "WorkspaceIdentity",
+    "WorkspaceResolutionError",
+    "default_data_root",
     "deserialize_session_record",
+    "resolve_workspace",
+    "resolve_workspace_identity",
     "serialize_session_record",
+    "session_filename",
+    "workspace_slug",
 ]
 
 

@@ -26,3 +26,24 @@
 ### 交付与未来学习入口
 
 本任务交付会话契约模块、稳定顶层导出、公开行为测试与纯导入副作用测试。后续整体学习建议先从 `SessionMeta` 和 `TurnEntry` 的构造校验开始，再沿 `SessionRecordType`、`serialize_session_record()`、`deserialize_session_record()` 理解强类型对象与单条 wire 记录之间的边界；P3-02 可在此基础上实现文件级 JSONL 顺序、损坏检测和可靠写入。
+
+## P3-02：工作区识别与 JSONL Store
+
+### 任务目的
+
+为后续 Session Service 提供稳定的工作区隔离和可靠的单会话文件存储原语。本任务只处理工作区身份、JSONL 格式完整性、文件操作与会话级并发边界，不承担会话业务语义。
+
+### 设计与结构
+
+- `workspace.py` 从显式启动目录解析最近的 `.git` 目录或文件；非 Git 目录使用自身作为根，并将解析符号链接、相对段和当前平台大小写规则后的绝对路径哈希为完整 SHA-256 工作区 ID。slug 在 casefold 后再次按同一安全字符规则过滤，避免 Unicode 组合字符使合法工作区解析失败。
+- `WorkspaceIdentity` 同时保存规范路径、完整 ID、安全 slug 和 `<slug>-<path-hash>` 会话目录名。目录名哈希而非单纯 basename 保证同名工作区隔离；数据根通过 Store 注入，默认 `~/.mica` 只在调用时计算。
+- `jsonl_store.py` 使用完整 session ID SHA-256 生成文件名和锁名，避免斜杠、反斜杠、冒号及路径段进入文件系统路径。JSONL 首行固定为 `session_meta`，后续为 `turn`；writer 使用 UTF-8、紧凑分隔符、`ensure_ascii=False`、`allow_nan=False` 与 `sort_keys=True`，读取器严格检查 UTF-8、换行、重复 JSON key、版本、记录顺序和整份快照。
+- `StoredSession` 对跨记录的 ID 唯一性、时间顺序、工作区元数据和不可变 Turn 序列执行完整校验；扫描以稳定文件名顺序分别返回健康快照与安全诊断，不因单个坏文件丢弃其他会话。
+
+### 关键取舍
+
+逻辑追加采用同目录临时文件、flush/fsync、关闭后原子替换的 copy-on-write，而不是裸 append，从而在中断或失败时保留旧完整文件。会话锁使用标准库条件平台边界：Windows 使用 `msvcrt` 文件区域锁，POSIX 使用 `fcntl.flock`，并以按锁路径的线程锁补足同进程竞争；锁文件释放后保留，避免 inode 竞态。未引入第三方依赖，也未加入全局跨会话锁。
+
+### 交付与未来学习入口
+
+本任务交付工作区解析模块、跨平台文件锁、JSONL Store、必要的顶层稳定导出，以及工作区、Unicode slug、确定性序列化、格式损坏、原子替换失败后恢复、扫描、删除和跨线程/跨进程并发测试。P3-03 可在 `JsonlSessionStore` 的 create/load/append/rewrite/delete/scan 原语之上实现重命名、复制、回退、清空、列表排序和清理等 Session Service 业务操作。

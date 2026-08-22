@@ -111,6 +111,16 @@ def test_top_level_exports_session_contracts() -> None:
     assert deserialize_session_record is contracts_deserialize_session_record
 
 
+def test_top_level_exports_workspace_and_store_boundaries() -> None:
+    from mica_agent.jsonl_store import JsonlSessionStore as StoreClass
+    from mica_agent.workspace import WorkspaceIdentity as IdentityClass
+
+    assert mica_agent.JsonlSessionStore is StoreClass
+    assert mica_agent.JsonlStore is StoreClass
+    assert mica_agent.WorkspaceIdentity is IdentityClass
+    assert mica_agent.session_filename is not None
+
+
 def test_events_are_importable_from_events_module() -> None:
     assert RunStarted is not None
     assert EngineTextDelta is not None
