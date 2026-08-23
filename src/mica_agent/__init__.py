@@ -6,6 +6,7 @@ AgentEngine 与 MicaApp 装配入口。Engine/App 通过模块级
 等轻量子模块导入不触发 Provider 网络栈加载。
 """
 
+from .cancellation import CancellationRequested, CancellationToken
 from .context_builder import (
     MAX_AGENTS_FILE_BYTES,
     AgentFileSource,
@@ -17,13 +18,18 @@ from .context_builder import (
 from .events import (
     EngineEvent,
     ErrorCategory,
+    PermissionRequested,
     RunCancelled,
     RunCompleted,
     RunFailed,
     RunStarted,
     RunStatus,
     TextDelta,
+    ToolFinished,
+    ToolStarted,
+    UserInputRequested,
 )
+from .interactions import PermissionAnswer, PermissionResponse, UserInputResponse
 from .jsonl_store import (
     JsonlSessionStore,
     JsonlStore,
@@ -39,6 +45,7 @@ from .jsonl_store import (
     session_filename,
 )
 from .models import Message, MessageRole
+from .permissions import PermissionMode, PolicyDecision
 from .session_contracts import (
     CURRENT_SESSION_FORMAT_VERSION,
     SessionError,
@@ -58,6 +65,13 @@ from .session_service import (
     SessionServiceError,
     TurnNotFoundError,
 )
+from .tool_contracts import (
+    ToolCall,
+    ToolRequest,
+    ToolResult,
+    ToolResultStatus,
+    ToolSpec,
+)
 from .workspace import (
     WorkspaceIdentity,
     WorkspaceResolutionError,
@@ -72,6 +86,8 @@ __all__ = [
     "MAX_AGENTS_FILE_BYTES",
     "AgentEngine",
     "AgentFileSource",
+    "CancellationRequested",
+    "CancellationToken",
     "CleanupResult",
     "ContextBuildResult",
     "ContextBuilder",
@@ -85,6 +101,11 @@ __all__ = [
     "MessageRole",
     "MicaApp",
     "NoHealthySessionError",
+    "PermissionAnswer",
+    "PermissionMode",
+    "PermissionRequested",
+    "PermissionResponse",
+    "PolicyDecision",
     "RunCancelled",
     "RunCompleted",
     "RunFailed",
@@ -108,8 +129,17 @@ __all__ = [
     "SessionStorageIOError",
     "StoredSession",
     "TextDelta",
+    "ToolCall",
+    "ToolFinished",
+    "ToolRequest",
+    "ToolResult",
+    "ToolResultStatus",
+    "ToolSpec",
+    "ToolStarted",
     "TurnEntry",
     "TurnNotFoundError",
+    "UserInputRequested",
+    "UserInputResponse",
     "WorkspaceIdentity",
     "WorkspaceResolutionError",
     "default_data_root",

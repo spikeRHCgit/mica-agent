@@ -16,13 +16,18 @@ import pytest
 from mica_agent.events import (
     EngineEvent,
     ErrorCategory,
+    PermissionRequested,
     RunCancelled,
     RunCompleted,
     RunFailed,
     RunStarted,
     RunStatus,
     TextDelta,
+    ToolFinished,
+    ToolStarted,
+    UserInputRequested,
 )
+from mica_agent.tool_contracts import ToolResultStatus
 
 
 def test_run_started_carries_run_id_and_opens_at_seq_zero() -> None:
@@ -108,6 +113,7 @@ def test_run_status_wire_values(status: RunStatus, wire_value: str) -> None:
         (ErrorCategory.TIMEOUT, "timeout"),
         (ErrorCategory.TEMPORARY, "temporary"),
         (ErrorCategory.MALFORMED, "malformed"),
+        (ErrorCategory.LIMIT, "limit"),
         (ErrorCategory.UNKNOWN, "unknown"),
     ],
 )
@@ -239,3 +245,164 @@ def test_run_failed_category_must_be_error_category() -> None:
         RunFailed(  # type: ignore[arg-type]
             run_id="run-1", message="boom", category="unknown", seq=1
         )
+
+
+def test_new_tool_and_interaction_events_join_engine_event_union() -> None:
+    events = [
+        ToolStarted("run-1", 1, "call-1", "read"),
+        ToolFinished("run-1", 2, "call-1", "read", ToolResultStatus.SUCCESS),
+        PermissionRequested(
+            "run-1", 3, "interaction-1", "call-1", "write", "write access"
+        ),
+        UserInputRequested("run-1", 4, "interaction-2", "Which encoding?"),
+    ]
+
+    assert all(isinstance(event, get_args(EngineEvent)) for event in events)
+    assert [event.seq for event in events] == [1, 2, 3, 4]
+
+
+def test_tool_events_carry_only_safe_summary_fields() -> None:
+    started = ToolStarted("run-1", 1, "call-1", "bash")
+    finished = ToolFinished(
+        "run-1", 2, "call-1", "bash", ToolResultStatus.EXECUTION_FAILED
+    )
+
+    assert started.call_id == finished.call_id == "call-1"
+    assert started.tool_name == finished.tool_name == "bash"
+    assert finished.status is ToolResultStatus.EXECUTION_FAILED
+    assert not hasattr(finished, "result")
+    assert not hasattr(finished, "output")
+    assert not hasattr(finished, "exception")
+
+
+def test_interaction_events_carry_frontend_independent_data() -> None:
+    permission = PermissionRequested(
+        "run-1", 1, "interaction-1", "call-1", "write", "write access"
+    )
+    user_input = UserInputRequested("run-1", 2, "interaction-2", "Which encoding?")
+
+    assert permission.interaction_id == "interaction-1"
+    assert permission.message == "write access"
+    assert user_input.interaction_id == "interaction-2"
+    assert user_input.question == "Which encoding?"
+    assert not hasattr(permission, "command")
+    assert not hasattr(permission, "content")
+    assert not hasattr(permission, "exception")
+    assert not hasattr(user_input, "ui")
+    assert not hasattr(user_input, "terminal")
+
+
+@pytest.mark.parametrize("run_id", ["", "   ", "\t\n"])
+def test_new_events_reuse_run_id_validation(run_id: str) -> None:
+    builders = (
+        lambda: ToolStarted(run_id, 1, "call-1", "read"),
+        lambda: ToolFinished(run_id, 1, "call-1", "read", ToolResultStatus.SUCCESS),
+        lambda: PermissionRequested(
+            run_id, 1, "interaction-1", "call-1", "read", "read access"
+        ),
+        lambda: UserInputRequested(run_id, 1, "interaction-1", "Question?"),
+    )
+    for build in builders:
+        with pytest.raises(ValueError, match="run_id"):
+            build()
+
+
+@pytest.mark.parametrize("seq", [-1, True, "1"])
+def test_new_events_reuse_seq_validation(seq: object) -> None:
+    builders = (
+        lambda: ToolStarted("run-1", seq, "call-1", "read"),  # type: ignore[arg-type]
+        lambda: ToolFinished(  # type: ignore[arg-type]
+            "run-1", seq, "call-1", "read", ToolResultStatus.SUCCESS
+        ),
+        lambda: PermissionRequested(  # type: ignore[arg-type]
+            "run-1", seq, "interaction-1", "call-1", "read", "read access"
+        ),
+        lambda: UserInputRequested(  # type: ignore[arg-type]
+            "run-1", seq, "interaction-1", "Question?"
+        ),
+    )
+    for build in builders:
+        with pytest.raises((TypeError, ValueError)):
+            build()
+
+
+@pytest.mark.parametrize("call_id", ["", "   ", "\t\n"])
+def test_tool_related_events_reject_blank_call_ids(call_id: str) -> None:
+    builders = (
+        lambda: ToolStarted("run-1", 1, call_id, "read"),
+        lambda: ToolFinished("run-1", 1, call_id, "read", ToolResultStatus.SUCCESS),
+        lambda: PermissionRequested(
+            "run-1", 1, "interaction-1", call_id, "read", "read access"
+        ),
+    )
+    for build in builders:
+        with pytest.raises(ValueError, match="call_id"):
+            build()
+
+
+@pytest.mark.parametrize("tool_name", ["", "1read", "-read", "has space", "a" * 65])
+def test_tool_related_events_reject_invalid_tool_names(tool_name: str) -> None:
+    builders = (
+        lambda: ToolStarted("run-1", 1, "call-1", tool_name),
+        lambda: ToolFinished("run-1", 1, "call-1", tool_name, ToolResultStatus.SUCCESS),
+        lambda: PermissionRequested(
+            "run-1", 1, "interaction-1", "call-1", tool_name, "access"
+        ),
+    )
+    for build in builders:
+        with pytest.raises(ValueError, match="tool_name"):
+            build()
+
+
+@pytest.mark.parametrize("interaction_id", ["", "   ", "\t\n"])
+def test_interaction_events_reject_blank_interaction_ids(
+    interaction_id: str,
+) -> None:
+    with pytest.raises(ValueError, match="interaction_id"):
+        PermissionRequested("run-1", 1, interaction_id, "call-1", "read", "read access")
+    with pytest.raises(ValueError, match="interaction_id"):
+        UserInputRequested("run-1", 1, interaction_id, "Question?")
+
+
+def test_new_event_identifiers_and_tool_names_must_be_strings() -> None:
+    builders = (
+        lambda: ToolStarted("run-1", 1, 42, "read"),  # type: ignore[arg-type]
+        lambda: ToolFinished(  # type: ignore[arg-type]
+            "run-1", 1, "call-1", 42, ToolResultStatus.SUCCESS
+        ),
+        lambda: PermissionRequested(  # type: ignore[arg-type]
+            "run-1", 1, 42, "call-1", "read", "access"
+        ),
+        lambda: UserInputRequested(  # type: ignore[arg-type]
+            "run-1", 1, 42, "Question?"
+        ),
+    )
+    for build in builders:
+        with pytest.raises(TypeError):
+            build()
+
+
+def test_new_events_validate_status_and_frontend_text() -> None:
+    with pytest.raises(TypeError, match="status"):
+        ToolFinished(  # type: ignore[arg-type]
+            "run-1", 1, "call-1", "read", "success"
+        )
+    with pytest.raises(ValueError, match="message"):
+        PermissionRequested("run-1", 1, "interaction-1", "call-1", "read", "   ")
+    with pytest.raises(TypeError, match="message"):
+        PermissionRequested(  # type: ignore[arg-type]
+            "run-1", 1, "interaction-1", "call-1", "read", b"raw"
+        )
+    with pytest.raises(ValueError, match="question"):
+        UserInputRequested("run-1", 1, "interaction-1", "   ")
+    with pytest.raises(TypeError, match="question"):
+        UserInputRequested(  # type: ignore[arg-type]
+            "run-1", 1, "interaction-1", b"raw"
+        )
+
+
+def test_new_events_are_immutable() -> None:
+    event = ToolStarted("run-1", 1, "call-1", "read")
+
+    with pytest.raises(FrozenInstanceError):
+        event.tool_name = "write"  # type: ignore[misc]

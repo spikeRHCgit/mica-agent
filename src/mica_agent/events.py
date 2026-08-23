@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
+from .tool_contracts import ToolResultStatus, _validate_tool_name
+
 
 def _validate_run_id(run_id: str) -> None:
     """run_id 必须是非空、非纯空白字符串。"""
@@ -28,10 +30,14 @@ def _validate_seq(seq: int) -> None:
 
 def _validate_message(message: str) -> None:
     """面向用户的诊断消息必须是非空、非纯空白字符串。"""
-    if not isinstance(message, str):
-        raise TypeError(f"message must be a str, got {type(message).__name__}")
-    if not message.strip():
-        raise ValueError("message must be a non-empty, non-blank string")
+    _validate_non_blank_text(message, "message")
+
+
+def _validate_non_blank_text(value: object, field_name: str) -> None:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a str, got {type(value).__name__}")
+    if not value.strip():
+        raise ValueError(f"{field_name} must be a non-empty, non-blank string")
 
 
 class RunStatus(Enum):
@@ -54,6 +60,7 @@ class ErrorCategory(Enum):
     TEMPORARY = "temporary"
     MALFORMED = "malformed"
     STORAGE = "storage"
+    LIMIT = "limit"
     UNKNOWN = "unknown"
 
 
@@ -79,6 +86,77 @@ class TextDelta:
     def __post_init__(self) -> None:
         _validate_run_id(self.run_id)
         _validate_seq(self.seq)
+
+
+@dataclass(frozen=True, slots=True)
+class ToolStarted:
+    """一次工具调用开始，不包含工具参数。"""
+
+    run_id: str
+    seq: int
+    call_id: str
+    tool_name: str
+
+    def __post_init__(self) -> None:
+        _validate_run_id(self.run_id)
+        _validate_seq(self.seq)
+        _validate_non_blank_text(self.call_id, "call_id")
+        _validate_tool_name(self.tool_name, "tool_name")
+
+
+@dataclass(frozen=True, slots=True)
+class ToolFinished:
+    """一次工具调用结束，只公开状态而不公开完整结果。"""
+
+    run_id: str
+    seq: int
+    call_id: str
+    tool_name: str
+    status: ToolResultStatus
+
+    def __post_init__(self) -> None:
+        _validate_run_id(self.run_id)
+        _validate_seq(self.seq)
+        _validate_non_blank_text(self.call_id, "call_id")
+        _validate_tool_name(self.tool_name, "tool_name")
+        if not isinstance(self.status, ToolResultStatus):
+            raise TypeError("status must be a ToolResultStatus")
+
+
+@dataclass(frozen=True, slots=True)
+class PermissionRequested:
+    """Engine 请求前端取得一次工具权限回答。"""
+
+    run_id: str
+    seq: int
+    interaction_id: str
+    call_id: str
+    tool_name: str
+    message: str
+
+    def __post_init__(self) -> None:
+        _validate_run_id(self.run_id)
+        _validate_seq(self.seq)
+        _validate_non_blank_text(self.interaction_id, "interaction_id")
+        _validate_non_blank_text(self.call_id, "call_id")
+        _validate_tool_name(self.tool_name, "tool_name")
+        _validate_message(self.message)
+
+
+@dataclass(frozen=True, slots=True)
+class UserInputRequested:
+    """Engine 请求前端取得一个文本回答。"""
+
+    run_id: str
+    seq: int
+    interaction_id: str
+    question: str
+
+    def __post_init__(self) -> None:
+        _validate_run_id(self.run_id)
+        _validate_seq(self.seq)
+        _validate_non_blank_text(self.interaction_id, "interaction_id")
+        _validate_non_blank_text(self.question, "question")
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,5 +208,15 @@ class RunCancelled:
         _validate_seq(self.seq)
 
 
-EngineEvent = RunStarted | TextDelta | RunCompleted | RunFailed | RunCancelled
+EngineEvent = (
+    RunStarted
+    | TextDelta
+    | ToolStarted
+    | ToolFinished
+    | PermissionRequested
+    | UserInputRequested
+    | RunCompleted
+    | RunFailed
+    | RunCancelled
+)
 """Engine 向前端输出的统一事件类型。"""

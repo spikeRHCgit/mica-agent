@@ -13,16 +13,32 @@ import mica_agent
 from mica_agent import (
     CURRENT_SESSION_FORMAT_VERSION,
     AgentEngine,
+    CancellationRequested,
+    CancellationToken,
     EngineEvent,
     ErrorCategory,
     MicaApp,
+    PermissionAnswer,
+    PermissionMode,
+    PermissionRequested,
+    PermissionResponse,
+    PolicyDecision,
     RunStatus,
     SessionError,
     SessionFormatError,
     SessionMeta,
     SessionRecord,
     SessionRecordType,
+    ToolCall,
+    ToolFinished,
+    ToolRequest,
+    ToolResult,
+    ToolResultStatus,
+    ToolSpec,
+    ToolStarted,
     TurnEntry,
+    UserInputRequested,
+    UserInputResponse,
     deserialize_session_record,
     serialize_session_record,
 )
@@ -115,6 +131,66 @@ def test_top_level_exports_engine_and_app() -> None:
     assert mica_agent.RunCompleted is RunCompleted
     assert mica_agent.RunFailed is RunFailed
     assert mica_agent.RunCancelled is RunCancelled
+
+
+def test_top_level_exports_p5_01_contracts() -> None:
+    from mica_agent.cancellation import (
+        CancellationRequested as CancellationRequestedClass,
+    )
+    from mica_agent.cancellation import CancellationToken as CancellationTokenClass
+    from mica_agent.events import (
+        PermissionRequested as PermissionRequestedEvent,
+    )
+    from mica_agent.events import ToolFinished as ToolFinishedEvent
+    from mica_agent.events import ToolStarted as ToolStartedEvent
+    from mica_agent.events import UserInputRequested as UserInputRequestedEvent
+    from mica_agent.interactions import PermissionAnswer as PermissionAnswerEnum
+    from mica_agent.interactions import PermissionResponse as PermissionResponseClass
+    from mica_agent.interactions import UserInputResponse as UserInputResponseClass
+    from mica_agent.permissions import PermissionMode as PermissionModeEnum
+    from mica_agent.permissions import PolicyDecision as PolicyDecisionEnum
+    from mica_agent.tool_contracts import ToolCall as ToolCallClass
+    from mica_agent.tool_contracts import ToolRequest as ToolRequestClass
+    from mica_agent.tool_contracts import ToolResult as ToolResultClass
+    from mica_agent.tool_contracts import ToolResultStatus as ToolResultStatusEnum
+    from mica_agent.tool_contracts import ToolSpec as ToolSpecClass
+
+    assert CancellationRequested is CancellationRequestedClass
+    assert CancellationToken is CancellationTokenClass
+    assert PermissionAnswer is PermissionAnswerEnum
+    assert PermissionMode is PermissionModeEnum
+    assert PermissionRequested is PermissionRequestedEvent
+    assert PermissionResponse is PermissionResponseClass
+    assert PolicyDecision is PolicyDecisionEnum
+    assert ToolCall is ToolCallClass
+    assert ToolFinished is ToolFinishedEvent
+    assert ToolRequest is ToolRequestClass
+    assert ToolResult is ToolResultClass
+    assert ToolResultStatus is ToolResultStatusEnum
+    assert ToolSpec is ToolSpecClass
+    assert ToolStarted is ToolStartedEvent
+    assert UserInputRequested is UserInputRequestedEvent
+    assert UserInputResponse is UserInputResponseClass
+
+
+def test_p5_01_contract_modules_import_without_runtime_cycles() -> None:
+    code = (
+        "import sys\n"
+        "import mica_agent.cancellation\n"
+        "import mica_agent.interactions\n"
+        "import mica_agent.permissions\n"
+        "import mica_agent.tool_contracts\n"
+        "import mica_agent.events\n"
+        "assert 'mica_agent.app' not in sys.modules\n"
+        "assert 'mica_agent.engine' not in sys.modules\n"
+        "assert 'mica_agent.providers' not in sys.modules\n"
+        "assert 'mica_agent.cli' not in sys.modules\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_top_level_exports_session_contracts() -> None:
