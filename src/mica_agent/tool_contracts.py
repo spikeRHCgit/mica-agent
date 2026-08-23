@@ -13,6 +13,15 @@ from typing import TypeAlias
 JsonScalar: TypeAlias = None | bool | int | float | str
 JsonValue: TypeAlias = JsonScalar | tuple["JsonValue", ...] | Mapping[str, "JsonValue"]
 JsonObject: TypeAlias = Mapping[str, JsonValue]
+MutableJsonValue: TypeAlias = (
+    None
+    | bool
+    | int
+    | float
+    | str
+    | list["MutableJsonValue"]
+    | dict[str, "MutableJsonValue"]
+)
 
 _TOOL_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,63}\Z")
 
@@ -75,6 +84,45 @@ def _freeze_json_object(value: object, field_name: str) -> JsonObject:
     frozen = _freeze_json(value, field_name)
     assert isinstance(frozen, Mapping)
     return frozen
+
+
+def to_mutable_json(value: JsonValue) -> MutableJsonValue:
+    """把 P5 不可变 JSON 快照递归复制为标准可变 JSON 值。"""
+
+    def copy_snapshot(current: object, active: set[int]) -> MutableJsonValue:
+        if current is None or isinstance(current, (bool, str)):
+            return current
+        if isinstance(current, int):
+            return current
+        if isinstance(current, float):
+            if not math.isfinite(current):
+                raise ValueError("JSON snapshot must contain only finite numbers")
+            return current
+        if isinstance(current, tuple):
+            identity = id(current)
+            if identity in active:
+                raise ValueError("JSON snapshot must not contain recursive values")
+            active.add(identity)
+            try:
+                return [copy_snapshot(item, active) for item in current]
+            finally:
+                active.remove(identity)
+        if isinstance(current, Mapping):
+            if not all(isinstance(key, str) for key in current):
+                raise TypeError("JSON snapshot object keys must be strings")
+            identity = id(current)
+            if identity in active:
+                raise ValueError("JSON snapshot must not contain recursive values")
+            active.add(identity)
+            try:
+                return {
+                    key: copy_snapshot(item, active) for key, item in current.items()
+                }
+            finally:
+                active.remove(identity)
+        raise TypeError("value must be a P5 JSON snapshot")
+
+    return copy_snapshot(value, set())
 
 
 class ToolResultStatus(Enum):

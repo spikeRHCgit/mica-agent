@@ -15,22 +15,33 @@ from mica_agent import (
     AgentEngine,
     CancellationRequested,
     CancellationToken,
+    DuplicateToolError,
     EngineEvent,
     ErrorCategory,
+    InvalidToolSchemaError,
     MicaApp,
     PermissionAnswer,
     PermissionMode,
     PermissionRequested,
     PermissionResponse,
     PolicyDecision,
+    PolicyEngine,
+    PolicyInput,
+    PolicyOperation,
+    RegisteredTool,
     RunStatus,
     SessionError,
     SessionFormatError,
     SessionMeta,
     SessionRecord,
     SessionRecordType,
+    ToolArgumentsValidationError,
     ToolCall,
     ToolFinished,
+    ToolHandler,
+    ToolNotFoundError,
+    ToolRegistry,
+    ToolRegistryError,
     ToolRequest,
     ToolResult,
     ToolResultStatus,
@@ -41,6 +52,9 @@ from mica_agent import (
     UserInputResponse,
     deserialize_session_record,
     serialize_session_record,
+    to_mutable_json,
+    validate_tool_arguments,
+    validate_tool_schema,
 )
 from mica_agent.events import (
     RunCancelled,
@@ -173,6 +187,46 @@ def test_top_level_exports_p5_01_contracts() -> None:
     assert UserInputResponse is UserInputResponseClass
 
 
+def test_top_level_exports_p5_02_contracts() -> None:
+    from mica_agent.policy import PolicyEngine as PolicyEngineClass
+    from mica_agent.policy import PolicyInput as PolicyInputClass
+    from mica_agent.policy import PolicyOperation as PolicyOperationEnum
+    from mica_agent.schema_validation import (
+        InvalidToolSchemaError as InvalidToolSchemaErrorClass,
+    )
+    from mica_agent.schema_validation import (
+        ToolArgumentsValidationError as ToolArgumentsValidationErrorClass,
+    )
+    from mica_agent.schema_validation import (
+        validate_tool_arguments as validate_tool_arguments_function,
+    )
+    from mica_agent.schema_validation import (
+        validate_tool_schema as validate_tool_schema_function,
+    )
+    from mica_agent.tool_contracts import to_mutable_json as to_mutable_json_function
+    from mica_agent.tool_registry import DuplicateToolError as DuplicateToolErrorClass
+    from mica_agent.tool_registry import RegisteredTool as RegisteredToolClass
+    from mica_agent.tool_registry import ToolHandler as ToolHandlerProtocol
+    from mica_agent.tool_registry import ToolNotFoundError as ToolNotFoundErrorClass
+    from mica_agent.tool_registry import ToolRegistry as ToolRegistryClass
+    from mica_agent.tool_registry import ToolRegistryError as ToolRegistryErrorClass
+
+    assert DuplicateToolError is DuplicateToolErrorClass
+    assert InvalidToolSchemaError is InvalidToolSchemaErrorClass
+    assert PolicyEngine is PolicyEngineClass
+    assert PolicyInput is PolicyInputClass
+    assert PolicyOperation is PolicyOperationEnum
+    assert RegisteredTool is RegisteredToolClass
+    assert ToolArgumentsValidationError is ToolArgumentsValidationErrorClass
+    assert ToolHandler is ToolHandlerProtocol
+    assert ToolNotFoundError is ToolNotFoundErrorClass
+    assert ToolRegistry is ToolRegistryClass
+    assert ToolRegistryError is ToolRegistryErrorClass
+    assert to_mutable_json is to_mutable_json_function
+    assert validate_tool_arguments is validate_tool_arguments_function
+    assert validate_tool_schema is validate_tool_schema_function
+
+
 def test_p5_01_contract_modules_import_without_runtime_cycles() -> None:
     code = (
         "import sys\n"
@@ -265,6 +319,24 @@ def test_models_module_is_independent_of_providers_and_events() -> None:
     code = (
         "import sys\n"
         "import mica_agent.models\n"
+        "assert 'mica_agent.providers' not in sys.modules\n"
+        "assert 'mica_agent.cli' not in sys.modules\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_p5_02_modules_import_without_runtime_cycles() -> None:
+    code = (
+        "import sys\n"
+        "import mica_agent.tool_registry\n"
+        "import mica_agent.schema_validation\n"
+        "import mica_agent.policy\n"
+        "assert 'mica_agent.app' not in sys.modules\n"
+        "assert 'mica_agent.engine' not in sys.modules\n"
         "assert 'mica_agent.providers' not in sys.modules\n"
         "assert 'mica_agent.cli' not in sys.modules\n"
     )

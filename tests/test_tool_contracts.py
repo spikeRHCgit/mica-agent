@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import FrozenInstanceError
 from types import MappingProxyType
 
@@ -13,6 +14,7 @@ from mica_agent.tool_contracts import (
     ToolResult,
     ToolResultStatus,
     ToolSpec,
+    to_mutable_json,
 )
 
 
@@ -85,6 +87,35 @@ def test_json_objects_are_deep_immutable_snapshots() -> None:
     assert isinstance(nested, MappingProxyType)
     with pytest.raises(TypeError):
         nested["lines"] = ()  # type: ignore[index]
+
+
+def test_to_mutable_json_returns_independent_standard_json_values() -> None:
+    call = ToolCall(
+        "call-1",
+        "read",
+        {"path": "a.txt", "options": {"lines": [1, 2], "strict": True}},
+    )
+
+    converted = to_mutable_json(call.arguments)
+
+    assert json.loads(json.dumps(converted)) == {
+        "path": "a.txt",
+        "options": {"lines": [1, 2], "strict": True},
+    }
+    assert isinstance(converted, dict)
+    assert isinstance(converted["options"], dict)
+    converted["options"]["lines"].append(3)
+    assert call.arguments["options"]["lines"] == (1, 2)
+
+
+@pytest.mark.parametrize("invalid", [[1], b"credential-like-secret", {"bad"}])
+def test_to_mutable_json_rejects_values_outside_snapshot_contract(
+    invalid: object,
+) -> None:
+    with pytest.raises((TypeError, ValueError)) as caught:
+        to_mutable_json(invalid)  # type: ignore[arg-type]
+
+    assert "credential-like-secret" not in str(caught.value)
 
 
 def test_public_tool_objects_are_frozen() -> None:

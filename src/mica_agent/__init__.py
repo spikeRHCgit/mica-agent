@@ -46,6 +46,7 @@ from .jsonl_store import (
 )
 from .models import Message, MessageRole
 from .permissions import PermissionMode, PolicyDecision
+from .policy import PolicyEngine, PolicyInput, PolicyOperation
 from .session_contracts import (
     CURRENT_SESSION_FORMAT_VERSION,
     SessionError,
@@ -71,6 +72,7 @@ from .tool_contracts import (
     ToolResult,
     ToolResultStatus,
     ToolSpec,
+    to_mutable_json,
 )
 from .workspace import (
     WorkspaceIdentity,
@@ -93,8 +95,10 @@ __all__ = [
     "ContextBuilder",
     "ContextDiagnostic",
     "ContextDiagnosticKind",
+    "DuplicateToolError",
     "EngineEvent",
     "ErrorCategory",
+    "InvalidToolSchemaError",
     "JsonlSessionStore",
     "JsonlStore",
     "Message",
@@ -106,6 +110,10 @@ __all__ = [
     "PermissionRequested",
     "PermissionResponse",
     "PolicyDecision",
+    "PolicyEngine",
+    "PolicyInput",
+    "PolicyOperation",
+    "RegisteredTool",
     "RunCancelled",
     "RunCompleted",
     "RunFailed",
@@ -129,8 +137,13 @@ __all__ = [
     "SessionStorageIOError",
     "StoredSession",
     "TextDelta",
+    "ToolArgumentsValidationError",
     "ToolCall",
     "ToolFinished",
+    "ToolHandler",
+    "ToolNotFoundError",
+    "ToolRegistry",
+    "ToolRegistryError",
     "ToolRequest",
     "ToolResult",
     "ToolResultStatus",
@@ -148,12 +161,15 @@ __all__ = [
     "resolve_workspace_identity",
     "serialize_session_record",
     "session_filename",
+    "to_mutable_json",
+    "validate_tool_arguments",
+    "validate_tool_schema",
     "workspace_slug",
 ]
 
 
 def __getattr__(name: str) -> object:
-    """延迟加载需要 Provider 栈的装配入口，避免顶层导入副作用。"""
+    """延迟加载运行时装配入口和带第三方依赖的 P5-02 边界。"""
     if name == "AgentEngine":
         from .engine import AgentEngine
 
@@ -162,4 +178,26 @@ def __getattr__(name: str) -> object:
         from .app import MicaApp
 
         return MicaApp
+    schema_exports = {
+        "InvalidToolSchemaError",
+        "ToolArgumentsValidationError",
+        "validate_tool_arguments",
+        "validate_tool_schema",
+    }
+    if name in schema_exports:
+        from . import schema_validation
+
+        return getattr(schema_validation, name)
+    registry_exports = {
+        "DuplicateToolError",
+        "RegisteredTool",
+        "ToolHandler",
+        "ToolNotFoundError",
+        "ToolRegistry",
+        "ToolRegistryError",
+    }
+    if name in registry_exports:
+        from . import tool_registry
+
+        return getattr(tool_registry, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

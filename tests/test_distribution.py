@@ -164,6 +164,8 @@ def run_command(
         env=resolved,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
         input=input_text,
     )
@@ -246,7 +248,7 @@ def full_distribution(
     tmp_path_factory: pytest.TempPathFactory,
     built_distribution: BuiltDistribution,
 ) -> InstalledDistribution:
-    """完整安装环境：uv 按 wheel 元数据解析并安装全部运行依赖。"""
+    """完整运行环境：安装 Mica wheel 并复用当前锁定环境的依赖。"""
     root = tmp_path_factory.mktemp("full-environment")
     home = tmp_path_factory.mktemp("full-home")
     _environment, python, mica = create_venv(root)
@@ -257,6 +259,7 @@ def full_distribution(
             "pip",
             "install",
             "--offline",
+            "--no-deps",
             "--python",
             python,
             built_distribution.wheel,
@@ -267,12 +270,24 @@ def full_distribution(
     assert install.returncode == 0, install.stderr
     assert mica.is_file()
 
-    has_httpx = run_command(
-        [python, "-c", "import httpx"],
+    site_packages_result = run_command(
+        [python, "-c", "import site; print(site.getsitepackages()[0])"],
         cwd=root,
         home=home,
     )
-    assert has_httpx.returncode == 0, has_httpx.stderr
+    assert site_packages_result.returncode == 0, site_packages_result.stderr
+    site_packages = Path(site_packages_result.stdout.strip())
+    locked_site_packages = Path(pytest.__file__).resolve().parent.parent
+    (site_packages / "mica-test-runtime.pth").write_text(
+        str(locked_site_packages), encoding="utf-8"
+    )
+
+    has_runtime_dependencies = run_command(
+        [python, "-c", "import httpx; import jsonschema"],
+        cwd=root,
+        home=home,
+    )
+    assert has_runtime_dependencies.returncode == 0, has_runtime_dependencies.stderr
 
     return InstalledDistribution(
         python=python,
@@ -323,7 +338,7 @@ def test_sdist_contains_only_mica_source_package(
     )
 
 
-def test_installed_distribution_runtime_dependencies_are_only_httpx(
+def test_installed_distribution_declares_runtime_dependencies(
     bare_distribution: InstalledDistribution,
 ) -> None:
     result = run_installed(
@@ -336,7 +351,7 @@ def test_installed_distribution_runtime_dependencies_are_only_httpx(
     )
 
     assert result.returncode == 0
-    assert result.stdout == "['httpx>=0.28.1']\n"
+    assert result.stdout == "['httpx>=0.28.1', 'jsonschema>=4.25.1']\n"
     assert result.stderr == ""
 
 
