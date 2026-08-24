@@ -86,6 +86,9 @@ from .workspace import (
 __all__ = [
     "CURRENT_SESSION_FORMAT_VERSION",
     "MAX_AGENTS_FILE_BYTES",
+    "MAX_FILE_BYTES",
+    "MAX_LIST_ENTRIES",
+    "MAX_LIST_OUTPUT_BYTES",
     "AgentEngine",
     "AgentFileSource",
     "CancellationRequested",
@@ -154,9 +157,12 @@ __all__ = [
     "UserInputRequested",
     "UserInputResponse",
     "WorkspaceIdentity",
+    "WorkspacePathError",
+    "WorkspacePathResolver",
     "WorkspaceResolutionError",
     "default_data_root",
     "deserialize_session_record",
+    "register_file_tools",
     "resolve_workspace",
     "resolve_workspace_identity",
     "serialize_session_record",
@@ -200,4 +206,18 @@ def __getattr__(name: str) -> object:
         from . import tool_registry
 
         return getattr(tool_registry, name)
+    if name in {"WorkspacePathError", "WorkspacePathResolver"}:
+        from . import workspace_paths
+
+        return getattr(workspace_paths, name)
+    file_tool_exports = {
+        "MAX_FILE_BYTES",
+        "MAX_LIST_ENTRIES",
+        "MAX_LIST_OUTPUT_BYTES",
+        "register_file_tools",
+    }
+    if name in file_tool_exports:
+        from . import file_tools
+
+        return getattr(file_tools, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

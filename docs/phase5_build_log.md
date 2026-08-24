@@ -55,3 +55,27 @@ JSON object 输入在构造时递归复制为只读 mapping，并把数组复制
 新增运行依赖后，旧分发测试中“只有 httpx”以及依赖机器 uv registry cache 的假设不再成立。经用户明确授权，分发测试改为分别验证 wheel 依赖元数据、无依赖基础 CLI 懒加载，以及 Mica wheel 在当前 uv 锁定依赖环境中的离线运行；自动化测试本身仍不联网。
 
 剩余风险：完整 JSON Schema 支持会带来传递依赖体积；`rpds-py` 在没有对应 wheel 的平台需要编译环境。当前分发测试不再独立证明 uv 能从空 cache 离线安装全部第三方 wheel，该能力依赖发布环境准备 wheelhouse 或预热 cache。未来 Schema 若引入远程引用，当前安全边界会固定拒绝解析，而不会隐式联网。
+
+# P5-03 工作区路径边界与文件工具
+
+## 目标与路径边界
+
+实现 `WorkspacePathResolver` 作为四个文件工具唯一的路径入口。它只接收相对字符串，拒绝空白、NUL、绝对路径、`..`、Windows 盘符相对路径、UNC 与设备/扩展路径；在任何文件系统操作前逐个验证组件，拒绝尾随点、尾随空格、冒号（含 NTFS 备用数据流）及 Windows 保留设备名 `CON`、`PRN`、`AUX`、`NUL`、`CLOCK$`、`COM1`～`COM9`、`LPT1`～`LPT9`，及其普通扩展形式。该规则跨平台一致。逐级检查已有路径中的 symlink、junction 和其他重解析点；写入不存在目标时同样检查已有父目录。错误固定为安全摘要，不回显工作区绝对路径、HOME、内容或底层异常。
+
+该边界不是操作系统沙箱，也不宣称消除检查与使用之间的 TOCTOU 竞态。Windows 上真实目录 junction 测试通过；当前环境禁止普通 symlink 创建，因此该单项以明确原因跳过。POSIX 分支使用标准库的 `lstat`/symlink 检查，但未在 POSIX 主机实测。
+
+## 敏感文件与稳定工具行为
+
+敏感规则集中在路径模块：拒绝 `.git` 及内容、`.env` 和 `.env.*`（明确允许 `.env.example`、`.env.sample`、`.env.template`）、`.npmrc`、`.pypirc`、`id_rsa`、`id_ed25519`、`.pem`、`.key`、`credentials` 目录和 `credentials.json`。`ls` 对根目录等非敏感父目录过滤敏感子项，直接访问敏感目标则安全拒绝。
+
+`register_file_tools(registry, workspace)` 显式、一次性注册 `read`、`ls`、`write`、`edit`；注册不触碰文件、不执行 handler，遇到已有名称时先失败而不留下部分注册。Provider 仍只从 `ToolRegistry.specs()` 取得 `ToolSpec`。
+
+`read` 和 `edit` 复用有界二进制读取：最多请求并读取 `MAX_FILE_BYTES + 1` 字节，额外一字节即整体失败，再严格 UTF-8 解码；不会使用 `Path.read_bytes()` 读取剩余内容。`ls` 只扫描最多 `MAX_LIST_ENTRIES + 1` 个实际目录项，确认超限后不继续收集，再执行敏感项过滤和稳定排序；它只列一层、目录以 `/` 标示且空目录返回固定文字。`write` 创建或替换普通 UTF-8 文件；`edit` 仅对已有普通 UTF-8 文件进行一次唯一的普通字符串替换。四者都在访问前、结果前或替换前检查既有取消令牌。
+
+## 限制、可靠性与验证
+
+集中限制为 `MAX_FILE_BYTES = 262144`、`MAX_LIST_ENTRIES = 1000`、`MAX_LIST_OUTPUT_BYTES = 262144`，按 UTF-8 实际字节计量；超过时整体失败，不返回部分文件或不完整目录结果。`write` 与 `edit` 使用目标同目录临时文件、写入、flush、fsync、关闭和 `os.replace`；替换或此前步骤失败时清理临时文件，旧文件保持原字节，新目标不留下半写入。故障注入后已验证可恢复重试。
+
+真实 Windows 回归覆盖 `.npmrc.`、`.npmrc `、`.git./config`、`.git /config`、`normal.txt:secret`、保留设备名及 NUL；四个公开 handler 都安全返回 `PERMISSION_DENIED`，敏感原始字节不变，不含 traceback、绝对路径、HOME、凭据或原始异常。测试还验证 read/edit 的单次实际读取量、读/编辑超限无部分结果或临时文件、以及 ls 在第 1001 项后停止扫描。P5-01/P5-02 契约及工作区测试保持通过。P5-03 未实现 `bash`、`ask`、ToolExecutor、权限询问、Provider 工具调用、Engine 循环、CLI/TUI 集成、会话 v2 或文件回滚。
+
+剩余风险：文件工具是同步文件 I/O，且不提供 OS 级隔离或 TOCTOU 消除；普通 symlink 在本 Windows 权限配置下未能实际创建；POSIX 重解析点行为尚未做原机验收。

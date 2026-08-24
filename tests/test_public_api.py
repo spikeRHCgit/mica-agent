@@ -227,6 +227,28 @@ def test_top_level_exports_p5_02_contracts() -> None:
     assert validate_tool_schema is validate_tool_schema_function
 
 
+def test_top_level_exports_p5_03_contracts() -> None:
+    from mica_agent.file_tools import (
+        MAX_FILE_BYTES,
+        MAX_LIST_ENTRIES,
+        MAX_LIST_OUTPUT_BYTES,
+    )
+    from mica_agent.file_tools import (
+        register_file_tools as register_file_tools_function,
+    )
+    from mica_agent.workspace_paths import WorkspacePathError as WorkspacePathErrorClass
+    from mica_agent.workspace_paths import (
+        WorkspacePathResolver as WorkspacePathResolverClass,
+    )
+
+    assert mica_agent.MAX_FILE_BYTES == MAX_FILE_BYTES
+    assert mica_agent.MAX_LIST_ENTRIES == MAX_LIST_ENTRIES
+    assert mica_agent.MAX_LIST_OUTPUT_BYTES == MAX_LIST_OUTPUT_BYTES
+    assert mica_agent.register_file_tools is register_file_tools_function
+    assert mica_agent.WorkspacePathError is WorkspacePathErrorClass
+    assert mica_agent.WorkspacePathResolver is WorkspacePathResolverClass
+
+
 def test_p5_01_contract_modules_import_without_runtime_cycles() -> None:
     code = (
         "import sys\n"
@@ -335,6 +357,27 @@ def test_p5_02_modules_import_without_runtime_cycles() -> None:
         "import mica_agent.tool_registry\n"
         "import mica_agent.schema_validation\n"
         "import mica_agent.policy\n"
+        "assert 'mica_agent.app' not in sys.modules\n"
+        "assert 'mica_agent.engine' not in sys.modules\n"
+        "assert 'mica_agent.providers' not in sys.modules\n"
+        "assert 'mica_agent.cli' not in sys.modules\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_p5_03_imports_have_no_filesystem_or_runtime_side_effects() -> None:
+    code = (
+        "import pathlib, sys\n"
+        "def forbidden(*args, **kwargs): raise AssertionError('filesystem access')\n"
+        "pathlib.Path.home = forbidden\n"
+        "pathlib.Path.cwd = forbidden\n"
+        "import mica_agent\n"
+        "import mica_agent.file_tools\n"
+        "import mica_agent.workspace_paths\n"
         "assert 'mica_agent.app' not in sys.modules\n"
         "assert 'mica_agent.engine' not in sys.modules\n"
         "assert 'mica_agent.providers' not in sys.modules\n"
