@@ -30,6 +30,7 @@ from mica_agent.providers import (
     TextDelta,
 )
 from mica_agent.providers.openai_compatible import resolve_endpoint
+from mica_agent.tool_contracts import ToolCall, ToolSpec
 
 # ---------------------------------------------------------------------------
 # URL 契约
@@ -191,11 +192,177 @@ def test_request_body_uses_wire_roles_and_stream_flag() -> None:
     payload = json.loads(body)
     assert payload["model"] == "gpt-test"
     assert payload["stream"] is True
+    assert "tools" not in payload
+    assert "tool_choice" not in payload
     assert payload["messages"] == [
         {"role": "system", "content": "be brief"},
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi there"},
     ]
+
+
+def test_request_sends_tool_specs_as_standard_tools_payload() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["request"] = request
+        return httpx.Response(200, text=DONE_SSE, request=request)
+
+    request = ProviderRequest(
+        model="gpt-test",
+        messages=(Message(MessageRole.USER, "use lookup"),),
+        tools=(
+            ToolSpec(
+                "lookup",
+                "Look up a value",
+                {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "filters": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                    },
+                    "required": ["query"],
+                },
+            ),
+        ),
+    )
+    provider = make_provider(handler)
+    _run_collect(provider, request)
+
+    body = json.loads(captured["request"].read())  # type: ignore[union-attr]
+    assert body["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "description": "Look up a value",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "filters": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["query"],
+                },
+            },
+        }
+    ]
+    body["tools"][0]["function"]["parameters"]["properties"]["query"]["type"] = (
+        "integer"
+    )
+    assert request.tools[0].input_schema["properties"]["query"]["type"] == "string"
+
+
+def test_request_preserves_order_for_multiple_tool_specs() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["request"] = request
+        return httpx.Response(200, text=DONE_SSE, request=request)
+
+    request = ProviderRequest(
+        model="gpt-test",
+        messages=(Message(MessageRole.USER, "choose a tool"),),
+        tools=(
+            ToolSpec(
+                "first_lookup",
+                "First description",
+                {
+                    "type": "object",
+                    "properties": {"first": {"type": "string"}},
+                },
+            ),
+            ToolSpec(
+                "second_lookup",
+                "Second description",
+                {
+                    "type": "object",
+                    "properties": {"second": {"type": "integer"}},
+                },
+            ),
+        ),
+    )
+
+    provider = make_provider(handler)
+    _run_collect(provider, request)
+
+    http_request = captured["request"]
+    assert isinstance(http_request, httpx.Request)
+    payload = json.loads(http_request.read())
+    assert payload["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "first_lookup",
+                "description": "First description",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"first": {"type": "string"}},
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "second_lookup",
+                "description": "Second description",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"second": {"type": "integer"}},
+                },
+            },
+        },
+    ]
+
+    request = ProviderRequest(
+        model="gpt-test",
+        messages=(
+            Message(
+                MessageRole.ASSISTANT,
+                "",
+                tool_calls=(
+                    ToolCall(
+                        "call-1",
+                        "lookup",
+                        {"query": "你好", "empty": {}, "items": [1, True]},
+                    ),
+                ),
+            ),
+            Message(MessageRole.TOOL, "result 😀", tool_call_id="call-1"),
+        ),
+    )
+    captured: dict[str, object] = {}
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        captured["request"] = http_request
+        return httpx.Response(200, text=DONE_SSE, request=http_request)
+
+    _run_collect(make_provider(handler), request)
+    payload = json.loads(captured["request"].read())  # type: ignore[union-attr]
+
+    assert payload["messages"] == [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "arguments": '{"query":"你好","empty":{},"items":[1,true]}',
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "content": "result 😀", "tool_call_id": "call-1"},
+    ]
+
+    payload["messages"][0]["tool_calls"][0]["function"]["arguments"] = "mutated"
+    assert request.messages[0].tool_calls[0].arguments["query"] == "你好"
 
 
 def test_api_key_never_appears_in_repr() -> None:
@@ -237,6 +404,492 @@ def _text_delta(text: str) -> TextDelta:
     return TextDelta(text=text)
 
 
+def test_stream_assembles_one_fragmented_tool_call() -> None:
+    provider = make_provider(
+        lambda request: _sse_response(
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"lookup","arguments":"{\\"q\\":"}}]}}]}\n\n',
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"你好\\"}"}}]}}]}\n\n',
+            'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+        )
+    )
+
+    events = _run_collect(provider, _make_request())
+
+    assert events == [
+        Finish(
+            reason="tool_calls",
+            tool_calls=(ToolCall("call-1", "lookup", {"q": "你好"}),),
+        )
+    ]
+
+
+def test_stream_assembles_interleaved_multiple_tool_calls_in_index_order() -> None:
+    provider = make_provider(
+        lambda request: _sse_response(
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call-2","type":"function","function":{"name":"second","arguments":"{\\"b\\":"}},{"index":0,"id":"call-1","type":"function","function":{"name":"first","arguments":"{\\"a\\":"}}]}}]}\n\n',
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}},{"index":1,"function":{"arguments":"2}"}}]}}]}\n\n',
+            'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+        )
+    )
+
+    events = _run_collect(provider, _make_request())
+
+    assert events == [
+        Finish(
+            reason="tool_calls",
+            tool_calls=(
+                ToolCall("call-1", "first", {"a": 1}),
+                ToolCall("call-2", "second", {"b": 2}),
+            ),
+        )
+    ]
+
+
+def test_stream_preserves_text_before_tool_calls_and_finishes_once() -> None:
+    provider = make_provider(
+        lambda request: _sse_response(
+            'data: {"choices":[{"delta":{"content":"I will check."}}]}\n\n',
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"lookup","arguments":"{}"}}]}}]}\n\n',
+            'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+            DONE_SSE,
+        )
+    )
+
+    events = _run_collect(provider, _make_request())
+
+    assert events == [
+        TextDelta("I will check."),
+        Finish(
+            reason="tool_calls",
+            tool_calls=(ToolCall("call-1", "lookup", {}),),
+        ),
+    ]
+
+
+def test_done_completes_tool_calls_without_duplicate_finish() -> None:
+    provider = make_provider(
+        lambda request: _sse_response(
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"lookup","arguments":"{}"}}]}}]}\n\n',
+            DONE_SSE,
+        )
+    )
+
+    events = _run_collect(provider, _make_request())
+
+    assert events == [
+        Finish(
+            reason="tool_calls",
+            tool_calls=(ToolCall("call-1", "lookup", {}),),
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        [{"choices": [{"delta": {"tool_calls": "nope"}}]}],
+        [{"choices": [{"delta": {"tool_calls": [1]}}]}],
+        [{"choices": [{"delta": {"tool_calls": [{"index": 0, "function": "nope"}]}}]}],
+        [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [{"index": 0, "function": {"arguments": 1}}]
+                        }
+                    }
+                ]
+            }
+        ],
+        [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {"index": True, "function": {"arguments": "{}"}}
+                            ]
+                        }
+                    }
+                ]
+            }
+        ],
+        [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {"index": -1, "function": {"arguments": "{}"}}
+                            ]
+                        }
+                    }
+                ]
+            }
+        ],
+        [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "type": "custom",
+                                    "function": {"arguments": "{}"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ],
+        [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "type": "function",
+                                    "function": {"name": "lookup", "arguments": "{}"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        ],
+        [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {"arguments": "{}"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        ],
+        [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {"name": "lookup"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        ],
+        [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "lookup",
+                                        "arguments": '{"q":',
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        ],
+        [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "lookup",
+                                        "arguments": "[]",
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        ],
+        [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 1,
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {"name": "lookup", "arguments": "{}"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        ],
+        [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {"name": "lookup", "arguments": "{}"},
+                                },
+                                {
+                                    "index": 1,
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {"name": "lookup", "arguments": "{}"},
+                                },
+                            ]
+                        }
+                    }
+                ]
+            },
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        ],
+        [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {"name": "lookup", "arguments": "{}"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call-2"}]}}]},
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        ],
+        [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {"name": "lookup", "arguments": "{}"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [{"index": 0, "function": {"name": "other"}}]
+                        }
+                    }
+                ]
+            },
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        ],
+        [{"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}],
+        [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {"name": "lookup", "arguments": "{}"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        ],
+    ],
+)
+def test_malformed_tool_streams_emit_one_safe_terminal_error(
+    chunks: list[dict[str, object]],
+) -> None:
+    provider = make_provider(
+        lambda request: _sse_response(
+            *(f"data: {json.dumps(chunk)}\\n\\n" for chunk in chunks),
+            DONE_SSE,
+        )
+    )
+
+    events = _run_collect(provider, _make_request())
+
+    assert len(events) == 1
+    assert isinstance(events[0], ProviderErrorEvent)
+    assert isinstance(events[0].error, MalformedResponseError)
+    public_error = str(events[0].error)
+    assert "call-1" not in public_error
+    assert "call-2" not in public_error
+    assert "lookup" not in public_error
+    assert "sk-secret-value" not in public_error
+    assert "traceback" not in public_error.lower()
+
+
+def test_finish_reason_without_delta_preserves_plain_text_compatibility() -> None:
+    provider = make_provider(
+        lambda request: _sse_response(
+            'data: {"choices":[{"finish_reason":"stop"}]}\n\n'
+        )
+    )
+
+    events = _run_collect(provider, _make_request())
+
+    assert events == [Finish(reason="stop")]
+    assert not any(isinstance(event, ProviderErrorEvent) for event in events)
+
+
+def test_tool_calls_finish_without_delta_assembles_completed_call() -> None:
+    provider = make_provider(
+        lambda request: _sse_response(
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"lookup","arguments":"{\\"q\\":\\"x\\"}"}}]}}]}\n\n',
+            'data: {"choices":[{"finish_reason":"tool_calls"}]}\n\n',
+        )
+    )
+
+    events = _run_collect(provider, _make_request())
+
+    assert events == [
+        Finish(
+            reason="tool_calls",
+            tool_calls=(ToolCall("call-1", "lookup", {"q": "x"}),),
+        )
+    ]
+    assert sum(isinstance(event, Finish) for event in events) == 1
+
+
+@pytest.mark.parametrize("invalid_delta", ["bad", [], None])
+def test_explicit_invalid_delta_with_finish_reason_remains_malformed(
+    invalid_delta: object,
+) -> None:
+    chunk = {"choices": [{"delta": invalid_delta, "finish_reason": "stop"}]}
+    provider = make_provider(
+        lambda request: _sse_response(f"data: {json.dumps(chunk)}\n\n")
+    )
+
+    events = _run_collect(provider, _make_request())
+
+    assert len(events) == 1
+    assert isinstance(events[0], ProviderErrorEvent)
+    assert isinstance(events[0].error, MalformedResponseError)
+
+
+def test_malformed_tool_arguments_with_sensitive_sentinel_never_leak() -> None:
+    original_arguments = '{"token":"sk-secret-value"'
+    chunk = {
+        "choices": [
+            {
+                "delta": {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call-secret",
+                            "type": "function",
+                            "function": {
+                                "name": "secret_lookup",
+                                "arguments": original_arguments,
+                            },
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+    provider = make_provider(
+        lambda request: _sse_response(
+            f"data: {json.dumps(chunk)}\n\n",
+            'data: {"choices":[{"finish_reason":"tool_calls"}]}\n\n',
+        )
+    )
+
+    events = _run_collect(provider, _make_request())
+
+    assert len(events) == 1
+    assert isinstance(events[0], ProviderErrorEvent)
+    assert isinstance(events[0].error, MalformedResponseError)
+    public_error = str(events[0].error)
+    public_repr = repr(events[0].error)
+    for text in (public_error, public_repr):
+        assert "sk-secret-value" not in text
+        assert original_arguments not in text
+        assert "call-secret" not in text
+        assert "secret_lookup" not in text
+        assert "traceback" not in text.lower()
+    assert not any(isinstance(event, (TextDelta, Finish)) for event in events)
+
+    provider = make_provider(
+        lambda request: _sse_response(
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"lookup","arguments":"{\\"q\\":"}}]}}]}\n\n',
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"lookup","arguments":"\\"x\\"}"}}]}}]}\n\n',
+            'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+        )
+    )
+
+    events = _run_collect(provider, _make_request())
+
+    assert events == [
+        Finish(
+            reason="tool_calls",
+            tool_calls=(ToolCall("call-1", "lookup", {"q": "x"}),),
+        )
+    ]
+
+
 def test_multiple_deltas_then_finish_reason() -> None:
     provider = make_provider(
         lambda request: _sse_response(
@@ -252,6 +905,49 @@ def test_multiple_deltas_then_finish_reason() -> None:
         _text_delta("hello"),
         _text_delta(" world"),
         Finish(reason="stop"),
+    ]
+
+
+def test_tool_call_arguments_survive_network_chunk_boundaries() -> None:
+    payload = {
+        "choices": [
+            {
+                "delta": {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "lookup",
+                                "arguments": '{"query":"你好"}',
+                            },
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+    event = f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
+    split_at = event.index(b'\\"query\\"') + 4
+
+    class ChunkyStream(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield event[:split_at]
+            yield event[split_at:]
+            yield b'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n'
+
+    provider = make_provider(
+        lambda request: httpx.Response(200, stream=ChunkyStream(), request=request)
+    )
+
+    events = _run_collect(provider, _make_request())
+
+    assert events == [
+        Finish(
+            reason="tool_calls",
+            tool_calls=(ToolCall("call-1", "lookup", {"query": "你好"}),),
+        )
     ]
 
 
@@ -641,6 +1337,31 @@ def test_connect_timeout_is_retried_then_succeeds() -> None:
 
     assert calls["n"] == 2
     assert events == [Finish()]
+
+
+def test_no_retry_after_tool_call_delta_has_been_produced() -> None:
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(
+            200,
+            stream=_FlakyStream(
+                [
+                    b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"lookup","arguments":"{\\"q\\":"}}]}}]}\n\n'
+                ],
+                exc=httpx.ReadTimeout("read timed out"),
+            ),
+            request=request,
+        )
+
+    provider = _make_flaky_provider(handler, max_retries=3)
+    events = _run_collect(provider, _make_request())
+
+    assert calls["n"] == 1
+    assert len(events) == 1
+    assert isinstance(events[0], ProviderErrorEvent)
+    assert isinstance(events[0].error, MalformedResponseError)
 
 
 def test_no_retry_after_text_has_been_produced() -> None:

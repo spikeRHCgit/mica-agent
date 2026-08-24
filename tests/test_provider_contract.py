@@ -29,6 +29,7 @@ from mica_agent.providers import (
     TemporaryServerError,
     TextDelta,
 )
+from mica_agent.tool_contracts import ToolCall, ToolSpec
 
 
 def build_request() -> ProviderRequest:
@@ -39,6 +40,79 @@ def build_request() -> ProviderRequest:
             Message(role=MessageRole.USER, content="hi"),
         ),
     )
+
+
+def test_request_tools_default_to_empty_tuple() -> None:
+    request = build_request()
+
+    assert request.tools == ()
+    assert isinstance(request.tools, tuple)
+
+
+def test_request_accepts_immutable_tool_specs() -> None:
+    schema = {"type": "object", "properties": {"value": {"type": "string"}}}
+    spec = ToolSpec("lookup", "Look up a value", schema)
+    request = ProviderRequest(
+        model="test-model",
+        messages=(Message(role=MessageRole.USER, content="hi"),),
+        tools=(spec,),
+    )
+
+    schema["properties"]["value"]["type"] = "integer"
+    assert request.tools == (spec,)
+    assert request.tools[0].input_schema["properties"]["value"]["type"] == "string"
+
+
+def test_request_rejects_non_tuple_tools() -> None:
+    with pytest.raises(TypeError):
+        ProviderRequest(
+            model="test-model",
+            messages=(Message(role=MessageRole.USER, content="hi"),),
+            tools=[],  # type: ignore[arg-type]
+        )
+
+
+def test_request_rejects_non_tool_spec_element() -> None:
+    with pytest.raises(TypeError):
+        ProviderRequest(
+            model="test-model",
+            messages=(Message(role=MessageRole.USER, content="hi"),),
+            tools=("lookup",),  # type: ignore[arg-type]
+        )
+
+
+def test_finish_tool_calls_default_to_empty_tuple() -> None:
+    assert Finish().tool_calls == ()
+    assert Finish("stop").tool_calls == ()
+
+
+def test_finish_accepts_tool_calls_and_is_frozen() -> None:
+    call = ToolCall("call-1", "lookup", {"value": "x"})
+    event = Finish(reason="tool_calls", tool_calls=(call,))
+
+    assert event.tool_calls == (call,)
+    with pytest.raises(FrozenInstanceError):
+        event.tool_calls = ()  # type: ignore[misc]
+
+
+def test_finish_rejects_non_tuple_or_non_tool_call() -> None:
+    with pytest.raises(TypeError):
+        Finish(tool_calls=[ToolCall("call-1", "lookup", {})])  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        Finish(tool_calls=("call-1",))  # type: ignore[arg-type]
+
+
+def test_request_positional_and_keyword_construction_remain_compatible() -> None:
+    message = Message(MessageRole.USER, "hi")
+
+    assert ProviderRequest("test-model", (message,)).model == "test-model"
+    assert ProviderRequest(model="test-model", messages=(message,)).messages == (
+        message,
+    )
+
+
+def test_finish_positional_and_keyword_construction_remain_compatible() -> None:
+    assert Finish("stop") == Finish(reason="stop")
 
 
 def test_request_carries_model_and_message_history() -> None:

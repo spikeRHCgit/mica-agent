@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 
+from ..tool_contracts import ToolCall, to_mutable_json
 from .base import (
     AuthenticationError,
     Finish,
@@ -112,18 +113,52 @@ class OpenAICompatibleProvider:
 
     @staticmethod
     def _build_payload(request: ProviderRequest) -> dict[str, Any]:
-        """把供应商无关请求转换为 Chat Completions JSON 载荷。
+        """把供应商无关请求转换为 Chat Completions JSON 载荷。"""
+        messages: list[dict[str, Any]] = []
+        for message in request.messages:
+            item: dict[str, Any] = {
+                "role": message.role.value,
+                "content": message.content,
+            }
+            if message.role.value == "assistant" and message.tool_calls:
+                item["tool_calls"] = [
+                    {
+                        "id": call.call_id,
+                        "type": "function",
+                        "function": {
+                            "name": call.name,
+                            "arguments": json.dumps(
+                                to_mutable_json(call.arguments),
+                                ensure_ascii=False,
+                                allow_nan=False,
+                                separators=(",", ":"),
+                            ),
+                        },
+                    }
+                    for call in message.tool_calls
+                ]
+            elif message.role.value == "tool":
+                item["tool_call_id"] = message.tool_call_id
+            messages.append(item)
 
-        角色使用 ``MessageRole.value`` 作为 wire 值，不依赖枚举名称。
-        """
-        return {
+        payload: dict[str, Any] = {
             "model": request.model,
-            "messages": [
-                {"role": message.role.value, "content": message.content}
-                for message in request.messages
-            ],
+            "messages": messages,
             "stream": True,
         }
+        if request.tools:
+            payload["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": spec.name,
+                        "description": spec.description,
+                        "parameters": to_mutable_json(spec.input_schema),
+                    },
+                }
+                for spec in request.tools
+            ]
+        return payload
 
     @staticmethod
     def _map_status_error(status: int) -> ProviderError:
@@ -152,14 +187,8 @@ class OpenAICompatibleProvider:
         )
 
     @staticmethod
-    def _parse_chat_chunk(data: str) -> tuple[str, str] | None:
-        """解析单个 SSE ``data`` 载荷为事件标记。
-
-        返回 ``("text", content)``、``("finish", reason)`` 或
-        ``None``（可忽略的事件：无文本的 delta 块等）；结构不符合
-        Chat Completions 流式协议（含缺失、为空的 ``choices``）时
-        抛 :class:`MalformedResponseError`。
-        """
+    def _parse_chat_chunk(data: str) -> dict[str, Any] | None:
+        """解析单个 SSE chunk，返回文本、工具增量和结束原因。"""
         try:
             obj = json.loads(data)
         except json.JSONDecodeError as exc:
@@ -168,31 +197,120 @@ class OpenAICompatibleProvider:
             raise MalformedResponseError("SSE data must be a JSON object")
         choices = obj.get("choices")
         if choices is None:
-            # 缺失 choices：补充事件（usage 等）不按协议出现在流中间。
             raise MalformedResponseError("missing 'choices' field in SSE data")
         if not isinstance(choices, list):
             raise MalformedResponseError("'choices' must be a list")
         if not choices:
-            # 空 choices：流式协议要求至少一个 choice，出现即畸形。
             raise MalformedResponseError("'choices' must not be empty")
         choice = choices[0]
         if not isinstance(choice, dict):
             raise MalformedResponseError("each choice must be a JSON object")
         finish_reason = choice.get("finish_reason")
-        if finish_reason is not None:
-            if not isinstance(finish_reason, str):
-                raise MalformedResponseError("'finish_reason' must be a string")
-            return ("finish", finish_reason)
-        delta = choice.get("delta")
-        if not isinstance(delta, dict):
-            raise MalformedResponseError("'delta' must be a JSON object")
+        if finish_reason is not None and not isinstance(finish_reason, str):
+            raise MalformedResponseError("'finish_reason' must be a string")
+        if "delta" not in choice:
+            if finish_reason is None:
+                raise MalformedResponseError("missing 'delta' field in choice")
+            delta: dict[str, Any] = {}
+        else:
+            delta = choice["delta"]
+            if not isinstance(delta, dict):
+                raise MalformedResponseError("'delta' must be a JSON object")
+
         content = delta.get("content")
-        if content is None:
-            # delta 无文本（角色块等）→ 忽略，不输出 "None"。
-            return None
-        if not isinstance(content, str):
+        if content is not None and not isinstance(content, str):
             raise MalformedResponseError("'delta.content' must be a string")
-        return ("text", content)
+
+        fragments: list[dict[str, Any]] = []
+        if "tool_calls" in delta:
+            raw_calls = delta["tool_calls"]
+            if not isinstance(raw_calls, list):
+                raise MalformedResponseError("'delta.tool_calls' must be a list")
+            for raw_call in raw_calls:
+                if not isinstance(raw_call, dict):
+                    raise MalformedResponseError("each tool call must be an object")
+                index = raw_call.get("index")
+                if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+                    raise MalformedResponseError(
+                        "tool call index must be a non-negative integer"
+                    )
+                fragment: dict[str, Any] = {"index": index}
+                for field in ("id", "type"):
+                    if field in raw_call:
+                        value = raw_call[field]
+                        if not isinstance(value, str):
+                            raise MalformedResponseError(
+                                f"tool call {field} must be a string"
+                            )
+                        if field == "type" and value != "function":
+                            raise MalformedResponseError(
+                                "tool call type must be function"
+                            )
+                        fragment[field] = value
+                if "function" in raw_call:
+                    function = raw_call["function"]
+                    if not isinstance(function, dict):
+                        raise MalformedResponseError(
+                            "tool call function must be an object"
+                        )
+                    function_fragment: dict[str, str] = {}
+                    if "name" in function:
+                        if not isinstance(function["name"], str):
+                            raise MalformedResponseError(
+                                "tool function name must be a string"
+                            )
+                        function_fragment["name"] = function["name"]
+                    if "arguments" in function:
+                        if not isinstance(function["arguments"], str):
+                            raise MalformedResponseError(
+                                "tool function arguments must be a string"
+                            )
+                        function_fragment["arguments"] = function["arguments"]
+                    fragment["function"] = function_fragment
+                fragments.append(fragment)
+
+        if content is None and not fragments and finish_reason is None:
+            return None
+        return {
+            "content": content,
+            "tool_calls": fragments,
+            "finish_reason": finish_reason,
+        }
+
+    @staticmethod
+    def _assemble_tool_calls(
+        accumulators: dict[int, dict[str, Any]],
+    ) -> tuple[ToolCall, ...]:
+        if not accumulators or sorted(accumulators) != list(range(len(accumulators))):
+            raise MalformedResponseError(
+                "tool call indexes must be contiguous from zero"
+            )
+        calls: list[ToolCall] = []
+        call_ids: set[str] = set()
+        for index in range(len(accumulators)):
+            accumulator = accumulators[index]
+            call_id = accumulator.get("id")
+            name = accumulator.get("name")
+            arguments_text = accumulator.get("arguments")
+            if not isinstance(call_id, str) or not call_id.strip():
+                raise MalformedResponseError("tool call id is required")
+            if not isinstance(name, str) or not name.strip():
+                raise MalformedResponseError("tool function name is required")
+            if not isinstance(arguments_text, str):
+                raise MalformedResponseError("tool function arguments are required")
+            if call_id in call_ids:
+                raise MalformedResponseError("tool call ids must be unique")
+            call_ids.add(call_id)
+            try:
+                arguments = json.loads(arguments_text)
+                if not isinstance(arguments, dict):
+                    raise TypeError("tool call arguments must be an object")
+                calls.append(ToolCall(call_id, name, arguments))
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise MalformedResponseError(
+                    "tool call arguments must be a JSON object", cause=exc
+                ) from exc
+        return tuple(calls)
 
     async def stream(self, request: ProviderRequest) -> AsyncIterator[ProviderEvent]:
         payload = self._build_payload(request)
@@ -201,6 +319,8 @@ class OpenAICompatibleProvider:
             "Content-Type": "application/json",
         }
         produced = False
+        tool_accumulators: dict[int, dict[str, Any]] = {}
+        tool_finish_reason: str | None = None
         for attempt in range(self._max_retries + 1):
             established = False
             try:
@@ -223,7 +343,20 @@ class OpenAICompatibleProvider:
                             continue
                         data = line[len("data:") :].lstrip()
                         if data == "[DONE]":
-                            yield Finish()
+                            if tool_accumulators:
+                                try:
+                                    tool_calls = self._assemble_tool_calls(
+                                        tool_accumulators
+                                    )
+                                except MalformedResponseError as exc:
+                                    yield ProviderErrorEvent(error=exc)
+                                    return
+                                yield Finish(
+                                    reason=tool_finish_reason or "tool_calls",
+                                    tool_calls=tool_calls,
+                                )
+                            else:
+                                yield Finish()
                             return
                         try:
                             parsed = self._parse_chat_chunk(data)
@@ -232,13 +365,72 @@ class OpenAICompatibleProvider:
                             return
                         if parsed is None:
                             continue
-                        kind, value = parsed
-                        if kind == "text":
+                        content = parsed["content"]
+                        if content is not None:
                             produced = True
-                            yield TextDelta(text=value)
-                        else:  # finish：正常结束，不再消费后续行。
-                            yield Finish(reason=value)
+                            yield TextDelta(text=content)
+                        for fragment in parsed["tool_calls"]:
+                            produced = True
+                            index = fragment["index"]
+                            accumulator = tool_accumulators.setdefault(index, {})
+                            for field in ("id", "type"):
+                                if field in fragment:
+                                    value = fragment[field]
+                                    previous = accumulator.get(field)
+                                    if previous is not None and previous != value:
+                                        error = MalformedResponseError(
+                                            f"tool call {field} conflicts"
+                                        )
+                                        yield ProviderErrorEvent(error=error)
+                                        return
+                                    accumulator[field] = value
+                            function = fragment.get("function", {})
+                            for field in ("name", "arguments"):
+                                if field in function:
+                                    value = function[field]
+                                    if field == "arguments":
+                                        accumulator[field] = (
+                                            accumulator.get(field, "") + value
+                                        )
+                                    else:
+                                        previous = accumulator.get(field)
+                                        if previous is not None and previous != value:
+                                            error = MalformedResponseError(
+                                                f"tool function {field} conflicts"
+                                            )
+                                            yield ProviderErrorEvent(error=error)
+                                            return
+                                        accumulator[field] = value
+                        finish_reason = parsed["finish_reason"]
+                        if finish_reason is None:
+                            continue
+                        tool_finish_reason = finish_reason
+                        if tool_accumulators and finish_reason != "tool_calls":
+                            yield ProviderErrorEvent(
+                                error=MalformedResponseError(
+                                    "tool calls require a tool_calls finish reason"
+                                )
+                            )
                             return
+                        if finish_reason == "tool_calls":
+                            if not tool_accumulators:
+                                yield ProviderErrorEvent(
+                                    error=MalformedResponseError(
+                                        "tool_calls finish reason requires tool calls"
+                                    )
+                                )
+                                return
+                            try:
+                                tool_calls = self._assemble_tool_calls(
+                                    tool_accumulators
+                                )
+                            except MalformedResponseError as exc:
+                                yield ProviderErrorEvent(error=exc)
+                                return
+                            yield Finish(reason=finish_reason, tool_calls=tool_calls)
+                            return
+                        yield Finish(reason=finish_reason)
+                        return
                     # 流自然耗尽且从未收到结束信号 → 畸形响应。
                     yield ProviderErrorEvent(
                         error=MalformedResponseError(

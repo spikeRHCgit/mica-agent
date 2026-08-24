@@ -95,3 +95,43 @@ Windows 默认优先发现 Git for Windows，并支持从 PATH 中的 Git `git.e
 Windows 真实后代测试使用准备标记确认后代已经启动，再在延迟标记写入前分别触发 CancellationToken 取消、timeout 和输出超限；三条路径均在限定时间内返回，延迟标记最终不存在，测试没有 pending task、未关闭 pipe 或 traceback 警告。Windows taskkill 超时、启动失败、非零退出和进程已退出均保持安全清理路径。
 
 P5-04 未实现 ToolExecutor、权限判定执行、Provider tool calling、Engine 工具循环、CLI/TUI、会话 v2 或 P5-05～P5-08 能力；Bash 也不是操作系统级沙箱。
+
+# P5-05 OpenAI-compatible 工具调用
+
+Provider 公共契约扩展为不可变的 `ProviderRequest(model, messages, tools=())` 和
+`Finish(reason=None, tool_calls=())`。两者继续使用 frozen/slots 数据对象，旧位置参数和
+关键字构造保持兼容；`tools` 与 `tool_calls` 必须分别是 `tuple[ToolSpec, ...]` 和
+`tuple[ToolCall, ...]`，Provider 不保存半成品公共 `ToolCall`。
+
+请求适配只在存在工具时增加标准 `tools` 字段，工具顺序与请求快照一致；参数 Schema 通过
+既有公共 `to_mutable_json()` 转换为独立的普通 dict/list，不把 handler、注册表、权限对象
+或 Provider 私有对象带入请求。无工具请求保持原有 model/messages/stream 载荷，不生成
+`tools` 或 `tool_choice`。assistant 工具调用消息转换为标准 `tool_calls`，参数快照以
+`ensure_ascii=False`、紧凑分隔符和禁止 NaN/Infinity 的 JSON 字符串发送；tool 消息只发送
+role、content 和 tool_call_id。
+
+流式适配按 `delta.tool_calls[].index` 收集碎片，支持 ID、名称、类型和交错的 arguments
+字符串分片；只有结束信号或 `[DONE]` 到达后才解析参数并构造 `ToolCall`。最终检查索引从
+零连续、ID 唯一、类型为 function、ID/名称/参数完整，参数顶层必须是 JSON object，并把
+所有参数快照交给公共 `ToolCall` 校验。纯文本与工具调用可以混合，文本仍按原顺序产生
+`TextDelta`，完整调用只出现在一次 `Finish` 中；`finish_reason` 与 `[DONE]` 不重复结束。
+
+工具字段不是 list、调用项或 function 不是 object、索引非法、类型错误、ID/名称冲突、索引
+缺口、重复 ID、缺失字段、非法或不完整 JSON、非 object 参数、缺少工具调用的
+`tool_calls` 结束原因，以及工具调用后不兼容的普通结束原因，均统一为一个终端
+`ProviderErrorEvent(MalformedResponseError(...))`。公开诊断不回显工具名称、调用 ID、原始
+参数、响应正文、凭据或 traceback。
+
+重试状态在观察到文本或任意工具调用增量后立即变为已产出；此后传输中断不重试、不重复发送
+工具意图。取消仍传播 `CancelledError`，HTTP response 通过现有异步上下文关闭，既有纯文本
+流、错误分类、有限重试和资源生命周期保持兼容。兼容旧式结束 chunk：当 choice 缺少
+`delta` 但带有非空 `finish_reason` 时，将缺失字段视为空对象；因此纯文本可以直接产生
+`Finish(reason="stop")`，已完整收集的工具调用也可以直接在 `finish_reason="tool_calls"`
+时组装。显式存在但为 null、数组或字符串的 `delta` 仍按畸形响应处理；同时缺失 delta
+和 finish_reason 的普通 chunk 仍拒绝，不会被静默忽略。
+
+请求测试通过真实 HTTP mock transport 捕获至少两个 ToolSpec 的 JSON，验证工具名称、描述、
+Schema 和顺序均与 ProviderRequest 一致；畸形工具参数测试实际包含虚假哨兵
+`sk-secret-value`，并验证 MalformedResponseError 的字符串和 repr 都不泄漏原始参数、调用
+ID、工具名称或 traceback。P5-05 只负责协议适配，不执行工具、不访问 ToolRegistry、不接入
+Engine 循环。

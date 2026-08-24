@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from ..models import Message
+from ..tool_contracts import ToolCall, ToolSpec
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,13 +20,15 @@ class ProviderRequest:
     """一次模型请求的供应商无关输入。
 
     ``model`` 必须是非空、非纯空白字符串；``messages`` 必须是非空
-    元组且每项都是 ``Message``。使用元组承载：Provider 或调用方都
-    无法在创建后篡改消息历史。连接信息（URL、Key 等）属于 Provider
-    装配层，不属于单次请求数据。
+    元组且每项都是 ``Message``；``tools`` 是 ``ToolSpec`` 元组。
+    使用元组承载：Provider 或调用方都无法在创建后篡改消息历史或工具
+    快照。连接信息（URL、Key 等）属于 Provider 装配层，不属于单次请求
+    数据。
     """
 
     model: str
     messages: tuple[Message, ...]
+    tools: tuple[ToolSpec, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.model, str):
@@ -40,6 +43,10 @@ class ProviderRequest:
             raise ValueError("messages must not be empty")
         if not all(isinstance(message, Message) for message in self.messages):
             raise TypeError("every message in messages must be a Message")
+        if not isinstance(self.tools, tuple):
+            raise TypeError("tools must be a tuple")
+        if not all(isinstance(tool, ToolSpec) for tool in self.tools):
+            raise TypeError("every item in tools must be a ToolSpec")
 
 
 _SENSITIVE_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -117,9 +124,18 @@ class TextDelta:
 @dataclass(frozen=True, slots=True)
 class Finish:
     """流正常结束。``reason`` 为供应商结束原因（如 ``stop``），
-    默认 ``None`` 表示无特定原因；当前仅作信息承载，不驱动语义。"""
+    默认 ``None`` 表示无特定原因；完整的工具调用只在结束时通过
+    ``tool_calls`` 暴露，不包含 Provider 私有分片。
+    """
 
     reason: str | None = None
+    tool_calls: tuple[ToolCall, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.tool_calls, tuple):
+            raise TypeError("tool_calls must be a tuple")
+        if not all(isinstance(call, ToolCall) for call in self.tool_calls):
+            raise TypeError("every item in tool_calls must be a ToolCall")
 
 
 @dataclass(frozen=True, slots=True)
