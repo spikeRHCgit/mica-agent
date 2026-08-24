@@ -77,6 +77,9 @@ class ScriptedProvider:
 
     async def aclose(self) -> None:
         self.aclose_calls += 1
+        tempdir = getattr(self, "_mica_test_tempdir", None)
+        if tempdir is not None:
+            tempdir.cleanup()
 
 
 class HangingProvider:
@@ -96,6 +99,9 @@ class HangingProvider:
 
     async def aclose(self) -> None:
         self.aclose_calls += 1
+        tempdir = getattr(self, "_mica_test_tempdir", None)
+        if tempdir is not None:
+            tempdir.cleanup()
 
 
 class InputScript:

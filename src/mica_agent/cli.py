@@ -131,7 +131,13 @@ def _main_cli(session_mode: SessionMode = "new") -> int:
             return 0
         return task.result()
     finally:
-        loop.close()
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception:  # noqa: BLE001, S110 - cleanup must not mask CLI result
+            pass
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
 
 
 async def run_interactive(

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import sys
 
 import pytest
+
+from mica_agent import cli
 
 
 @pytest.fixture(params=[("mica",), (sys.executable, "-m", "mica_agent")])
@@ -24,6 +27,65 @@ def run_command(
         text=True,
         check=False,
     )
+
+
+def test_main_cli_shuts_down_async_generators_before_return(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed = False
+
+    async def unfinished_stream():
+        nonlocal closed
+        try:
+            yield "one event"
+        finally:
+            closed = True
+
+    async def fake_run_interactive(*args: object, **kwargs: object) -> int:
+        stream = unfinished_stream()
+        assert await anext(stream) == "one event"
+        return 0
+
+    monkeypatch.setenv("MICA_API_URL", "https://api.example.test/v1")
+    monkeypatch.setenv("MICA_API_KEY", "sk-test-key")
+    monkeypatch.setenv("MICA_MODEL", "test-model")
+    monkeypatch.setattr(cli, "run_interactive", fake_run_interactive)
+
+    assert cli._main_cli() == 0
+    assert closed is True
+
+
+def test_main_cli_shuts_down_async_generators_on_keyboard_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed = False
+
+    async def unfinished_stream():
+        nonlocal closed
+        try:
+            yield "one event"
+        finally:
+            closed = True
+
+    def interrupt_loop() -> None:
+        raise KeyboardInterrupt
+
+    async def fake_run_interactive(*args: object, **kwargs: object) -> int:
+        stream = unfinished_stream()
+        assert await anext(stream) == "one event"
+        asyncio.get_running_loop().call_soon(interrupt_loop)
+        await asyncio.Event().wait()
+        return 0
+
+    monkeypatch.setenv("MICA_API_URL", "https://api.example.test/v1")
+    monkeypatch.setenv("MICA_API_KEY", "sk-test-key")
+    monkeypatch.setenv("MICA_MODEL", "test-model")
+    monkeypatch.setattr(cli, "run_interactive", fake_run_interactive)
+
+    assert cli._main_cli() == 0
+    assert closed is True
+    with pytest.raises(RuntimeError, match="There is no current event loop"):
+        asyncio.get_event_loop()
 
 
 def test_module_version() -> None:

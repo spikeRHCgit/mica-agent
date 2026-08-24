@@ -29,7 +29,14 @@ from .events import (
     ToolStarted,
     UserInputRequested,
 )
-from .interactions import PermissionAnswer, PermissionResponse, UserInputResponse
+from .interactions import (
+    InteractionBroker,
+    InteractionKind,
+    InteractionRequest,
+    PermissionAnswer,
+    PermissionResponse,
+    UserInputResponse,
+)
 from .jsonl_store import (
     JsonlSessionStore,
     JsonlStore,
@@ -103,6 +110,9 @@ __all__ = [
     "DuplicateToolError",
     "EngineEvent",
     "ErrorCategory",
+    "InteractionBroker",
+    "InteractionKind",
+    "InteractionRequest",
     "InvalidToolSchemaError",
     "JsonlSessionStore",
     "JsonlStore",
@@ -144,6 +154,7 @@ __all__ = [
     "TextDelta",
     "ToolArgumentsValidationError",
     "ToolCall",
+    "ToolExecutor",
     "ToolFinished",
     "ToolHandler",
     "ToolNotFoundError",
@@ -188,6 +199,10 @@ def __getattr__(name: str) -> object:
         from .app import MicaApp
 
         return MicaApp
+    if name == "ToolExecutor":
+        from .tool_executor import ToolExecutor
+
+        return ToolExecutor
     schema_exports = {
         "InvalidToolSchemaError",
         "ToolArgumentsValidationError",

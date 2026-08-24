@@ -1,6 +1,6 @@
 """AgentEngine：单次 Run 的异步编排（P2-03）。
 
-Engine 只依赖 Provider 公共契约（``stream`` 异步流），不读取
+Engine 只依赖 Provider 与可选的 ToolExecutor 公共契约，不读取
 环境变量、配置或 CLI 状态；把 Provider 事件映射为带 ``run_id``
 与严格 ``seq`` 的 Engine 事件，并保证恰好一个终态。
 """
@@ -8,18 +8,27 @@ Engine 只依赖 Provider 公共契约（``stream`` 异步流），不读取
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from collections.abc import AsyncIterator, Callable
+from contextlib import aclosing
 
+from .cancellation import CancellationRequested, CancellationToken
 from .events import (
     EngineEvent,
     ErrorCategory,
+    PermissionRequested,
     RunCancelled,
     RunCompleted,
     RunFailed,
     RunStarted,
     TextDelta,
+    ToolFinished,
+    ToolStarted,
+    UserInputRequested,
 )
+from .interactions import InteractionKind, InteractionRequest
+from .models import Message, MessageRole
 from .providers import (
     AuthenticationError,
     Finish,
@@ -27,14 +36,27 @@ from .providers import (
     Provider,
     ProviderError,
     ProviderErrorEvent,
+    ProviderEvent,
     ProviderRequest,
     ProviderTimeoutError,
     RateLimitError,
     TemporaryServerError,
 )
 from .providers import TextDelta as ProviderTextDelta
+from .tool_contracts import ToolRequest, ToolResult, ToolResultStatus, to_mutable_json
+from .tool_executor import ToolExecutor
 
 RunIdFactory = Callable[[], str]
+DEFAULT_MAX_MODEL_STEPS = 8
+DEFAULT_MAX_TOOL_CALLS = 32
+
+
+class _ToolSignal:
+    __slots__ = ("kind", "value")
+
+    def __init__(self, kind: str, value: object) -> None:
+        self.kind = kind
+        self.value = value
 
 
 def _default_run_id() -> str:
@@ -56,68 +78,341 @@ class AgentEngine:
         provider: Provider,
         *,
         run_id_factory: RunIdFactory | None = None,
+        tool_executor: ToolExecutor | None = None,
+        max_model_steps: int = DEFAULT_MAX_MODEL_STEPS,
+        max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS,
     ) -> None:
+        if isinstance(max_model_steps, bool) or not isinstance(max_model_steps, int):
+            raise TypeError("max_model_steps must be a positive integer")
+        if max_model_steps <= 0:
+            raise ValueError("max_model_steps must be a positive integer")
+        if isinstance(max_tool_calls, bool) or not isinstance(max_tool_calls, int):
+            raise TypeError("max_tool_calls must be a positive integer")
+        if max_tool_calls <= 0:
+            raise ValueError("max_tool_calls must be a positive integer")
+        if tool_executor is not None and not isinstance(tool_executor, ToolExecutor):
+            raise TypeError("tool_executor must be a ToolExecutor or None")
         self._provider = provider
         self._run_id_factory = run_id_factory or _default_run_id
+        self._tool_executor = tool_executor
+        self._interaction_broker = (
+            tool_executor.interaction_broker if tool_executor is not None else None
+        )
+        self._max_model_steps = max_model_steps
+        self._max_tool_calls = max_tool_calls
 
-    async def run(self, request: ProviderRequest) -> AsyncIterator[EngineEvent]:
+    async def run(
+        self,
+        request: ProviderRequest,
+        *,
+        cancellation: CancellationToken | None = None,
+    ) -> AsyncIterator[EngineEvent]:
         run_id = self._run_id_factory()
         seq = 0
+        token = cancellation or CancellationToken()
         yield RunStarted(run_id=run_id)
         seq += 1
+        messages = request.messages
+        model_steps = 0
+        tool_calls_total = 0
         try:
-            async for event in self._provider.stream(request):
-                if isinstance(event, ProviderTextDelta):
-                    if not isinstance(event.text, str):
-                        yield RunFailed(
-                            run_id=run_id,
-                            seq=seq,
-                            category=ErrorCategory.MALFORMED,
-                            message="provider produced a non-string text delta",
-                        )
-                        return
-                    yield TextDelta(run_id=run_id, seq=seq, text=event.text)
-                    seq += 1
-                elif isinstance(event, Finish):
-                    yield RunCompleted(run_id=run_id, seq=seq)
-                    return
-                elif isinstance(event, ProviderErrorEvent):
+            token.raise_if_cancelled()
+            while True:
+                token.raise_if_cancelled()
+                if model_steps >= self._max_model_steps:
                     yield RunFailed(
                         run_id=run_id,
                         seq=seq,
-                        category=self._map_error(event.error),
-                        message=self._error_message(event.error),
+                        category=ErrorCategory.LIMIT,
+                        message="model step limit reached",
                     )
                     return
-                else:
-                    # 未知事件对象：安全失败，不尝试渲染。
+                model_steps += 1
+                step_text: list[str] = []
+                finish: Finish | None = None
+                current_request = ProviderRequest(
+                    model=request.model,
+                    messages=messages,
+                    tools=request.tools,
+                )
+                async with aclosing(
+                    self._provider_events(current_request, token)
+                ) as provider_events:
+                    async for provider_event in provider_events:
+                        if isinstance(provider_event, ProviderTextDelta):
+                            if not isinstance(provider_event.text, str):
+                                yield RunFailed(
+                                    run_id=run_id,
+                                    seq=seq,
+                                    category=ErrorCategory.MALFORMED,
+                                    message="provider produced a non-string text delta",
+                                )
+                                return
+                            step_text.append(provider_event.text)
+                            yield TextDelta(
+                                run_id=run_id, seq=seq, text=provider_event.text
+                            )
+                            seq += 1
+                        elif isinstance(provider_event, Finish):
+                            finish = provider_event
+                            break
+                        elif isinstance(provider_event, ProviderErrorEvent):
+                            yield RunFailed(
+                                run_id=run_id,
+                                seq=seq,
+                                category=self._map_error(provider_event.error),
+                                message=self._error_message(provider_event.error),
+                            )
+                            return
+                        else:
+                            yield RunFailed(
+                                run_id=run_id,
+                                seq=seq,
+                                category=ErrorCategory.UNKNOWN,
+                                message="provider produced an unknown event",
+                            )
+                            return
+                if finish is None:
+                    yield RunFailed(
+                        run_id=run_id,
+                        seq=seq,
+                        category=ErrorCategory.MALFORMED,
+                        message="provider stream ended without a terminal event",
+                    )
+                    return
+                if not finish.tool_calls:
+                    yield RunCompleted(run_id=run_id, seq=seq)
+                    return
+                if self._tool_executor is None:
                     yield RunFailed(
                         run_id=run_id,
                         seq=seq,
                         category=ErrorCategory.UNKNOWN,
-                        message="provider produced an unknown event",
+                        message="tool execution is unavailable",
                     )
                     return
-            # Provider 流自然结束且从未出现终态 → 畸形响应。
-            yield RunFailed(
-                run_id=run_id,
-                seq=seq,
-                category=ErrorCategory.MALFORMED,
-                message="provider stream ended without a terminal event",
-            )
+                batch_size = len(finish.tool_calls)
+                if tool_calls_total + batch_size > self._max_tool_calls:
+                    yield RunFailed(
+                        run_id=run_id,
+                        seq=seq,
+                        category=ErrorCategory.LIMIT,
+                        message="tool call limit reached",
+                    )
+                    return
+                tool_calls_total += batch_size
+                assistant_message = Message(
+                    role=MessageRole.ASSISTANT,
+                    content="".join(step_text),
+                    tool_calls=finish.tool_calls,
+                )
+                messages = messages + (assistant_message,)
+                for call in finish.tool_calls:
+                    tool_request = ToolRequest(call.call_id, call.name, call.arguments)
+                    result: ToolResult | None = None
+                    async for signal in self._tool_execution_signals(
+                        tool_request, token
+                    ):
+                        if signal.kind == "interaction":
+                            interaction = signal.value
+                            assert isinstance(interaction, InteractionRequest)
+                            if interaction.kind is InteractionKind.PERMISSION:
+                                yield PermissionRequested(
+                                    run_id=run_id,
+                                    seq=seq,
+                                    interaction_id=interaction.interaction_id,
+                                    call_id=interaction.call_id,
+                                    tool_name=interaction.tool_name,
+                                    message=interaction.message,
+                                )
+                            else:
+                                yield UserInputRequested(
+                                    run_id=run_id,
+                                    seq=seq,
+                                    interaction_id=interaction.interaction_id,
+                                    question=interaction.message,
+                                )
+                            seq += 1
+                        elif signal.kind == "started":
+                            started = signal.value
+                            assert isinstance(started, ToolRequest)
+                            yield ToolStarted(
+                                run_id=run_id,
+                                seq=seq,
+                                call_id=started.call_id,
+                                tool_name=started.name,
+                            )
+                            seq += 1
+                        elif signal.kind == "finished":
+                            finished = signal.value
+                            assert isinstance(finished, ToolResult)
+                            yield ToolFinished(
+                                run_id=run_id,
+                                seq=seq,
+                                call_id=finished.call_id,
+                                tool_name=finished.tool_name,
+                                status=finished.status,
+                            )
+                            seq += 1
+                        elif signal.kind == "result":
+                            result = signal.value
+                            assert isinstance(result, ToolResult)
+                    if result is None:
+                        yield RunFailed(
+                            run_id=run_id,
+                            seq=seq,
+                            category=ErrorCategory.UNKNOWN,
+                            message="tool execution failed",
+                        )
+                        return
+                    if result.status is ToolResultStatus.CANCELLED:
+                        yield RunCancelled(run_id=run_id, seq=seq)
+                        return
+                    messages = messages + (
+                        Message(
+                            role=MessageRole.TOOL,
+                            content=self._tool_result_message(result),
+                            tool_call_id=call.call_id,
+                        ),
+                    )
+        except CancellationRequested:
+            yield RunCancelled(run_id=run_id, seq=seq)
             return
         except asyncio.CancelledError:
             yield RunCancelled(run_id=run_id, seq=seq)
             raise
-        except Exception:  # noqa: BLE001 - 任务单要求所有未预期异常转为安全 RunFailed
-            # 未预期程序异常：固定、安全、简短诊断，不泄露原异常。
+        except Exception:  # noqa: BLE001 - safe Engine boundary
             yield RunFailed(
                 run_id=run_id,
                 seq=seq,
                 category=ErrorCategory.UNKNOWN,
-                message="unexpected provider error",
+                message="unexpected engine error",
             )
             return
+        finally:
+            if self._interaction_broker is not None:
+                self._interaction_broker.clear()
+
+    async def _provider_events(
+        self,
+        request: ProviderRequest,
+        cancellation: CancellationToken,
+    ) -> AsyncIterator[ProviderEvent]:
+        stream = self._provider.stream(request)
+        try:
+            while True:
+                cancellation.raise_if_cancelled()
+                next_task = asyncio.create_task(stream.__anext__())
+                cancellation_task = asyncio.create_task(cancellation.wait())
+                try:
+                    done, _ = await asyncio.wait(
+                        {next_task, cancellation_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if cancellation_task in done:
+                        next_task.cancel()
+                        await asyncio.gather(next_task, return_exceptions=True)
+                        raise CancellationRequested("operation cancelled")
+                    try:
+                        event = next_task.result()
+                    except StopAsyncIteration:
+                        return
+                    yield event
+                finally:
+                    if not next_task.done():
+                        next_task.cancel()
+                    await asyncio.gather(next_task, return_exceptions=True)
+                    if not cancellation_task.done():
+                        cancellation_task.cancel()
+                    await asyncio.gather(cancellation_task, return_exceptions=True)
+        finally:
+            close = getattr(stream, "aclose", None)
+            if close is not None:
+                await close()
+
+    async def _tool_execution_signals(
+        self,
+        request: ToolRequest,
+        cancellation: CancellationToken,
+    ) -> AsyncIterator[_ToolSignal]:
+        assert self._tool_executor is not None
+        signals: asyncio.Queue[_ToolSignal] = asyncio.Queue()
+
+        def started(value: ToolRequest) -> None:
+            signals.put_nowait(_ToolSignal("started", value))
+
+        def finished(value: ToolResult) -> None:
+            signals.put_nowait(_ToolSignal("finished", value))
+
+        task = asyncio.create_task(
+            self._tool_executor.execute(
+                request,
+                cancellation,
+                on_started=started,
+                on_finished=finished,
+            )
+        )
+        interaction_task: asyncio.Task[InteractionRequest] | None = None
+        signal_task: asyncio.Task[_ToolSignal] | None = None
+        try:
+            while True:
+                if signal_task is None:
+                    signal_task = asyncio.create_task(signals.get())
+                if interaction_task is None and self._interaction_broker is not None:
+                    interaction_task = asyncio.create_task(
+                        self._interaction_broker.next_request()
+                    )
+                waiting: set[asyncio.Task[object]] = {task}  # type: ignore[type-var]
+                waiting.add(signal_task)  # type: ignore[arg-type]
+                if interaction_task is not None:
+                    waiting.add(interaction_task)  # type: ignore[arg-type]
+                done, _ = await asyncio.wait(
+                    waiting, return_when=asyncio.FIRST_COMPLETED
+                )
+                if signal_task in done:
+                    signal = signal_task.result()
+                    signal_task = None
+                    yield signal
+                if interaction_task is not None and interaction_task in done:
+                    interaction = interaction_task.result()
+                    interaction_task = None
+                    yield _ToolSignal("interaction", interaction)
+                if task in done:
+                    result = task.result()
+                    while True:
+                        try:
+                            yield signals.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                    yield _ToolSignal("result", result)
+                    return
+        finally:
+            for pending in (signal_task, interaction_task):
+                if pending is not None and not pending.done():
+                    pending.cancel()
+            await asyncio.gather(
+                *(pending for pending in (signal_task, interaction_task) if pending),
+                return_exceptions=True,
+            )
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            if self._interaction_broker is not None and task.cancelled():
+                self._interaction_broker.clear()
+
+    @staticmethod
+    def _tool_result_message(result: ToolResult) -> str:
+        data = to_mutable_json(result.data) if result.data is not None else None
+        return json.dumps(
+            {
+                "status": result.status.value,
+                "message": result.message,
+                "data": data,
+            },
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
 
     @staticmethod
     def _map_error(error: object) -> ErrorCategory:

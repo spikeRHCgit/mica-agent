@@ -18,6 +18,9 @@ from mica_agent import (
     DuplicateToolError,
     EngineEvent,
     ErrorCategory,
+    InteractionBroker,
+    InteractionKind,
+    InteractionRequest,
     InvalidToolSchemaError,
     MicaApp,
     PermissionAnswer,
@@ -37,6 +40,7 @@ from mica_agent import (
     SessionRecordType,
     ToolArgumentsValidationError,
     ToolCall,
+    ToolExecutor,
     ToolFinished,
     ToolHandler,
     ToolNotFoundError,
@@ -147,7 +151,23 @@ def test_top_level_exports_engine_and_app() -> None:
     assert mica_agent.RunCancelled is RunCancelled
 
 
-def test_top_level_exports_p5_01_contracts() -> None:
+def test_top_level_exports_p5_06_execution_contracts() -> None:
+    from mica_agent.interactions import (
+        InteractionBroker as InteractionBrokerClass,
+    )
+    from mica_agent.interactions import (
+        InteractionKind as InteractionKindEnum,
+    )
+    from mica_agent.interactions import (
+        InteractionRequest as InteractionRequestClass,
+    )
+    from mica_agent.tool_executor import ToolExecutor as ToolExecutorClass
+
+    assert InteractionBroker is InteractionBrokerClass
+    assert InteractionKind is InteractionKindEnum
+    assert InteractionRequest is InteractionRequestClass
+    assert ToolExecutor is ToolExecutorClass
+
     from mica_agent.cancellation import (
         CancellationRequested as CancellationRequestedClass,
     )

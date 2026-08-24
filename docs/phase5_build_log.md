@@ -135,3 +135,53 @@ Schema 和顺序均与 ProviderRequest 一致；畸形工具参数测试实际�
 `sk-secret-value`，并验证 MalformedResponseError 的字符串和 repr 都不泄漏原始参数、调用
 ID、工具名称或 traceback。P5-05 只负责协议适配，不执行工具、不访问 ToolRegistry、不接入
 Engine 循环。
+
+# P5-06 Engine 多步工具循环
+
+P5-06 新增 `ToolExecutor` 作为工具调用唯一入口，固定执行顺序为：查找注册工具、按
+ToolSpec 校验参数、通过可注入的 Policy fact factory 构造权限事实、执行 PolicyEngine、
+必要时等待一次权限响应、调用 handler、校验返回的 ToolResult，并把异常转换为安全的结构化
+结果。未知工具、参数错误、硬性拒绝、用户拒绝和普通 handler 异常不会伪造 handler 开始
+事件；已处理结果统一可以通过 ToolFinished 反馈给模型。handler 返回错误类型、错误调用
+ID 或错误工具名时也只返回固定的执行失败结果。取消使用统一 CancellationToken，未开始的
+工具不会调用 handler，执行中取消不会继续下一个工具。
+
+`InteractionBroker` 是前端无关的交互等待边界。它只把不含 Future、Task 或 Queue 的
+InteractionRequest 快照交给 Engine，支持权限和用户输入两种类型；`respond()` 只接受匹配
+ID 和匹配响应类型，错误 ID、错误类型、重复响应和终态后的迟到响应均忽略。Broker 为每次
+权限或用户输入生成独立、生命周期内不复用的 interaction ID；`InteractionRequest.call_id`
+仍保存原工具调用 ID。ask 前端使用 Broker ID 响应，Broker 返回给既有 ask handler 的
+`UserInputResponse` 时重新关联为原始 call_id，因此不修改 runtime_tools.py 的协议。取消、
+外部 Task 取消、消费者提前关闭和 Run 终态都会清理 broker 等待；已使用 ID 即使 clear、
+取消或完成后也不会再次接受旧响应。Engine 将权限请求映射为 PermissionRequested，将通过
+既有 UserInputRequester 协议产生的 ask 等待映射为 UserInputRequested。Engine 不读取 stdin、
+CLI、App、配置、HOME 或会话文件。
+
+一次带工具的 Run 保持一组严格递增 seq：RunStarted 后，模型文本立即产生 TextDelta；工具
+调用批次先追加 assistant Message（包含本步完整文本和 ToolCall 元组），再按模型返回顺序
+逐个通过 ToolExecutor。允许调用才产生 ToolStarted，handler 返回后产生匹配的 ToolFinished；
+权限请求一定在 ToolStarted 之前。每个 ToolResult 转换为确定性的紧凑 JSON tool Message，
+字段顺序固定为 status、message、data，并使用 `to_mutable_json()` 和 `allow_nan=False`。
+所有工具结果（包括未知、参数错误、权限拒绝和执行失败）都能进入下一次 ProviderRequest，
+成功或失败均不会绕过模型继续请求边界。只有没有工具调用的 Finish 才产生 RunCompleted。
+
+每个模型步骤都在 `contextlib.aclosing(self._provider_events(...))` 边界内消费 Provider
+流。收到普通 Finish、tool_calls Finish、ProviderError、未知事件、取消或 Engine 提前结束
+时，退出该边界后才继续产生终态、执行工具或发起下一次模型请求；底层 Provider 流的
+`aclose()` 在该边界的 finally 中同步等待完成，不依赖 GC、事件循环退出或 `sleep(0)`。
+
+ProviderRequest.tools 在每一轮保持原始不可变 ToolSpec 顺序；Engine 只维护本次 Run 的内存
+Message，不修改 Provider、会话格式或 MicaApp。默认限制为最多 8 次模型请求和 32 次工具
+调用，限制值必须是构造阶段验证过的正整数；工具批次超过剩余总量时在执行任何 handler
+前产生 ErrorCategory.LIMIT，模型步数耗尽后不再请求 Provider。模型错误继续沿用现有
+Provider 错误分类，内部异常转换为 UNKNOWN，取消只产生一个 RunCancelled。
+
+验证覆盖单工具往返、多个工具严格顺序、模型第二轮开始前第一条流已关闭、普通 Finish
+同步关闭、ProviderError 失败关闭、混合文本与工具调用、失败结果回传模型、权限和 ask
+等待、独立 interaction ID、重复 call_id 的迟到响应、Engine 终态后的迟到响应、取消、
+提前关闭、模型/工具上限、纯文本旧事件序列、公共懒加载导出和安全错误边界。目标组、
+严格警告组、分发组和安装态稳定性复跑均通过：CLI 生命周期与 P5-06 严格组 `122 passed`，
+P5-06 目标组 `343 passed`，分发组 `12 passed`，安装态 Unicode session 目标用例两次均为
+`1 passed`；全量测试为 `796 passed, 1 skipped`。显式关闭测试替身 TemporaryDirectory
+后，严格警告测试没有 `ResourceWarning`、pending task 或 `async_generator_athrow`。
+P5-06 不实现会话 v2、MicaApp 工具装配、CLI/TUI 或会话提交；这些属于 P5-07/P5-08，尚未开始。
