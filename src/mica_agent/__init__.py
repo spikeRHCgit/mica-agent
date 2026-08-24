@@ -85,7 +85,9 @@ from .workspace import (
 
 __all__ = [
     "CURRENT_SESSION_FORMAT_VERSION",
+    "DEFAULT_COMMAND_TIMEOUT_SECONDS",
     "MAX_AGENTS_FILE_BYTES",
+    "MAX_COMMAND_OUTPUT_BYTES",
     "MAX_FILE_BYTES",
     "MAX_LIST_ENTRIES",
     "MAX_LIST_OUTPUT_BYTES",
@@ -155,6 +157,7 @@ __all__ = [
     "TurnEntry",
     "TurnNotFoundError",
     "UserInputRequested",
+    "UserInputRequester",
     "UserInputResponse",
     "WorkspaceIdentity",
     "WorkspacePathError",
@@ -163,6 +166,7 @@ __all__ = [
     "default_data_root",
     "deserialize_session_record",
     "register_file_tools",
+    "register_runtime_tools",
     "resolve_workspace",
     "resolve_workspace_identity",
     "serialize_session_record",
@@ -220,4 +224,14 @@ def __getattr__(name: str) -> object:
         from . import file_tools
 
         return getattr(file_tools, name)
+    runtime_tool_exports = {
+        "DEFAULT_COMMAND_TIMEOUT_SECONDS",
+        "MAX_COMMAND_OUTPUT_BYTES",
+        "UserInputRequester",
+        "register_runtime_tools",
+    }
+    if name in runtime_tool_exports:
+        from . import runtime_tools
+
+        return getattr(runtime_tools, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

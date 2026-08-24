@@ -187,6 +187,65 @@ def test_top_level_exports_p5_01_contracts() -> None:
     assert UserInputResponse is UserInputResponseClass
 
 
+def test_plain_import_isolates_runtime_tools_and_runtime_side_effects() -> None:
+    code = """
+import asyncio
+import pathlib
+import shutil
+import subprocess
+import sys
+
+def blocked(*args, **kwargs):
+    raise AssertionError('runtime side effect')
+
+shutil.which = blocked
+subprocess.Popen = blocked
+pathlib.Path.is_file = blocked
+pathlib.Path.home = blocked
+import mica_agent
+assert 'mica_agent.runtime_tools' not in sys.modules
+assert 'mica_agent.app' not in sys.modules
+assert 'mica_agent.engine' not in sys.modules
+assert 'mica_agent.cli' not in sys.modules
+assert not any(name == 'mica_agent.providers' or name.startswith('mica_agent.providers.') for name in sys.modules)
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_top_level_runtime_exports_are_lazy_in_isolated_process() -> None:
+    code = """
+import sys
+import mica_agent
+assert 'mica_agent.runtime_tools' not in sys.modules
+assert mica_agent.DEFAULT_COMMAND_TIMEOUT_SECONDS == 30.0
+assert 'mica_agent.runtime_tools' in sys.modules
+assert mica_agent.MAX_COMMAND_OUTPUT_BYTES == 262144
+assert mica_agent.UserInputRequester is not None
+assert callable(mica_agent.register_runtime_tools)
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_top_level_exports_p5_04_runtime_tools() -> None:
+    from mica_agent.runtime_tools import (
+        DEFAULT_COMMAND_TIMEOUT_SECONDS,
+        MAX_COMMAND_OUTPUT_BYTES,
+        UserInputRequester,
+        register_runtime_tools,
+    )
+
+    assert mica_agent.DEFAULT_COMMAND_TIMEOUT_SECONDS == DEFAULT_COMMAND_TIMEOUT_SECONDS
+    assert mica_agent.MAX_COMMAND_OUTPUT_BYTES == MAX_COMMAND_OUTPUT_BYTES
+    assert mica_agent.UserInputRequester is UserInputRequester
+    assert mica_agent.register_runtime_tools is register_runtime_tools
+
+
 def test_top_level_exports_p5_02_contracts() -> None:
     from mica_agent.policy import PolicyEngine as PolicyEngineClass
     from mica_agent.policy import PolicyInput as PolicyInputClass

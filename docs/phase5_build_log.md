@@ -79,3 +79,19 @@ JSON object 输入在构造时递归复制为只读 mapping，并把数组复制
 真实 Windows 回归覆盖 `.npmrc.`、`.npmrc `、`.git./config`、`.git /config`、`normal.txt:secret`、保留设备名及 NUL；四个公开 handler 都安全返回 `PERMISSION_DENIED`，敏感原始字节不变，不含 traceback、绝对路径、HOME、凭据或原始异常。测试还验证 read/edit 的单次实际读取量、读/编辑超限无部分结果或临时文件、以及 ls 在第 1001 项后停止扫描。P5-01/P5-02 契约及工作区测试保持通过。P5-03 未实现 `bash`、`ask`、ToolExecutor、权限询问、Provider 工具调用、Engine 循环、CLI/TUI 集成、会话 v2 或文件回滚。
 
 剩余风险：文件工具是同步文件 I/O，且不提供 OS 级隔离或 TOCTOU 消除；普通 symlink 在本 Windows 权限配置下未能实际创建；POSIX 重解析点行为尚未做原机验收。
+
+# P5-04 Bash、ask 与子进程取消
+
+`register_runtime_tools()` 原子注册 `bash` 与 `ask`，注册阶段只校验参数和名称冲突，不发现可执行文件、不访问显式 Bash 路径、不启动进程。四个 P5-04 对象通过 `mica_agent` 顶层懒加载导出；普通导入不会加载 runtime tools、App、Engine、CLI 或 Provider。
+
+`ask` 只通过注入的 `UserInputRequester` 请求一次用户响应，支持一般 `Awaitable`（包括 Future），不读取 stdin，也不导入 CLI/Engine/UI。缺失或无效问题、requester 异常、无效响应和 interaction ID 不匹配均转换为固定安全结果；取消令牌和外部 Task 取消会回收 requester 等待任务，外部 Task 取消仍重新抛出 `CancelledError`。
+
+Windows 默认优先发现 Git for Windows，并支持从 PATH 中的 Git `git.exe` 推导安装目录；System32、WindowsApps、PowerShell、cmd、WSL 启动器不会被当作 Bash。Windows 使用 `--noprofile --norc -c`、独立进程组、工作区 cwd 和合并 stdout/stderr；POSIX 分支使用 `start_new_session=True`，清理时按进程组发送有限的 SIGTERM/SIGKILL。POSIX 分支未在原机验收，保留该风险。
+
+命令使用有界流式读取，最多保留 `MAX_COMMAND_OUTPUT_BYTES + 1` 字节；精确上限成功，第一个超限字节立即触发进程树回收并返回无数据的固定失败结果。成功、空输出、Unicode 输出、无效 UTF-8 替换、合并标准错误、非零退出码、启动失败、cwd 失败、超时和取消均有公开 handler 测试。真实 Windows Git Bash 已验证 Unicode/空格工作区 cwd、环境清理、精确输出边界、无限输出终止、CancellationToken 取消、超时、输出超限和外部 Task 取消。
+
+环境只保留普通运行所需变量；常见 API key、token、secret、password、credential 后缀变量，Bash 初始化变量以及导出函数变量均不会传入或执行。测试只读取指定哨兵变量，并验证初始化脚本、提示命令和导出函数不会创建标记文件。
+
+Windows 真实后代测试使用准备标记确认后代已经启动，再在延迟标记写入前分别触发 CancellationToken 取消、timeout 和输出超限；三条路径均在限定时间内返回，延迟标记最终不存在，测试没有 pending task、未关闭 pipe 或 traceback 警告。Windows taskkill 超时、启动失败、非零退出和进程已退出均保持安全清理路径。
+
+P5-04 未实现 ToolExecutor、权限判定执行、Provider tool calling、Engine 工具循环、CLI/TUI、会话 v2 或 P5-05～P5-08 能力；Bash 也不是操作系统级沙箱。
