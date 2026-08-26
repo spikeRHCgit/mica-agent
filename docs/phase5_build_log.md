@@ -229,3 +229,44 @@ MicaApp 不再从 TextDelta 推测持久化消息。它只在收到 Engine 完�
 `TypeError`，scan 能隔离损坏文件并保留健康 v1/v2 会话。剩余风险是清洗器按本阶段明确凭据键
 和常见样式工作，不是通用 DLP；工具副作用仍需用户在失败提示后自行检查。P5-08 CLI 工具装配、
 权限提示和安装态真实工具闭环尚未开始。
+
+# P5-08 基础 CLI 集成与阶段收口
+
+基础文字 CLI 在 Context/AGENTS 预检后、Provider 构造前创建单个 InteractionBroker 和
+ToolRegistry，注册 read、ls、write、edit、bash、ask，并以同一 Broker 连接 ask、
+ToolExecutor 和 MicaApp。Provider 只收到按名称确定排序的六个 ToolSpec。工具初始化失败时
+使用固定诊断退出，不构造 Provider。
+
+`--permission-mode` 支持 default、accept-edits 和 solo，可与新建、`--continue`、`--resume`
+组合；非法值由参数解析阶段拒绝。default 直接允许 read/ls，write/edit/bash 询问；后两种
+模式直接允许文件修改，bash 仍询问。权限只接受 ASCII `y`/`yes`，`n`/`no`/空输入拒绝，其他
+输入固定提示后重试。ask 问题显示在标准错误，空回答也是合法工具回答，不进入普通 USER 消息。
+
+ToolStarted 和 ToolFinished 仅输出 `tool <name>: started` 与 `tool <name>: <status>`，不展示
+参数、调用 ID、完整结果或路径。权限或 ask 等待时的 EOF、Ctrl+C 和外部取消会关闭事件流、
+清理交互等待并关闭 Provider，不提交半轮。消费者在 PermissionRequested 或 UserInputRequested
+等待点主动 `aclose()` 的两个直接公共行为测试也已覆盖：不提交响应即可同步清空 Broker 等待
+与内部异步任务；write handler 不开始、不创建目标文件，ask 等待被取消，两者均不保存半轮，
+最终关闭 App 时 Provider 总计只关闭一次。Engine 对工具信号子流使用显式 `aclosing()`，保证
+公共 App 流关闭返回前完成清理，不依赖事件循环关闭或异步生成器终结器。Provider 流关闭和
+子进程树回收边界继续由 Engine 和 runtime tool 回归覆盖。成功工具 Run 保存完整 v2 工具转录，
+后续请求和 `--continue` 恢复 USER、ASSISTANT(tool_calls)、TOOL、最终 ASSISTANT 的顺序；工具
+副作用后的后续失败不保存半轮，并提醒用户检查工作区。
+
+仓库外安装 wheel 在隔离 HOME、Unicode 和空格工作区中完成真实 loopback 闭环：default 模式
+授权 write 后创建唯一目标文件、保存一条完整 v2 TurnEntry，第二次 `--continue` 恢复工具历史
+并保存第二轮，未重新执行 write，JSONL 仅位于临时 HOME。输出和 JSONL 不包含测试 API Key、
+工具参数敏感哨兵或工作区绝对路径。Windows 安装态由真实自动发现的 Git Bash 执行无副作用、
+有限输出命令，确认 Unicode/空格 cwd、权限询问、合并输出、最终回答和进程退出均正常；未使用
+PowerShell 代替 Bash。
+
+最终自动化结果为：P5-08 集成目标文件 `23 passed`，CLI/P5-08 严格警告组 `64 passed`，工具、
+Policy、Executor、App 与 Engine 严格组 `200 passed`，分发组 `14 passed`，全量
+`850 passed, 1 skipped`；Ruff、格式、离线构建
+和 diff 检查均通过。受控真实 OpenAI-compatible Provider 冒烟也已完成：首轮模型请求 write，
+default 模式询问并授权后创建预期临时文件、返回最终回答并退出；第二次 `--continue` 恢复完整
+历史，模型请求无需授权的 read 并返回最终回答。隔离 HOME 中恰好保存两个完整 v2 工具 Turn，
+真实 Key 未进入 CLI 输出或会话 JSONL，临时凭据环境、HOME 和工作区均已清理。P5-08 的任务单
+验收证据至此齐全。剩余风险包括其他 OpenAI-compatible 服务对 tools 的实际支持差异、POSIX
+Bash 未做当前原机验证，以及工具副作用不自动回滚。本任务未实现 Textual TUI、配置文件、
+斜杠命令、扩展系统、npm 启动器或正式发布。

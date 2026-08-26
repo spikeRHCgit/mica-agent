@@ -134,6 +134,131 @@ class LoopbackSSEServer:
             raise RuntimeError("loopback SSE server did not stop")
 
 
+class LoopbackToolSSEServer:
+    """为安装态 CLI 提供一次 write 工具调用和后续最终回答。"""
+
+    def __init__(
+        self,
+        *,
+        tool_name: str = "write",
+        arguments: dict[str, object] | None = None,
+        response_texts: tuple[str, ...] = ("first tool answer", "continued answer"),
+    ) -> None:
+        self._tool_name = tool_name
+        self._arguments = arguments or {
+            "path": "目标文件.txt",
+            "content": "sk-p5-08-sensitive-sentinel",
+        }
+        self._response_texts = response_texts
+        self.requests: list[dict[str, object]] = []
+        self._lock = threading.Lock()
+        owner = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self) -> None:
+                length = int(self.headers["Content-Length"] or "0")
+                payload = json.loads(self.rfile.read(length))
+                with owner._lock:
+                    index = len(owner.requests)
+                    owner.requests.append(payload)
+                if index == 0:
+                    body = owner._tool_response()
+                elif index - 1 < len(owner._response_texts):
+                    body = owner._text_response(owner._response_texts[index - 1])
+                else:
+                    self.send_error(500)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *args: object) -> None:
+                return
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server.daemon_threads = True
+        self._thread = threading.Thread(
+            target=self._server.serve_forever,
+            name="mica-p5-08-loopback",
+            daemon=True,
+        )
+
+    @staticmethod
+    def _chunk(delta: dict[str, object], finish_reason: str | None) -> str:
+        return (
+            "data: "
+            + json.dumps(
+                {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": delta,
+                            "finish_reason": finish_reason,
+                        }
+                    ]
+                },
+                separators=(",", ":"),
+            )
+            + "\n\n"
+        )
+
+    def _tool_response(self) -> bytes:
+        return (
+            self._chunk({"role": "assistant"}, None)
+            + self._chunk(
+                {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "installed-write-call",
+                            "type": "function",
+                            "function": {
+                                "name": self._tool_name,
+                                "arguments": json.dumps(
+                                    self._arguments,
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                ),
+                            },
+                        }
+                    ]
+                },
+                None,
+            )
+            + self._chunk({}, "tool_calls")
+            + "data: [DONE]\n\n"
+        ).encode("utf-8")
+
+    @classmethod
+    def _text_response(cls, text: str) -> bytes:
+        return (
+            cls._chunk({"role": "assistant"}, None)
+            + cls._chunk({"content": text}, None)
+            + cls._chunk({}, "stop")
+            + "data: [DONE]\n\n"
+        ).encode("utf-8")
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self._server.server_port}/v1"
+
+    def __enter__(self) -> Self:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+        if self._thread.is_alive():
+            raise RuntimeError("loopback tool SSE server did not stop")
+
+
 def isolated_environment(home: Path) -> dict[str, str]:
     environment = os.environ.copy()
     for variable in "PYTHONPATH", "PYTHONHOME":
@@ -630,6 +755,48 @@ def test_installed_wheel_restores_session_from_unicode_workspace(
     assert not (workspace / ".mica").exists()
 
 
+def test_installed_wheel_runs_bash_with_git_bash_in_unicode_workspace(
+    full_distribution: InstalledDistribution,
+) -> None:
+    dist = full_distribution
+    workspace = dist.outside_repository / "Bash 工作区 with spaces"
+    workspace.mkdir()
+    (workspace / "cwd marker.txt").write_text("marker", encoding="utf-8")
+    before = snapshot_files(workspace)
+    environment = cli_environment(dist.home, fake_credentials=True)
+    with LoopbackToolSSEServer(
+        tool_name="bash",
+        arguments={
+            "command": (
+                "test -f 'cwd marker.txt' && printf 'git-bash-out\\n'; "
+                "printf 'git-bash-err\\n' >&2"
+            )
+        },
+        response_texts=("bash answer",),
+    ) as server:
+        environment["MICA_API_URL"] = server.base_url
+        result = run_command(
+            [dist.mica, "cli", "--permission-mode", "default"],
+            cwd=workspace,
+            environment=environment,
+            input_text="run the check\ny\n",
+        )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "bash answer\n"
+    assert result.stderr == (
+        "permission required for tool bash [y/N]: "
+        "tool bash: started\n"
+        "tool bash: success\n"
+    )
+    assert snapshot_files(workspace) == before
+    assert len(server.requests) == 2
+    tool_result = server.requests[1]["messages"][-1]["content"]
+    assert "git-bash-out" in tool_result
+    assert "git-bash-err" in tool_result
+    assert "Traceback" not in result.stderr
+
+
 def test_installed_cli_missing_environment_variables_exit_two(
     full_distribution: InstalledDistribution,
 ) -> None:
@@ -656,3 +823,77 @@ def test_installed_cli_missing_environment_variables_exit_two(
         for variable in FAKE_CLI_ENVIRONMENT:
             assert variable in result.stderr
     assert results[0].stderr == results[1].stderr  # 两入口诊断一致
+
+
+def test_installed_wheel_write_and_continue_restore_complete_tool_history(
+    full_distribution: InstalledDistribution,
+) -> None:
+    dist = full_distribution
+    workspace = dist.outside_repository / "工具 工作区"
+    workspace.mkdir()
+    data_root = dist.home / ".mica"
+    workspace_identity = resolve_workspace(workspace)
+    service = SessionService(JsonlSessionStore(workspace_identity, data_root))
+    environment = cli_environment(dist.home, fake_credentials=True)
+    fake_key = "sk-loopback-api-key-only"
+    sensitive = "sk-p5-08-sensitive-sentinel"
+    environment.update(MICA_API_KEY=fake_key, MICA_MODEL="tool-loopback-model")
+
+    with LoopbackToolSSEServer() as server:
+        environment["MICA_API_URL"] = server.base_url
+        first = run_command(
+            [dist.mica, "cli", "--permission-mode", "default"],
+            cwd=workspace,
+            environment=environment,
+            input_text="create the target\ny\n",
+        )
+        second = run_command(
+            [dist.mica, "cli", "--continue", "--permission-mode", "default"],
+            cwd=workspace,
+            environment=environment,
+            input_text="continue without rewriting\n",
+        )
+
+    assert first.returncode == 0, first.stderr
+    assert first.stdout == "first tool answer\n"
+    assert first.stderr == (
+        "permission required for tool write [y/N]: "
+        "tool write: started\n"
+        "tool write: success\n"
+    )
+    assert second.returncode == 0, second.stderr
+    assert second.stdout == "continued answer\n"
+    assert second.stderr == ""
+    assert (workspace / "目标文件.txt").read_text(encoding="utf-8") == sensitive
+    assert {path.relative_to(workspace) for path in workspace.rglob("*")} == {
+        Path("目标文件.txt")
+    }
+    assert not (workspace / ".mica").exists()
+
+    assert len(server.requests) == 3
+    assert [message["role"] for message in server.requests[2]["messages"]] == [
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+        "user",
+    ]
+    tool_call = server.requests[2]["messages"][1]["tool_calls"][0]
+    assert tool_call["function"]["name"] == "write"
+    assert server.requests[2]["messages"][-1]["content"] == (
+        "continue without rewriting"
+    )
+
+    listed = service.list_sessions()
+    assert listed.problems == ()
+    assert len(listed.sessions) == 1
+    assert len(listed.sessions[0].turns) == 2
+    raw = next(service.store.session_directory.glob("*.jsonl")).read_text(
+        encoding="utf-8"
+    )
+    observed_output = first.stdout + first.stderr + second.stdout + second.stderr + raw
+    assert fake_key not in observed_output
+    assert sensitive not in observed_output
+    assert str(workspace) not in observed_output
+    assert '"format_version":2' in raw
+    assert server._thread.is_alive() is False

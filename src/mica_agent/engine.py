@@ -258,55 +258,56 @@ class AgentEngine:
                 for call in finish.tool_calls:
                     tool_request = ToolRequest(call.call_id, call.name, call.arguments)
                     result: ToolResult | None = None
-                    async for signal in self._tool_execution_signals(
-                        tool_request, token
-                    ):
-                        if signal.kind == "interaction":
-                            interaction = signal.value
-                            assert isinstance(interaction, InteractionRequest)
-                            if interaction.kind is InteractionKind.PERMISSION:
-                                yield PermissionRequested(
+                    async with aclosing(
+                        self._tool_execution_signals(tool_request, token)
+                    ) as tool_signals:
+                        async for signal in tool_signals:
+                            if signal.kind == "interaction":
+                                interaction = signal.value
+                                assert isinstance(interaction, InteractionRequest)
+                                if interaction.kind is InteractionKind.PERMISSION:
+                                    yield PermissionRequested(
+                                        run_id=run_id,
+                                        seq=seq,
+                                        interaction_id=interaction.interaction_id,
+                                        call_id=interaction.call_id,
+                                        tool_name=interaction.tool_name,
+                                        message=interaction.message,
+                                    )
+                                else:
+                                    yield UserInputRequested(
+                                        run_id=run_id,
+                                        seq=seq,
+                                        interaction_id=interaction.interaction_id,
+                                        question=interaction.message,
+                                    )
+                                seq += 1
+                            elif signal.kind == "started":
+                                started = signal.value
+                                assert isinstance(started, ToolRequest)
+                                if started.name in _SIDE_EFFECT_TOOL_NAMES:
+                                    side_effect_tool_started = True
+                                yield ToolStarted(
                                     run_id=run_id,
                                     seq=seq,
-                                    interaction_id=interaction.interaction_id,
-                                    call_id=interaction.call_id,
-                                    tool_name=interaction.tool_name,
-                                    message=interaction.message,
+                                    call_id=started.call_id,
+                                    tool_name=started.name,
                                 )
-                            else:
-                                yield UserInputRequested(
+                                seq += 1
+                            elif signal.kind == "finished":
+                                finished = signal.value
+                                assert isinstance(finished, ToolResult)
+                                yield ToolFinished(
                                     run_id=run_id,
                                     seq=seq,
-                                    interaction_id=interaction.interaction_id,
-                                    question=interaction.message,
+                                    call_id=finished.call_id,
+                                    tool_name=finished.tool_name,
+                                    status=finished.status,
                                 )
-                            seq += 1
-                        elif signal.kind == "started":
-                            started = signal.value
-                            assert isinstance(started, ToolRequest)
-                            if started.name in _SIDE_EFFECT_TOOL_NAMES:
-                                side_effect_tool_started = True
-                            yield ToolStarted(
-                                run_id=run_id,
-                                seq=seq,
-                                call_id=started.call_id,
-                                tool_name=started.name,
-                            )
-                            seq += 1
-                        elif signal.kind == "finished":
-                            finished = signal.value
-                            assert isinstance(finished, ToolResult)
-                            yield ToolFinished(
-                                run_id=run_id,
-                                seq=seq,
-                                call_id=finished.call_id,
-                                tool_name=finished.tool_name,
-                                status=finished.status,
-                            )
-                            seq += 1
-                        elif signal.kind == "result":
-                            result = signal.value
-                            assert isinstance(result, ToolResult)
+                                seq += 1
+                            elif signal.kind == "result":
+                                result = signal.value
+                                assert isinstance(result, ToolResult)
                     if result is None:
                         yield RunFailed(
                             run_id=run_id,

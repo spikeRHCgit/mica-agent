@@ -25,8 +25,23 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeAlias
 
 from .context_builder import ContextBuilder
-from .events import RunCancelled, RunCompleted, RunFailed, TextDelta
+from .events import (
+    PermissionRequested,
+    RunCancelled,
+    RunCompleted,
+    RunFailed,
+    TextDelta,
+    ToolFinished,
+    ToolStarted,
+    UserInputRequested,
+)
+from .interactions import (
+    PermissionAnswer,
+    PermissionResponse,
+    UserInputResponse,
+)
 from .jsonl_store import JsonlSessionStore, StoredSession
+from .permissions import PermissionMode
 from .session_service import NoHealthySessionError, SessionService
 from .workspace import (
     WorkspaceIdentity,
@@ -80,12 +95,23 @@ def main() -> None:
         const="resume",
         help="choose a healthy session from the current workspace",
     )
+    cli_parser.add_argument(
+        "--permission-mode",
+        choices=("default", "accept-edits", "solo"),
+        default="default",
+        help="select tool permission behavior",
+    )
     cli_parser.set_defaults(session_mode="new")
     args = parser.parse_args()
     if args.command is None:
         parser.print_help()
         return
-    sys.exit(_main_cli(args.session_mode))
+    permission_mode = {
+        "default": PermissionMode.DEFAULT,
+        "accept-edits": PermissionMode.ACCEPT_EDITS,
+        "solo": PermissionMode.SOLO,
+    }[args.permission_mode]
+    sys.exit(_main_cli(args.session_mode, permission_mode))
 
 
 def _load_config() -> tuple[str, str, str] | None:
@@ -101,7 +127,10 @@ def _load_config() -> tuple[str, str, str] | None:
     return tuple(values[name].strip() for name in _ENVIRONMENT_VARIABLES)  # type: ignore[return-value]
 
 
-def _main_cli(session_mode: SessionMode = "new") -> int:
+def _main_cli(
+    session_mode: SessionMode = "new",
+    permission_mode: PermissionMode = PermissionMode.DEFAULT,
+) -> int:
     """mica cli 同步入口：手动事件循环以支持 Ctrl+C 优雅退出。"""
     config = _load_config()
     if config is None:
@@ -116,6 +145,7 @@ def _main_cli(session_mode: SessionMode = "new") -> int:
                 api_key,
                 model,
                 session_mode=session_mode,
+                permission_mode=permission_mode,
             )
         )
         try:
@@ -146,6 +176,7 @@ async def run_interactive(
     model: str,
     *,
     session_mode: SessionMode = "new",
+    permission_mode: PermissionMode = PermissionMode.DEFAULT,
     provider_factory: ProviderFactory | None = None,
     read_line: ReadLine | None = None,
     write_out: Write | None = None,
@@ -160,13 +191,15 @@ async def run_interactive(
     """装配会话、上下文、Provider 与 App，再进入基础交互。"""
     if session_mode not in {"new", "continue", "resume"}:
         raise ValueError("session_mode must be new, continue, or resume")
+    if not isinstance(permission_mode, PermissionMode):
+        raise TypeError("permission_mode must be a PermissionMode")
     factory = provider_factory or _default_provider_factory
     read = read_line or _default_read_line
     out = write_out or _default_write
     err = write_err or _default_write_err
 
     try:
-        _, service, builder = _assemble_session(
+        resolved_workspace, service, builder = _assemble_session(
             workspace=workspace,
             data_root=data_root,
             session_service=session_service,
@@ -188,11 +221,13 @@ async def run_interactive(
         model,
         service,
         builder,
+        resolved_workspace,
         selected,
         factory,
         read,
         out,
         err,
+        permission_mode,
         turn_id_factory,
         clock,
     )
@@ -204,11 +239,13 @@ async def _run_selected_session(
     model: str,
     service: SessionService,
     builder: ContextBuilder,
+    workspace: WorkspaceIdentity,
     selected: StoredSession,
     factory: ProviderFactory,
     read: ReadLine,
     out: Write,
     err: Write,
+    permission_mode: PermissionMode,
     turn_id_factory: TurnIdFactory | None,
     clock: Clock | None,
 ) -> int:
@@ -225,6 +262,27 @@ async def _run_selected_session(
         err(f"warning: {diagnostic.message}\n")
 
     try:
+        from .file_tools import register_file_tools
+        from .interactions import InteractionBroker
+        from .policy import PolicyEngine
+        from .runtime_tools import register_runtime_tools
+        from .tool_executor import ToolExecutor
+        from .tool_registry import ToolRegistry
+
+        broker = InteractionBroker()
+        registry = ToolRegistry()
+        register_file_tools(registry, workspace)
+        register_runtime_tools(registry, workspace, broker)
+        executor = ToolExecutor(
+            registry,
+            PolicyEngine(permission_mode),
+            interaction_broker=broker,
+        )
+    except Exception:  # noqa: BLE001 - tool startup diagnostics must stay safe
+        err("mica: unable to initialize tools\n")
+        return 2
+
+    try:
         provider = factory(api_url, api_key)
     except Exception:  # noqa: BLE001 - provider details may contain secrets
         err("mica: unable to initialize provider\n")
@@ -238,6 +296,7 @@ async def _run_selected_session(
             context_builder=builder,
             turn_id_factory=turn_id_factory,
             clock=clock,
+            tool_executor=executor,
         )
     except Exception:  # noqa: BLE001 - startup diagnostics must stay safe
         await provider.aclose()
@@ -392,6 +451,30 @@ async def _interact(
                         if event.text:
                             has_output = True
                             ends_with_newline = event.text.endswith("\n")
+                    elif isinstance(event, ToolStarted):
+                        write_err(f"tool {event.tool_name}: started\n")
+                    elif isinstance(event, ToolFinished):
+                        write_err(f"tool {event.tool_name}: {event.status.value}\n")
+                    elif isinstance(event, PermissionRequested):
+                        answer = await _read_permission_answer(
+                            event.tool_name, read_line, write_err
+                        )
+                        if answer is None:
+                            return
+                        app.respond_interaction(
+                            PermissionResponse(event.interaction_id, answer)
+                        )
+                    elif isinstance(event, UserInputRequested):
+                        write_err(f"{event.question}\n")
+                        try:
+                            answer = await read_line()
+                        except asyncio.CancelledError:
+                            raise
+                        except (EOFError, KeyboardInterrupt):
+                            return
+                        app.respond_interaction(
+                            UserInputResponse(event.interaction_id, answer)
+                        )
                     elif isinstance(event, (RunCompleted, RunFailed, RunCancelled)):
                         # 有非空文本且未以换行结尾时才补一个必要换行；
                         # 无文本的终态不得向 stdout 写空行。
@@ -406,6 +489,27 @@ async def _interact(
         except asyncio.CancelledError:
             # 活动 Run 被取消：事件流已由 aclosing 清理，退出 CLI。
             return
+
+
+async def _read_permission_answer(
+    tool_name: str,
+    read_line: ReadLine,
+    write_err: Write,
+) -> PermissionAnswer | None:
+    while True:
+        write_err(f"permission required for tool {tool_name} [y/N]: ")
+        try:
+            value = await read_line()
+        except asyncio.CancelledError:
+            raise
+        except (EOFError, KeyboardInterrupt):
+            return None
+        normalized = value.strip().lower()
+        if normalized in {"y", "yes"} and normalized.isascii():
+            return PermissionAnswer.ALLOW_ONCE
+        if normalized in {"", "n", "no"}:
+            return PermissionAnswer.DENY
+        write_err("please answer y or n\n")
 
 
 def _default_provider_factory(api_url: str, api_key: str) -> Provider:

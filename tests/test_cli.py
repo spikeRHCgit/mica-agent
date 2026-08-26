@@ -133,6 +133,21 @@ def test_invalid_argument_reports_diagnostic(command: tuple[str, ...]) -> None:
     "command",
     [("mica",), (sys.executable, "-m", "mica_agent")],
 )
+def test_invalid_permission_mode_is_rejected_by_argument_parsing(
+    command: tuple[str, ...],
+) -> None:
+    result = run_command(command, "cli", "--permission-mode", "unsafe")
+
+    assert result.returncode == 2
+    assert "invalid choice" in result.stderr
+    assert "MICA_API_URL" not in result.stderr
+    assert result.stdout == ""
+
+
+@pytest.mark.parametrize(
+    "command",
+    [("mica",), (sys.executable, "-m", "mica_agent")],
+)
 def test_restore_flags_are_mutually_exclusive(command: tuple[str, ...]) -> None:
     result = run_command(command, "cli", "--continue", "--resume")
 
