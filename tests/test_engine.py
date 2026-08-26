@@ -156,6 +156,134 @@ def _lookup_executor() -> tuple[ToolExecutor, ToolRegistry]:
     )
 
 
+def test_completion_sink_receives_final_assistant_once_before_completion() -> None:
+    engine = _engine([ProviderTextDelta("final answer"), Finish()])
+    completed: list[tuple[Message, ...]] = []
+
+    async def collect() -> list[EngineEvent]:
+        events: list[EngineEvent] = []
+        async for event in engine.run(
+            _request(), completed_messages_sink=completed.append
+        ):
+            if isinstance(event, RunCompleted):
+                assert completed == [(Message(MessageRole.ASSISTANT, "final answer"),)]
+            events.append(event)
+        return events
+
+    events = asyncio.run(collect())
+
+    assert isinstance(events[-1], RunCompleted)
+    assert completed == [(Message(MessageRole.ASSISTANT, "final answer"),)]
+
+
+def test_tool_messages_are_redacted_once_for_provider_and_completion_sink() -> None:
+    secret_key = "sk-very-sensitive-credential"
+    bearer = "Bearer private-access-token"
+    call = ToolCall(
+        "call-secret",
+        "lookup",
+        {"query": "mica", "api_key": secret_key, "nested": {"authorization": bearer}},
+    )
+    spec = ToolSpec("lookup", "Lookup", {"type": "object"})
+    registry = ToolRegistry()
+
+    async def handler(
+        request: ToolRequest, cancellation: CancellationToken
+    ) -> ToolResult:
+        return ToolResult(
+            request.call_id,
+            request.name,
+            ToolResultStatus.SUCCESS,
+            f"received {secret_key}",
+            {"token": bearer},
+        )
+
+    registry.register(spec, handler)
+    provider = _ScriptedProvider(
+        [[Finish(tool_calls=(call,))], [ProviderTextDelta("done"), Finish()]]
+    )
+    engine = AgentEngine(
+        provider,
+        tool_executor=ToolExecutor(
+            registry,
+            PolicyEngine(PermissionMode.DEFAULT),
+            policy_input_factory=lambda request, spec: PolicyInput(
+                request.name, PolicyOperation.READ, False, False
+            ),
+        ),
+        run_id_factory=lambda: "run-redacted",
+    )
+    completed: list[tuple[Message, ...]] = []
+    request = ProviderRequest(
+        "test-model", (Message(MessageRole.USER, "inspect"),), (spec,)
+    )
+
+    async def collect() -> list[EngineEvent]:
+        events: list[EngineEvent] = []
+        async for event in engine.run(
+            request, completed_messages_sink=completed.append
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(collect())
+
+    assert isinstance(events[-1], RunCompleted)
+    assert len(completed) == 1
+    assert provider.requests[1].messages[1:] == completed[0][:-1]
+    observed = repr((provider.requests[1], completed))
+    assert secret_key not in observed
+    assert bearer not in observed
+    assert "[REDACTED]" in observed
+    assert call.arguments["api_key"] == secret_key
+
+
+def test_completion_sink_failure_is_one_safe_failed_terminal() -> None:
+    engine = _engine([ProviderTextDelta("answer"), Finish()])
+
+    def fail_sink(messages: tuple[Message, ...]) -> None:
+        raise RuntimeError("sk-private transcript traceback")
+
+    async def collect() -> list[EngineEvent]:
+        return [
+            event
+            async for event in engine.run(_request(), completed_messages_sink=fail_sink)
+        ]
+
+    events = asyncio.run(collect())
+
+    assert isinstance(events[-1], RunFailed)
+    assert events[-1].message == "completed message handling failed"
+    assert not any(isinstance(event, RunCompleted) for event in events)
+    assert (
+        len([event for event in events if isinstance(event, (RunFailed, RunCancelled))])
+        == 1
+    )
+
+
+def test_failed_and_closed_runs_do_not_call_completion_sink() -> None:
+    completed: list[tuple[Message, ...]] = []
+
+    async def scenario() -> list[EngineEvent]:
+        failed = [
+            event
+            async for event in _engine(
+                [ProviderErrorEvent(AuthenticationError("failed"))]
+            ).run(_request(), completed_messages_sink=completed.append)
+        ]
+        stream = _engine([ProviderTextDelta("partial"), Finish()]).run(
+            _request(), completed_messages_sink=completed.append
+        )
+        await anext(stream)
+        await stream.aclose()
+        return failed
+
+    failed = asyncio.run(scenario())
+
+    assert isinstance(failed[-1], RunFailed)
+    assert completed == []
+
+
 def test_engine_executes_multiple_tool_calls_in_model_order() -> None:
     order: list[str] = []
     first_spec = ToolSpec("read", "Read", {"type": "object"})
@@ -213,6 +341,85 @@ def test_engine_executes_multiple_tool_calls_in_model_order() -> None:
     ]
     assert order == ["read", "ls"]
     assert isinstance(events[-1], RunCompleted)
+
+
+def test_provider_failure_after_side_effect_tool_warns_to_check_workspace() -> None:
+    spec = ToolSpec("write", "Write", {"type": "object"})
+    registry = ToolRegistry()
+    side_effect_started = False
+
+    async def handler(
+        request: ToolRequest, cancellation: CancellationToken
+    ) -> ToolResult:
+        nonlocal side_effect_started
+        side_effect_started = True
+        return ToolResult(
+            request.call_id, request.name, ToolResultStatus.SUCCESS, "write complete"
+        )
+
+    registry.register(spec, handler)
+    provider = _ScriptedProvider(
+        [
+            [Finish(tool_calls=(ToolCall("call-write", "write", {}),))],
+            [ProviderErrorEvent(AuthenticationError("sk-private-provider-error"))],
+        ]
+    )
+    engine = AgentEngine(
+        provider,
+        tool_executor=ToolExecutor(
+            registry,
+            PolicyEngine(PermissionMode.ACCEPT_EDITS),
+            policy_input_factory=lambda request, spec: PolicyInput(
+                request.name, PolicyOperation.WRITE, False, False
+            ),
+        ),
+        run_id_factory=lambda: "run-side-effect-failure",
+    )
+    request = ProviderRequest(
+        "test-model", (Message(MessageRole.USER, "write"),), (spec,)
+    )
+
+    events = _run_collect(engine, request)
+
+    assert side_effect_started is True
+    assert isinstance(events[-1], RunFailed)
+    assert "check the workspace" in events[-1].message
+    assert "sk-private" not in events[-1].message
+
+
+def test_model_limit_after_side_effect_tool_warns_to_check_workspace() -> None:
+    spec = ToolSpec("bash", "Run", {"type": "object"})
+    registry = ToolRegistry()
+
+    async def handler(
+        request: ToolRequest, cancellation: CancellationToken
+    ) -> ToolResult:
+        return ToolResult(
+            request.call_id, request.name, ToolResultStatus.SUCCESS, "command complete"
+        )
+
+    registry.register(spec, handler)
+    engine = AgentEngine(
+        _ScriptedProvider([[Finish(tool_calls=(ToolCall("call-bash", "bash", {}),))]]),
+        tool_executor=ToolExecutor(
+            registry,
+            PolicyEngine(PermissionMode.SOLO),
+            policy_input_factory=lambda request, spec: PolicyInput(
+                request.name, PolicyOperation.COMMAND, False, True
+            ),
+        ),
+        max_model_steps=1,
+        run_id_factory=lambda: "run-side-effect-limit",
+    )
+
+    events = _run_collect(
+        engine,
+        ProviderRequest("test-model", (Message(MessageRole.USER, "run"),), (spec,)),
+    )
+
+    assert isinstance(events[-1], RunFailed)
+    assert events[-1].category is ErrorCategory.LIMIT
+    assert "check the workspace" in events[-1].message
 
 
 def test_tool_failure_is_returned_to_model_without_engine_failure() -> None:
@@ -818,10 +1025,15 @@ def test_cancellation_token_stops_provider_and_emits_one_run_cancelled() -> None
     token = CancellationToken()
     engine = AgentEngine(provider, run_id_factory=lambda: "run-token")
     collected: list[EngineEvent] = []
+    completed: list[tuple[Message, ...]] = []
 
     async def scenario() -> None:
         async def consume() -> None:
-            async for event in engine.run(_request(), cancellation=token):
+            async for event in engine.run(
+                _request(),
+                cancellation=token,
+                completed_messages_sink=completed.append,
+            ):
                 collected.append(event)
                 if isinstance(event, TextDelta):
                     token.cancel()
@@ -836,6 +1048,7 @@ def test_cancellation_token_stops_provider_and_emits_one_run_cancelled() -> None
         "RunCancelled",
     ]
     assert provider.closed is True
+    assert completed == []
 
 
 def test_permission_wait_cancellation_does_not_start_handler() -> None:

@@ -17,17 +17,22 @@ import httpx
 import pytest
 
 from mica_agent.app import AppBusyError, AppClosedError, MicaApp
+from mica_agent.cancellation import CancellationToken
 from mica_agent.context_builder import ContextBuilder
 from mica_agent.events import (
     EngineEvent,
+    PermissionRequested,
     RunCancelled,
     RunCompleted,
     RunFailed,
     RunStarted,
     TextDelta,
 )
+from mica_agent.interactions import PermissionAnswer, PermissionResponse
 from mica_agent.jsonl_store import JsonlSessionStore
 from mica_agent.models import Message, MessageRole
+from mica_agent.permissions import PermissionMode
+from mica_agent.policy import PolicyEngine, PolicyInput, PolicyOperation
 from mica_agent.providers import (
     AuthenticationError,
     Finish,
@@ -40,7 +45,27 @@ from mica_agent.providers import (
     TextDelta as ProviderTextDelta,
 )
 from mica_agent.session_service import SessionService
+from mica_agent.tool_contracts import (
+    ToolCall,
+    ToolRequest,
+    ToolResult,
+    ToolResultStatus,
+    ToolSpec,
+)
+from mica_agent.tool_executor import ToolExecutor
+from mica_agent.tool_registry import ToolRegistry
 from mica_agent.workspace import resolve_workspace
+
+_TEST_TEMP_DIRS: list[TemporaryDirectory[str]] = []
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_test_tempdirs():
+    try:
+        yield
+    finally:
+        while _TEST_TEMP_DIRS:
+            _TEST_TEMP_DIRS.pop().cleanup()
 
 
 class _ScriptedProvider:
@@ -65,6 +90,7 @@ def _make_session_components(
     provider: object,
 ) -> tuple[SessionService, str, ContextBuilder]:
     tempdir = TemporaryDirectory(prefix="mica-app-test-")
+    _TEST_TEMP_DIRS.append(tempdir)
     root = Path(tempdir.name)
     workspace_path = root / "workspace"
     workspace_path.mkdir()
@@ -178,6 +204,177 @@ def test_non_str_prompt_is_rejected_before_provider() -> None:
 # ---------------------------------------------------------------------------
 # 成功 Run 与原子提交
 # ---------------------------------------------------------------------------
+
+
+def test_tool_run_commits_one_complete_turn_and_restores_full_history() -> None:
+    call = ToolCall("call-1", "read", {"path": "notes.txt"})
+    spec = ToolSpec("read", "Read", {"type": "object"})
+    registry = ToolRegistry()
+
+    async def handler(
+        request: ToolRequest, cancellation: CancellationToken
+    ) -> ToolResult:
+        return ToolResult(
+            request.call_id,
+            request.name,
+            ToolResultStatus.SUCCESS,
+            "read complete",
+            {"content": "saved result"},
+        )
+
+    registry.register(spec, handler)
+    executor = ToolExecutor(
+        registry,
+        PolicyEngine(PermissionMode.DEFAULT),
+        policy_input_factory=lambda request, spec: PolicyInput(
+            request.name, PolicyOperation.READ, False, False
+        ),
+    )
+    provider = _ScriptedProvider(
+        [
+            [Finish(tool_calls=(call,))],
+            [ProviderTextDelta("final answer"), Finish()],
+        ]
+    )
+    service, session_id, context_builder = _make_session_components(provider)
+    app = MicaApp(
+        provider,
+        "test-model",
+        session_service=service,
+        session_id=session_id,
+        context_builder=context_builder,
+        run_id_factory=lambda: "run-tools",
+        turn_id_factory=lambda: "turn-tools",
+        tool_executor=executor,
+    )
+
+    events = _run_collect(app, "inspect")
+
+    assert isinstance(events[-1], RunCompleted)
+    assert provider.requests[0].tools == (spec,)
+    assert len(service.load_session(session_id).turns) == 1
+    assert app.history == (
+        Message(MessageRole.USER, "inspect"),
+        Message(MessageRole.ASSISTANT, "", (call,)),
+        Message(
+            MessageRole.TOOL,
+            '{"status":"success","message":"read complete",'
+            '"data":{"content":"saved result"}}',
+            tool_call_id="call-1",
+        ),
+        Message(MessageRole.ASSISTANT, "final answer"),
+    )
+
+
+def test_storage_failure_after_side_effect_warns_and_keeps_session_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = ToolSpec("write", "Write", {"type": "object"})
+    registry = ToolRegistry()
+
+    async def handler(
+        request: ToolRequest, cancellation: CancellationToken
+    ) -> ToolResult:
+        return ToolResult(
+            request.call_id, request.name, ToolResultStatus.SUCCESS, "write complete"
+        )
+
+    registry.register(spec, handler)
+    executor = ToolExecutor(
+        registry,
+        PolicyEngine(PermissionMode.ACCEPT_EDITS),
+        policy_input_factory=lambda request, spec: PolicyInput(
+            request.name, PolicyOperation.WRITE, False, False
+        ),
+    )
+    provider = _ScriptedProvider(
+        [
+            [Finish(tool_calls=(ToolCall("call-write", "write", {}),))],
+            [ProviderTextDelta("done"), Finish()],
+        ]
+    )
+    service, session_id, context_builder = _make_session_components(provider)
+    path = service.store.path_for_session(session_id)
+    before = path.read_bytes()
+    app = MicaApp(
+        provider,
+        "test-model",
+        session_service=service,
+        session_id=session_id,
+        context_builder=context_builder,
+        tool_executor=executor,
+    )
+
+    def fail_commit(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("sk-private C:/secret/file")
+
+    monkeypatch.setattr(service, "commit_turn", fail_commit)
+    events = _run_collect(app, "write")
+
+    assert path.read_bytes() == before
+    assert len([event for event in events if isinstance(event, RunFailed)]) == 1
+    assert not any(isinstance(event, RunCompleted) for event in events)
+    terminal = events[-1]
+    assert isinstance(terminal, RunFailed)
+    assert terminal.category.value == "storage"
+    assert "check the workspace" in terminal.message
+    assert "private" not in terminal.message
+
+
+def test_respond_interaction_forwards_only_current_matching_response() -> None:
+    spec = ToolSpec("write", "Write", {"type": "object"})
+    registry = ToolRegistry()
+
+    async def handler(
+        request: ToolRequest, cancellation: CancellationToken
+    ) -> ToolResult:
+        return ToolResult(
+            request.call_id, request.name, ToolResultStatus.SUCCESS, "written"
+        )
+
+    registry.register(spec, handler)
+    executor = ToolExecutor(registry, PolicyEngine(PermissionMode.DEFAULT))
+    provider = _ScriptedProvider(
+        [
+            [Finish(tool_calls=(ToolCall("call-write", "write", {}),))],
+            [Finish()],
+        ]
+    )
+    service, session_id, builder = _make_session_components(provider)
+    app = MicaApp(
+        provider,
+        "test-model",
+        session_service=service,
+        session_id=session_id,
+        context_builder=builder,
+        tool_executor=executor,
+    )
+
+    async def scenario() -> list[EngineEvent]:
+        stream = app.run("write")
+        events: list[EngineEvent] = []
+        async for event in stream:
+            events.append(event)
+            if isinstance(event, PermissionRequested):
+                wrong = PermissionResponse("wrong-id", PermissionAnswer.ALLOW_ONCE)
+                assert app.respond_interaction(wrong) is False
+                response = PermissionResponse(
+                    event.interaction_id, PermissionAnswer.ALLOW_ONCE
+                )
+                assert app.respond_interaction(response) is True
+                assert app.respond_interaction(response) is False
+        return events
+
+    events = asyncio.run(scenario())
+
+    assert isinstance(events[-1], RunCompleted)
+    no_tools = _make_app(_ScriptedProvider([[Finish()]]))
+    assert (
+        no_tools.respond_interaction(
+            PermissionResponse("unused", PermissionAnswer.ALLOW_ONCE)
+        )
+        is False
+    )
 
 
 def test_successful_run_commits_user_and_assistant_atomically() -> None:

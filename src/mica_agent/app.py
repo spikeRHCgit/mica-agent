@@ -10,15 +10,21 @@ from uuid import uuid4
 
 from .context_builder import ContextBuilder
 from .engine import AgentEngine, RunIdFactory
-from .events import EngineEvent, ErrorCategory, RunCompleted, RunFailed, TextDelta
+from .events import EngineEvent, ErrorCategory, RunCompleted, RunFailed
+from .interactions import PermissionResponse, UserInputResponse
 from .models import Message, MessageRole
 from .providers import Provider, ProviderRequest
 from .session_contracts import TurnEntry
 from .session_service import SessionService
+from .tool_executor import ToolExecutor
 
 TurnIdFactory = Callable[[], str]
 Clock = Callable[[], datetime]
 _STORAGE_FAILURE_MESSAGE = "session persistence failed"
+_STORAGE_FAILURE_AFTER_TOOL_MESSAGE = (
+    "session persistence failed; tool changes may have occurred; check the workspace"
+)
+_SIDE_EFFECT_TOOL_NAMES = frozenset({"write", "edit", "bash"})
 
 
 class MicaAppError(Exception):
@@ -48,6 +54,7 @@ class MicaApp:
         run_id_factory: RunIdFactory | None = None,
         turn_id_factory: TurnIdFactory | None = None,
         clock: Clock | None = None,
+        tool_executor: ToolExecutor | None = None,
     ) -> None:
         if not isinstance(model, str):
             raise TypeError(f"model must be a str, got {type(model).__name__}")
@@ -75,7 +82,12 @@ class MicaApp:
         self._system_prompt = system_prompt
         self._turn_id_factory = turn_id_factory or (lambda: uuid4().hex)
         self._clock = clock or (lambda: datetime.now(UTC))
-        self._engine = AgentEngine(provider=provider, run_id_factory=run_id_factory)
+        self._tool_executor = tool_executor
+        self._engine = AgentEngine(
+            provider=provider,
+            run_id_factory=run_id_factory,
+            tool_executor=tool_executor,
+        )
         self._active_run = False
         self._closed = False
 
@@ -88,6 +100,14 @@ class MicaApp:
     def history(self) -> tuple[Message, ...]:
         """从 Session Service 重新取得的不可变持久化历史快照。"""
         return self._session_service.context_snapshot(self._session_id)
+
+    def respond_interaction(
+        self, response: PermissionResponse | UserInputResponse
+    ) -> bool:
+        """向当前工具交互提交一次前端无关响应。"""
+        if self._tool_executor is None:
+            return False
+        return self._tool_executor.interaction_broker.respond(response)
 
     async def aclose(self) -> None:
         """关闭 Provider 并标记 App 不可再运行；重复调用安全。"""
@@ -109,7 +129,7 @@ class MicaApp:
 
         self._active_run = True
         user_message = Message(role=MessageRole.USER, content=prompt)
-        parts: list[str] = []
+        completed_messages: list[tuple[Message, ...]] = []
         try:
             session_messages = self._session_service.context_snapshot(self._session_id)
             context = self._context_builder.build(session_messages)
@@ -121,43 +141,64 @@ class MicaApp:
             request = ProviderRequest(
                 model=self._model,
                 messages=prefix + context.messages + (user_message,),
+                tools=(
+                    self._tool_executor.tool_specs
+                    if self._tool_executor is not None
+                    else ()
+                ),
             )
-            async with aclosing(self._engine.run(request)) as events:
+            async with aclosing(
+                self._engine.run(
+                    request,
+                    completed_messages_sink=completed_messages.append,
+                )
+            ) as events:
                 async for event in events:
-                    if isinstance(event, TextDelta):
-                        parts.append(event.text)
-                    elif isinstance(
+                    if isinstance(
                         event, RunCompleted
                     ) and not self._commit_completed_turn(
-                        event, user_message, "".join(parts)
+                        event, user_message, completed_messages
                     ):
                         yield RunFailed(
                             run_id=event.run_id,
                             seq=event.seq,
                             category=ErrorCategory.STORAGE,
-                            message=_STORAGE_FAILURE_MESSAGE,
+                            message=self._storage_failure_message(completed_messages),
                         )
                         return
                     yield event
         finally:
             self._active_run = False
 
+    @staticmethod
+    def _storage_failure_message(
+        completed_messages: list[tuple[Message, ...]],
+    ) -> str:
+        if completed_messages:
+            for message in completed_messages[0]:
+                if any(
+                    call.name in _SIDE_EFFECT_TOOL_NAMES for call in message.tool_calls
+                ):
+                    return _STORAGE_FAILURE_AFTER_TOOL_MESSAGE
+        return _STORAGE_FAILURE_MESSAGE
+
     def _commit_completed_turn(
         self,
         event: RunCompleted,
         user_message: Message,
-        assistant_text: str,
+        completed_messages: list[tuple[Message, ...]],
     ) -> bool:
         try:
+            if len(completed_messages) != 1 or not completed_messages[0]:
+                return False
+            transcript = completed_messages[0]
             turn = TurnEntry(
                 turn_id=self._turn_id_factory(),
                 run_id=event.run_id,
                 user_message=user_message,
-                assistant_message=Message(
-                    role=MessageRole.ASSISTANT,
-                    content=assistant_text,
-                ),
+                assistant_message=transcript[-1],
                 completed_at=self._clock(),
+                intermediate_messages=transcript[:-1],
             )
             self._session_service.commit_turn(self._session_id, turn)
         except asyncio.CancelledError:

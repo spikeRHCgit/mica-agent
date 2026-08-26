@@ -185,3 +185,47 @@ P5-06 目标组 `343 passed`，分发组 `12 passed`，安装态 Unicode session
 `1 passed`；全量测试为 `796 passed, 1 skipped`。显式关闭测试替身 TemporaryDirectory
 后，严格警告测试没有 `ResourceWarning`、pending task 或 `async_generator_athrow`。
 P5-06 不实现会话 v2、MicaApp 工具装配、CLI/TUI 或会话提交；这些属于 P5-07/P5-08，尚未开始。
+
+# P5-07 会话 v2 与完整提交
+
+会话当前写入版本升级为 v2，reader 继续严格接受固定旧 wire 的 v1。v1 turn 保留
+`user_message` 与 `assistant_message`；v2 turn 改用单个 `messages` 数组，按 USER、零个或多个
+assistant tool-calls/对应 TOOL 批次、最终普通 ASSISTANT 的顺序表达完整轮次。`TurnEntry` 保留
+原五参数构造，在末尾增加不可变 `intermediate_messages`，并通过 `context_messages` 提供稳定
+组合视图。角色字段、tool_call 字段、JSON 类型、记录版本和跨记录版本均严格校验；版本读取先
+稳定检查 `format_version` 存在性，跨记录比较不哈希不可信版本容器；不可信内容只产生不回显
+记录值的 `SessionFormatError`。
+
+Store 的正式创建、追加和重写统一生成 v2。`append_turn` 在既有单 session lock 内读取 v1、
+校验、合并本次业务变更并通过同目录临时文件、flush、fsync 和 `os.replace` 一次替换；新增的
+事务更新边界使 rename、rewind 和 clear 也在一次锁持有期间完成读改写。替换失败保留 v1 原
+字节并清理临时文件，恢复后可重试。branch 读取源快照后直接创建 v2 分支，不改写 v1 源文件，
+消息和时间戳保持不变。scan 同时列出健康 v1/v2，并把混合版本文件归入安全诊断。
+
+Engine 增加可选同步完成转录 sink。纯文本成功传入最终 assistant；工具成功按 assistant
+工具调用、匹配 TOOL 结果、后续批次和最终 assistant 传入不可变 tuple。sink 仅在
+RunCompleted 前调用一次；失败、取消和消费者提前关闭不调用，sink 异常转换为唯一安全失败
+终态。公共工具事件仍不携带参数或完整输出。ToolExecutor 仅通过 `tool_specs` 暴露确定性
+ToolSpec tuple，MicaApp 注入 executor 后将该快照交给每轮 ProviderRequest，并通过公开
+`respond_interaction()` 转交当前 Broker，不直接执行 handler 或读取终端。
+
+工具消息清洗集中在纯函数边界：递归替换 `api_key`、`apikey`、`token`、`access_token`、
+`secret`、`password`、`authorization`，并识别常见 `sk-` 与 Bearer 样式，固定替换为
+`[REDACTED]`。清洗复制不可变 ToolCall/Message，不修改原对象，不处理 user 或最终普通
+assistant 文本。同一份清洗后消息同时进入下一次 ProviderRequest、Engine 完成转录和
+TurnEntry；直接通过 Service/Store 构造工具轮次也复用该边界。
+
+MicaApp 不再从 TextDelta 推测持久化消息。它只在收到 Engine 完整转录且观察到 RunCompleted
+后构造一个 TurnEntry，并通过一次 `commit_turn` 提交；Provider 失败、取消、等待中断、消费
+者提前关闭、转录失败和存储失败均不形成半轮。未知工具、参数错误、权限拒绝或普通工具失败
+若被模型恢复并最终完成，仍保存完整历史。write、edit 或 bash 已开始后若后续 Provider、
+模型步数或存储失败，安全终态会提醒工具修改可能已经发生并要求检查工作区，不回显路径、
+命令、工具输出或原始异常；工具副作用不承诺回滚。
+
+目标组、严格异步组、分发回归和全量测试均通过，分别为 `289 passed`、`73 passed`、
+`12 passed`、`823 passed, 1 skipped`。原子替换故障注入证明旧 v1 字节不变、无临时文件、
+仍可按 v1 加载且恢复后可一次升级；跨层退出重载测试证明完整已清洗工具顺序进入下一次模型
+请求和 v2 JSONL。新增公共回归证明缺失版本、数组或对象版本容器均不会泄漏 `KeyError` 或
+`TypeError`，scan 能隔离损坏文件并保留健康 v1/v2 会话。剩余风险是清洗器按本阶段明确凭据键
+和常见样式工作，不是通用 DLP；工具副作用仍需用户在失败提示后自行检查。P5-08 CLI 工具装配、
+权限提示和安装态真实工具闭环尚未开始。

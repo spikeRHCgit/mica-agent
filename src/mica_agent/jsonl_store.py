@@ -7,7 +7,7 @@ import json
 import os
 import re
 import tempfile
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
@@ -15,6 +15,7 @@ from pathlib import Path
 
 from ._file_lock import locked_file
 from .session_contracts import (
+    CURRENT_SESSION_FORMAT_VERSION,
     SessionError,
     SessionFormatError,
     SessionMeta,
@@ -146,6 +147,10 @@ def _reject_json_constant(value: str) -> object:
 def _snapshot_from_records(records: list[object]) -> StoredSession:
     if not records:
         raise SessionFormatError("session file is empty")
+    if all(isinstance(record, dict) for record in records):
+        versions = [record.get("format_version") for record in records]
+        if any(version != versions[0] for version in versions[1:]):
+            raise SessionFormatError("session file contains mixed format versions")
     parsed: list[SessionMeta | TurnEntry] = []
     for record in records:
         parsed.append(deserialize_session_record(record))
@@ -217,6 +222,24 @@ class JsonlSessionStore:
             raise SessionFormatError(str(exc)) from None
         return snapshot
 
+    @staticmethod
+    def _as_current_snapshot(snapshot: StoredSession) -> StoredSession:
+        meta = snapshot.meta
+        if meta.format_version == CURRENT_SESSION_FORMAT_VERSION:
+            return snapshot
+        return StoredSession(
+            SessionMeta(
+                session_id=meta.session_id,
+                format_version=CURRENT_SESSION_FORMAT_VERSION,
+                workspace_id=meta.workspace_id,
+                workspace_path=meta.workspace_path,
+                title=meta.title,
+                created_at=meta.created_at,
+                updated_at=meta.updated_at,
+            ),
+            snapshot.turns,
+        )
+
     def _read_bytes(self, path: Path) -> bytes:
         try:
             with path.open("rb") as stream:
@@ -277,6 +300,7 @@ class JsonlSessionStore:
     def _write_snapshot(
         self, path: Path, snapshot: StoredSession, *, replace: bool
     ) -> None:
+        snapshot = self._as_current_snapshot(snapshot)
         records = (snapshot.meta, *snapshot.turns)
         try:
             payload = b"".join(
@@ -325,7 +349,7 @@ class JsonlSessionStore:
     def create(
         self, meta: SessionMeta, turns: Iterable[TurnEntry] = ()
     ) -> StoredSession:
-        snapshot = self._make_snapshot(meta, turns)
+        snapshot = self._as_current_snapshot(self._make_snapshot(meta, turns))
         path = self.path_for_session(meta.session_id)
         with self._session_lock(meta.session_id):
             if path.exists():
@@ -353,7 +377,7 @@ class JsonlSessionStore:
             snapshot = self._make_snapshot(
                 SessionMeta(
                     session_id=current.meta.session_id,
-                    format_version=current.meta.format_version,
+                    format_version=CURRENT_SESSION_FORMAT_VERSION,
                     workspace_id=current.meta.workspace_id,
                     workspace_path=current.meta.workspace_path,
                     title=current.meta.title,
@@ -365,10 +389,39 @@ class JsonlSessionStore:
             self._write_snapshot(path, snapshot, replace=True)
             return snapshot
 
+    def update(
+        self,
+        session_id: str,
+        transform: Callable[[StoredSession], StoredSession],
+    ) -> StoredSession:
+        """在一次 session lock 内读取、变换并原子替换快照。"""
+        if not callable(transform):
+            raise TypeError("transform must be callable")
+        path = self.path_for_session(session_id)
+        with self._session_lock(session_id):
+            if not path.is_file():
+                raise SessionNotFoundError()
+            current = self._load_path(path, requested_session_id=session_id)
+            snapshot = transform(current)
+            if not isinstance(snapshot, StoredSession):
+                raise TypeError("transform must return a StoredSession")
+            self._validate_meta(snapshot.meta)
+            if snapshot.meta.session_id != current.meta.session_id:
+                raise SessionFormatError("session identity cannot change")
+            if (
+                snapshot.meta.workspace_id != current.meta.workspace_id
+                or snapshot.meta.workspace_path != current.meta.workspace_path
+            ):
+                raise SessionFormatError("session workspace identity cannot change")
+            snapshot = self._as_current_snapshot(snapshot)
+            self._write_snapshot(path, snapshot, replace=True)
+            return snapshot
+
     def rewrite(self, snapshot: StoredSession) -> StoredSession:
         if not isinstance(snapshot, StoredSession):
             raise TypeError("snapshot must be a StoredSession")
         self._validate_meta(snapshot.meta)
+        snapshot = self._as_current_snapshot(snapshot)
         path = self.path_for_session(snapshot.meta.session_id)
         with self._session_lock(snapshot.meta.session_id):
             if not path.is_file():

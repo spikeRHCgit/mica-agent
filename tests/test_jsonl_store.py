@@ -69,6 +69,50 @@ def make_turn(number: int, completed_at: datetime = NOW) -> TurnEntry:
     )
 
 
+def write_v1_fixture(
+    store: JsonlSessionStore, identity: object, session_id: str
+) -> bytes:
+    meta = (
+        '{"created_at":"2026-08-21T03:04:05.000000+00:00",'
+        '"format_version":1,"record_type":"session_meta",'
+        f'"session_id":{json.dumps(session_id)},"title":"legacy",'
+        f'"updated_at":"2026-08-21T03:04:05.000000+00:00",'
+        f'"workspace_id":{json.dumps(identity.workspace_id)},'
+        f'"workspace_path":{json.dumps(str(identity.workspace_path))}}}\n'
+    )
+    turn = (
+        '{"assistant_message":{"content":"legacy answer","role":"assistant"},'
+        '"completed_at":"2026-08-21T03:04:05.000000+00:00",'
+        '"format_version":1,"record_type":"turn","run_id":"legacy-run",'
+        '"turn_id":"legacy-turn",'
+        '"user_message":{"content":"legacy question","role":"user"}}\n'
+    )
+    payload = (meta + turn).encode("utf-8")
+    path = store.path_for_session(session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    return payload
+
+
+def test_fixed_v1_jsonl_loads_through_public_store(tmp_path: Path) -> None:
+    store, identity = make_store(tmp_path)
+    write_v1_fixture(store, identity, "legacy-session")
+
+    loaded = store.load("legacy-session")
+
+    assert CURRENT_SESSION_FORMAT_VERSION == 2
+    assert loaded.meta.format_version == 1
+    assert loaded.turns == (
+        TurnEntry(
+            "legacy-turn",
+            "legacy-run",
+            Message(MessageRole.USER, "legacy question"),
+            Message(MessageRole.ASSISTANT, "legacy answer"),
+            NOW,
+        ),
+    )
+
+
 def test_session_filename_is_hash_only_and_path_safe() -> None:
     session_id = r"folder/..\secret:会话"
 
@@ -81,6 +125,87 @@ def test_session_filename_is_hash_only_and_path_safe() -> None:
         + ".jsonl"
     )
     assert "/" not in filename and "\\" not in filename and ".." not in filename
+
+
+def test_append_turn_upgrades_v1_and_business_change_in_one_v2_snapshot(
+    tmp_path: Path,
+) -> None:
+    store, identity = make_store(tmp_path)
+    write_v1_fixture(store, identity, "legacy-append")
+
+    upgraded = store.append_turn(
+        "legacy-append", make_turn(2, NOW + timedelta(seconds=1))
+    )
+
+    raw = store.path_for_session("legacy-append").read_bytes()
+    records = [json.loads(line) for line in raw.splitlines()]
+    assert upgraded.meta.format_version == 2
+    assert len(upgraded.turns) == 2
+    assert {record["format_version"] for record in records} == {2}
+    assert all("messages" in record for record in records[1:])
+    assert all("user_message" not in record for record in records[1:])
+
+
+def test_v1_upgrade_replace_failure_preserves_bytes_and_allows_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, identity = make_store(tmp_path)
+    original = write_v1_fixture(store, identity, "legacy-failure")
+    path = store.path_for_session("legacy-failure")
+
+    def fail_replace(source: Path, target: Path) -> None:
+        raise PermissionError("injected replace failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "replace", fail_replace)
+        with pytest.raises(SessionStorageIOError, match="write"):
+            store.append_turn(
+                "legacy-failure", make_turn(2, NOW + timedelta(seconds=1))
+            )
+
+    assert path.read_bytes() == original
+    assert store.load("legacy-failure").meta.format_version == 1
+    assert not list(path.parent.glob("*.tmp"))
+
+    upgraded = store.append_turn(
+        "legacy-failure", make_turn(2, NOW + timedelta(seconds=1))
+    )
+    assert upgraded.meta.format_version == 2
+    assert {
+        json.loads(line)["format_version"] for line in path.read_bytes().splitlines()
+    } == {2}
+
+
+def test_v2_plain_text_turn_has_canonical_messages_wire_bytes(tmp_path: Path) -> None:
+    store, identity = make_store(tmp_path)
+    meta = make_meta(identity, session_id="v2-wire")
+    turn = TurnEntry(
+        "turn-v2",
+        "run-v2",
+        Message(MessageRole.USER, "question"),
+        Message(MessageRole.ASSISTANT, "answer"),
+        NOW,
+    )
+
+    store.create(meta, (turn,))
+
+    raw = store.path_for_session("v2-wire").read_bytes()
+    expected_meta = (
+        '{"created_at":"2026-08-21T03:04:05.000000+00:00",'
+        '"format_version":2,"record_type":"session_meta",'
+        '"session_id":"v2-wire","title":"title",'
+        '"updated_at":"2026-08-21T03:04:05.000000+00:00",'
+        f'"workspace_id":{json.dumps(identity.workspace_id)},'
+        f'"workspace_path":{json.dumps(str(identity.workspace_path))}}}\n'
+    ).encode()
+    expected_turn = (
+        b'{"completed_at":"2026-08-21T03:04:05.000000+00:00",'
+        b'"format_version":2,"messages":['
+        b'{"content":"question","role":"user"},'
+        b'{"content":"answer","role":"assistant"}],'
+        b'"record_type":"turn","run_id":"run-v2","turn_id":"turn-v2"}\n'
+    )
+    assert raw == expected_meta + expected_turn
 
 
 def test_writer_uses_stable_sorted_json_keys(tmp_path: Path) -> None:
@@ -261,6 +386,82 @@ def test_filename_and_workspace_identity_mismatch_are_rejected(tmp_path: Path) -
     )
     with pytest.raises(SessionFormatError, match="workspace_id"):
         store.load(meta.session_id)
+
+
+def test_scan_accepts_v1_and_v2_but_reports_mixed_version_file(
+    tmp_path: Path,
+) -> None:
+    store, identity = make_store(tmp_path)
+    write_v1_fixture(store, identity, "healthy-v1")
+    store.create(make_meta(identity, session_id="healthy-v2"))
+    mixed = write_v1_fixture(store, identity, "mixed")
+    lines = mixed.splitlines(keepends=True)
+    lines[1] = lines[1].replace(b'"format_version":1', b'"format_version":2')
+    store.path_for_session("mixed").write_bytes(b"".join(lines))
+
+    result = store.scan()
+
+    assert {session.meta.session_id for session in result.sessions} == {
+        "healthy-v1",
+        "healthy-v2",
+    }
+    assert len(result.problems) == 1
+    assert result.problems[0].error_type == "SessionFormatError"
+    assert "mixed" in result.problems[0].diagnostic
+
+
+@pytest.mark.parametrize(
+    ("invalid_version", "suffix"),
+    [([], "array"), ({}, "object")],
+)
+def test_scan_isolates_invalid_format_version_records(
+    tmp_path: Path, invalid_version: object, suffix: str
+) -> None:
+    store, identity = make_store(tmp_path)
+    write_v1_fixture(store, identity, "healthy-v1")
+    store.create(make_meta(identity, session_id="healthy-v2"))
+    invalid_session_id = f"invalid-version-{suffix}"
+    records = [
+        json.loads(line)
+        for line in write_v1_fixture(store, identity, invalid_session_id).splitlines()
+    ]
+    sensitive = "sk-invalid-version-sensitive-sentinel"
+    records[1]["format_version"] = invalid_version
+    records[1]["user_message"]["content"] = sensitive
+    invalid_bytes = b"".join(
+        json.dumps(record, separators=(",", ":")).encode("utf-8") + b"\n"
+        for record in records
+    )
+    invalid_path = store.path_for_session(invalid_session_id)
+    invalid_path.write_bytes(invalid_bytes)
+
+    result = store.scan()
+
+    assert {session.meta.session_id for session in result.sessions} == {
+        "healthy-v1",
+        "healthy-v2",
+    }
+    assert len(result.problems) == 1
+    problem = result.problems[0]
+    assert problem.error_type == "SessionFormatError"
+    diagnostic = problem.diagnostic.lower()
+    for unsafe_value in (
+        sensitive.lower(),
+        str(identity.workspace_path).lower(),
+        '"format_version"',
+        "typeerror",
+        "unhashable",
+        "traceback",
+    ):
+        assert unsafe_value not in diagnostic
+
+    with pytest.raises(SessionFormatError) as caught:
+        store.load(invalid_session_id)
+
+    assert type(caught.value) is SessionFormatError
+    assert sensitive not in str(caught.value)
+    assert sensitive not in repr(caught.value)
+    assert invalid_path.read_bytes() == invalid_bytes
 
 
 def test_scan_keeps_healthy_files_when_one_file_is_corrupt(tmp_path: Path) -> None:

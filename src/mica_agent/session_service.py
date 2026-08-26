@@ -161,18 +161,19 @@ class SessionService:
         return self.store.append_turn(session_id, turn)
 
     def rename_session(self, session_id: str, title: str) -> StoredSession:
-        current = self.store.load(session_id)
-        updated_at = self._activity_updated_at(current.meta, current.turns)
-        meta = SessionMeta(
-            session_id=current.meta.session_id,
-            format_version=current.meta.format_version,
-            workspace_id=current.meta.workspace_id,
-            workspace_path=current.meta.workspace_path,
-            title=title,
-            created_at=current.meta.created_at,
-            updated_at=updated_at,
-        )
-        return self.store.rewrite(StoredSession(meta, current.turns))
+        def rename(current: StoredSession) -> StoredSession:
+            meta = SessionMeta(
+                session_id=current.meta.session_id,
+                format_version=CURRENT_SESSION_FORMAT_VERSION,
+                workspace_id=current.meta.workspace_id,
+                workspace_path=current.meta.workspace_path,
+                title=title,
+                created_at=current.meta.created_at,
+                updated_at=self._activity_updated_at(current.meta, current.turns),
+            )
+            return StoredSession(meta, current.turns)
+
+        return self.store.update(session_id, rename)
 
     def branch_session(
         self, source_session_id: str, title: str | None = None
@@ -196,34 +197,38 @@ class SessionService:
     copy_session = branch_session
 
     def rewind_session(self, session_id: str, from_turn_id: str) -> StoredSession:
-        current = self.store.load(session_id)
-        for index, turn in enumerate(current.turns):
-            if turn.turn_id == from_turn_id:
-                turns = current.turns[:index]
-                meta = SessionMeta(
-                    session_id=current.meta.session_id,
-                    format_version=current.meta.format_version,
-                    workspace_id=current.meta.workspace_id,
-                    workspace_path=current.meta.workspace_path,
-                    title=current.meta.title,
-                    created_at=current.meta.created_at,
-                    updated_at=self._activity_updated_at(current.meta, turns),
-                )
-                return self.store.rewrite(StoredSession(meta, turns))
-        raise TurnNotFoundError(from_turn_id)
+        def rewind(current: StoredSession) -> StoredSession:
+            for index, turn in enumerate(current.turns):
+                if turn.turn_id == from_turn_id:
+                    turns = current.turns[:index]
+                    meta = SessionMeta(
+                        session_id=current.meta.session_id,
+                        format_version=CURRENT_SESSION_FORMAT_VERSION,
+                        workspace_id=current.meta.workspace_id,
+                        workspace_path=current.meta.workspace_path,
+                        title=current.meta.title,
+                        created_at=current.meta.created_at,
+                        updated_at=self._activity_updated_at(current.meta, turns),
+                    )
+                    return StoredSession(meta, turns)
+            raise TurnNotFoundError(from_turn_id)
+
+        return self.store.update(session_id, rewind)
 
     def clear_session(self, session_id: str) -> StoredSession:
-        current = self.store.load(session_id)
-        meta = SessionMeta(
-            session_id=current.meta.session_id,
-            format_version=current.meta.format_version,
-            workspace_id=current.meta.workspace_id,
-            workspace_path=current.meta.workspace_path,
-            title=current.meta.title,
-            created_at=current.meta.created_at,
-            updated_at=self._activity_updated_at(current.meta),
-        )
-        return self.store.rewrite(StoredSession(meta, ()))
+        def clear(current: StoredSession) -> StoredSession:
+            meta = SessionMeta(
+                session_id=current.meta.session_id,
+                format_version=CURRENT_SESSION_FORMAT_VERSION,
+                workspace_id=current.meta.workspace_id,
+                workspace_path=current.meta.workspace_path,
+                title=current.meta.title,
+                created_at=current.meta.created_at,
+                updated_at=self._activity_updated_at(current.meta),
+            )
+            return StoredSession(meta, ())
+
+        return self.store.update(session_id, clear)
 
     def delete_session(self, session_id: str) -> None:
         self.store.delete(session_id)
@@ -231,9 +236,7 @@ class SessionService:
     def context_snapshot(self, session_id: str) -> tuple[Message, ...]:
         session = self.store.load(session_id)
         return tuple(
-            message
-            for turn in session.turns
-            for message in (turn.user_message, turn.assistant_message)
+            message for turn in session.turns for message in turn.context_messages
         )
 
     def cleanup_expired(

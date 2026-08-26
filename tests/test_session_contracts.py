@@ -19,6 +19,7 @@ from mica_agent.session_contracts import (
     deserialize_session_record,
     serialize_session_record,
 )
+from mica_agent.tool_contracts import ToolCall
 
 UTC_NOW = datetime(2026, 8, 21, 3, 4, 5, 123456, tzinfo=UTC)
 
@@ -49,7 +50,7 @@ def test_session_meta_carries_validated_session_identity() -> None:
     )
 
     assert meta.session_id == "session-1"
-    assert meta.format_version == 1
+    assert meta.format_version == 2
     assert meta.workspace_id == "workspace-1"
     assert meta.workspace_path == r"C:\work\mica"
     assert meta.title == "Mica session"
@@ -73,7 +74,7 @@ def test_session_meta_rejects_non_integer_format_versions(version: object) -> No
         make_session_meta(format_version=version)
 
 
-@pytest.mark.parametrize("version", [0, 2, -1])
+@pytest.mark.parametrize("version", [0, 3, -1])
 def test_session_meta_rejects_unsupported_format_versions(version: int) -> None:
     with pytest.raises(ValueError, match="format_version"):
         make_session_meta(format_version=version)
@@ -139,6 +140,102 @@ def make_turn_entry(**changes: object) -> TurnEntry:
     }
     values.update(changes)
     return TurnEntry(**values)  # type: ignore[arg-type]
+
+
+def fixed_v1_turn_record() -> dict[str, object]:
+    return {
+        "record_type": "turn",
+        "format_version": 1,
+        "turn_id": "turn-1",
+        "run_id": "run-1",
+        "user_message": {"role": "user", "content": "hello"},
+        "assistant_message": {"role": "assistant", "content": "hi"},
+        "completed_at": "2026-08-21T03:04:05.123456+00:00",
+    }
+
+
+def test_tool_turn_round_trips_complete_context_order() -> None:
+    first_call = ToolCall("call-1", "read", {"path": "a.txt"})
+    second_call = ToolCall("call-2", "ls", {"path": "."})
+    intermediate = (
+        Message(MessageRole.ASSISTANT, "checking", (first_call,)),
+        Message(MessageRole.TOOL, '{"status":"success"}', tool_call_id="call-1"),
+        Message(MessageRole.ASSISTANT, "", (second_call,)),
+        Message(MessageRole.TOOL, '{"status":"success"}', tool_call_id="call-2"),
+    )
+    turn = TurnEntry(
+        "turn-tools",
+        "run-tools",
+        Message(MessageRole.USER, "inspect"),
+        Message(MessageRole.ASSISTANT, "done"),
+        UTC_NOW,
+        intermediate,
+    )
+
+    restored = deserialize_session_record(serialize_session_record(turn))
+
+    assert restored == turn
+    assert isinstance(restored, TurnEntry)
+    assert restored.context_messages == (
+        turn.user_message,
+        *intermediate,
+        turn.assistant_message,
+    )
+
+
+def test_turn_entry_uses_redacted_tool_snapshot_without_mutating_input() -> None:
+    secret = "sk-direct-store-sensitive"
+    call = ToolCall("call-secret", "read", {"api_key": secret})
+    assistant = Message(MessageRole.ASSISTANT, "", (call,))
+    tool = Message(
+        MessageRole.TOOL,
+        '{"token":"Bearer direct-private-token"}',
+        tool_call_id="call-secret",
+    )
+
+    turn = make_turn_entry(intermediate_messages=(assistant, tool))
+    serialized = serialize_session_record(turn)
+
+    observed = repr((turn.intermediate_messages, serialized))
+    assert secret not in observed
+    assert "direct-private-token" not in observed
+    assert "[REDACTED]" in observed
+    assert assistant.tool_calls[0].arguments["api_key"] == secret
+    assert tool.content == '{"token":"Bearer direct-private-token"}'
+
+
+def test_invalid_v2_tool_sequence_fails_without_echoing_sensitive_content() -> None:
+    sensitive = "sk-sensitive-session-sentinel"
+    record = {
+        "record_type": "turn",
+        "format_version": 2,
+        "turn_id": "bad-turn",
+        "run_id": "bad-run",
+        "messages": [
+            {"role": "user", "content": "question"},
+            {"role": "tool", "content": sensitive, "tool_call_id": "orphan"},
+            {"role": "assistant", "content": "answer"},
+        ],
+        "completed_at": "2026-08-21T03:04:05.123456+00:00",
+    }
+
+    with pytest.raises(SessionFormatError) as caught:
+        deserialize_session_record(record)
+
+    assert sensitive not in str(caught.value)
+    assert sensitive not in repr(caught.value)
+
+
+def test_turn_entry_rejects_unmatched_tool_result_order() -> None:
+    call = ToolCall("call-1", "read", {})
+
+    with pytest.raises(ValueError, match="order"):
+        make_turn_entry(
+            intermediate_messages=(
+                Message(MessageRole.ASSISTANT, "", (call,)),
+                Message(MessageRole.TOOL, "result", tool_call_id="wrong-call"),
+            )
+        )
 
 
 def test_turn_entry_carries_one_complete_successful_turn() -> None:
@@ -210,7 +307,7 @@ def test_session_meta_serializes_to_an_explicit_canonical_record() -> None:
 
     assert record == {
         "record_type": "session_meta",
-        "format_version": 1,
+        "format_version": 2,
         "session_id": "session-1",
         "workspace_id": "workspace-1",
         "workspace_path": r"C:\work\mica",
@@ -227,11 +324,13 @@ def test_turn_entry_serializes_to_an_explicit_canonical_record() -> None:
 
     assert record == {
         "record_type": "turn",
-        "format_version": 1,
+        "format_version": 2,
         "turn_id": "turn-1",
         "run_id": "run-1",
-        "user_message": {"role": "user", "content": "hello"},
-        "assistant_message": {"role": "assistant", "content": "hi"},
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ],
         "completed_at": "2026-08-21T03:04:05.123456+00:00",
     }
     assert SessionRecordType.TURN.value == "turn"
@@ -262,7 +361,7 @@ def test_turn_record_round_trips_to_a_strong_type() -> None:
         serialize_session_record(make_turn_entry()),
     ],
 )
-@pytest.mark.parametrize("version", [0, 2, -1])
+@pytest.mark.parametrize("version", [0, 3, -1])
 def test_deserializer_rejects_unknown_versions(
     record: dict[str, object], version: int
 ) -> None:
@@ -295,6 +394,31 @@ def test_deserializer_rejects_an_unknown_record_type_without_echoing_it() -> Non
 def test_deserializer_requires_an_explicit_record_type() -> None:
     with pytest.raises(SessionFormatError, match="record_type"):
         deserialize_session_record({"format_version": 1})
+
+
+def test_deserializer_rejects_a_turn_without_format_version() -> None:
+    with pytest.raises(SessionFormatError, match="format_version") as caught:
+        deserialize_session_record({"record_type": "turn"})
+
+    assert type(caught.value) is SessionFormatError
+
+
+def test_deserializer_does_not_echo_messages_when_turn_lacks_format_version() -> None:
+    sensitive = "sk-missing-version-sensitive-sentinel"
+    record = {
+        "record_type": "turn",
+        "messages": [
+            {"role": "user", "content": sensitive},
+            {"role": "assistant", "content": "answer"},
+        ],
+    }
+
+    with pytest.raises(SessionFormatError, match="format_version") as caught:
+        deserialize_session_record(record)
+
+    assert type(caught.value) is SessionFormatError
+    assert sensitive not in str(caught.value)
+    assert sensitive not in repr(caught.value)
 
 
 @pytest.mark.parametrize("record", [None, [], "record", 42])
@@ -355,7 +479,7 @@ def test_deserializer_rejects_wrong_top_level_field_types(
 
 @pytest.mark.parametrize("field", ["user_message", "assistant_message"])
 def test_deserializer_rejects_non_object_messages(field: str) -> None:
-    record = serialize_session_record(make_turn_entry())
+    record = fixed_v1_turn_record()
     record[field] = "not an object"
 
     with pytest.raises(SessionFormatError, match=field):
@@ -364,7 +488,7 @@ def test_deserializer_rejects_non_object_messages(field: str) -> None:
 
 @pytest.mark.parametrize("field", ["user_message", "assistant_message"])
 def test_deserializer_rejects_missing_or_extra_message_fields(field: str) -> None:
-    missing = serialize_session_record(make_turn_entry())
+    missing = fixed_v1_turn_record()
     missing_message = missing[field]
     assert isinstance(missing_message, dict)
     del missing_message["content"]
@@ -372,7 +496,7 @@ def test_deserializer_rejects_missing_or_extra_message_fields(field: str) -> Non
     with pytest.raises(SessionFormatError, match="content"):
         deserialize_session_record(missing)
 
-    extra = serialize_session_record(make_turn_entry())
+    extra = fixed_v1_turn_record()
     extra_message = extra[field]
     assert isinstance(extra_message, dict)
     extra_message["extra"] = "untrusted-value"
@@ -386,7 +510,7 @@ def test_deserializer_rejects_missing_or_extra_message_fields(field: str) -> Non
     [("user_message", "assistant"), ("assistant_message", "user")],
 )
 def test_deserializer_rejects_invalid_message_roles(field: str, role: str) -> None:
-    record = serialize_session_record(make_turn_entry())
+    record = fixed_v1_turn_record()
     message = record[field]
     assert isinstance(message, dict)
     message["role"] = role
@@ -397,7 +521,7 @@ def test_deserializer_rejects_invalid_message_roles(field: str, role: str) -> No
 
 @pytest.mark.parametrize("field", ["user_message", "assistant_message"])
 def test_deserializer_rejects_non_text_message_content(field: str) -> None:
-    record = serialize_session_record(make_turn_entry())
+    record = fixed_v1_turn_record()
     message = record[field]
     assert isinstance(message, dict)
     message["content"] = 42

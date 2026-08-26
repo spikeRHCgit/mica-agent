@@ -60,6 +60,27 @@ def _request(name: str = "read", arguments: object = None) -> ToolRequest:
     return ToolRequest("call-1", name, arguments)  # type: ignore[arg-type]
 
 
+def test_tool_specs_is_deterministic_public_immutable_snapshot() -> None:
+    registry = ToolRegistry()
+
+    async def handler(
+        request: ToolRequest, cancellation: CancellationToken
+    ) -> ToolResult:
+        return ToolResult(request.call_id, request.name, ToolResultStatus.SUCCESS, "ok")
+
+    second = _spec("write")
+    first = _spec("read")
+    registry.register(second, handler)
+    registry.register(first, handler)
+    executor = _executor(registry)
+
+    snapshot = executor.tool_specs
+
+    assert snapshot == (first, second)
+    assert isinstance(snapshot, tuple)
+    assert executor.tool_specs is not snapshot
+
+
 def test_known_tool_validates_and_executes_once_when_allowed() -> None:
     calls = 0
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from dataclasses import replace
@@ -21,6 +22,7 @@ from mica_agent.session_service import (
     SessionService,
     TurnNotFoundError,
 )
+from mica_agent.tool_contracts import ToolCall
 from mica_agent.workspace import resolve_workspace
 
 NOW = datetime(2026, 8, 22, 3, 4, 5, tzinfo=UTC)
@@ -62,6 +64,53 @@ def make_turn(number: int, completed_at: datetime = NOW) -> TurnEntry:
         assistant_message=Message(MessageRole.ASSISTANT, f"assistant-{number}"),
         completed_at=completed_at,
     )
+
+
+def write_v1_session(store: JsonlSessionStore, session_id: str) -> bytes:
+    meta = {
+        "record_type": "session_meta",
+        "format_version": 1,
+        "session_id": session_id,
+        "workspace_id": store.workspace.workspace_id,
+        "workspace_path": str(store.workspace.workspace_path),
+        "title": "legacy",
+        "created_at": NOW.isoformat(timespec="microseconds"),
+        "updated_at": NOW.isoformat(timespec="microseconds"),
+    }
+    turn = {
+        "record_type": "turn",
+        "format_version": 1,
+        "turn_id": "turn-1",
+        "run_id": "run-1",
+        "user_message": {"role": "user", "content": "legacy user"},
+        "assistant_message": {"role": "assistant", "content": "legacy answer"},
+        "completed_at": NOW.isoformat(timespec="microseconds"),
+    }
+    payload = b"".join(
+        json.dumps(record, separators=(",", ":"), sort_keys=True).encode() + b"\n"
+        for record in (meta, turn)
+    )
+    path = store.path_for_session(session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    return payload
+
+
+def test_v1_mutations_upgrade_and_branch_keeps_source_unchanged(tmp_path: Path) -> None:
+    service, store, _ = make_service(tmp_path, session_ids=["branch-v2"])
+    for session_id in ("rename-v1", "rewind-v1", "clear-v1", "source-v1"):
+        write_v1_session(store, session_id)
+
+    assert service.rename_session("rename-v1", "renamed").meta.format_version == 2
+    assert service.rewind_session("rewind-v1", "turn-1").meta.format_version == 2
+    assert service.clear_session("clear-v1").meta.format_version == 2
+
+    source_bytes = store.path_for_session("source-v1").read_bytes()
+    branch = service.branch_session("source-v1")
+    assert branch.meta.format_version == 2
+    assert branch.turns[0].completed_at == NOW
+    assert store.path_for_session("source-v1").read_bytes() == source_bytes
+    assert store.load("source-v1").meta.format_version == 1
 
 
 def test_create_load_and_factory_are_injected(tmp_path: Path) -> None:
@@ -220,6 +269,30 @@ def test_rewind_last_and_missing_target_are_explicit(tmp_path: Path) -> None:
     with pytest.raises(TurnNotFoundError) as caught:
         service.rewind_session("session", "missing")
     assert caught.value.turn_id == "missing"
+
+
+def test_context_snapshot_expands_complete_tool_history(tmp_path: Path) -> None:
+    service, _, _ = make_service(tmp_path, session_ids=["tool-session"])
+    service.create_session()
+    call = ToolCall("call-1", "read", {"path": "notes.txt"})
+    turn = TurnEntry(
+        "turn-tools",
+        "run-tools",
+        Message(MessageRole.USER, "inspect"),
+        Message(MessageRole.ASSISTANT, "done"),
+        NOW,
+        (
+            Message(MessageRole.ASSISTANT, "checking", (call,)),
+            Message(
+                MessageRole.TOOL,
+                '{"status":"success"}',
+                tool_call_id="call-1",
+            ),
+        ),
+    )
+    service.commit_turn("tool-session", turn)
+
+    assert service.context_snapshot("tool-session") == turn.context_messages
 
 
 def test_clear_delete_and_context_snapshot_are_scoped_and_immutable(

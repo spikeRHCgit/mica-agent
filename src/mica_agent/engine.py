@@ -28,6 +28,7 @@ from .events import (
     UserInputRequested,
 )
 from .interactions import InteractionKind, InteractionRequest
+from .message_sanitizer import sanitize_tool_message
 from .models import Message, MessageRole
 from .providers import (
     AuthenticationError,
@@ -47,8 +48,11 @@ from .tool_contracts import ToolRequest, ToolResult, ToolResultStatus, to_mutabl
 from .tool_executor import ToolExecutor
 
 RunIdFactory = Callable[[], str]
+CompletedMessagesSink = Callable[[tuple[Message, ...]], None]
 DEFAULT_MAX_MODEL_STEPS = 8
 DEFAULT_MAX_TOOL_CALLS = 32
+_SIDE_EFFECT_TOOL_NAMES = frozenset({"write", "edit", "bash"})
+_SIDE_EFFECT_WARNING = "tool changes may have occurred; check the workspace"
 
 
 class _ToolSignal:
@@ -106,6 +110,7 @@ class AgentEngine:
         request: ProviderRequest,
         *,
         cancellation: CancellationToken | None = None,
+        completed_messages_sink: CompletedMessagesSink | None = None,
     ) -> AsyncIterator[EngineEvent]:
         run_id = self._run_id_factory()
         seq = 0
@@ -113,6 +118,8 @@ class AgentEngine:
         yield RunStarted(run_id=run_id)
         seq += 1
         messages = request.messages
+        completed_messages: list[Message] = []
+        side_effect_tool_started = False
         model_steps = 0
         tool_calls_total = 0
         try:
@@ -124,7 +131,9 @@ class AgentEngine:
                         run_id=run_id,
                         seq=seq,
                         category=ErrorCategory.LIMIT,
-                        message="model step limit reached",
+                        message=self._failure_message(
+                            "model step limit reached", side_effect_tool_started
+                        ),
                     )
                     return
                 model_steps += 1
@@ -145,7 +154,10 @@ class AgentEngine:
                                     run_id=run_id,
                                     seq=seq,
                                     category=ErrorCategory.MALFORMED,
-                                    message="provider produced a non-string text delta",
+                                    message=self._failure_message(
+                                        "provider produced a non-string text delta",
+                                        side_effect_tool_started,
+                                    ),
                                 )
                                 return
                             step_text.append(provider_event.text)
@@ -161,7 +173,10 @@ class AgentEngine:
                                 run_id=run_id,
                                 seq=seq,
                                 category=self._map_error(provider_event.error),
-                                message=self._error_message(provider_event.error),
+                                message=self._failure_message(
+                                    self._error_message(provider_event.error),
+                                    side_effect_tool_started,
+                                ),
                             )
                             return
                         else:
@@ -169,7 +184,10 @@ class AgentEngine:
                                 run_id=run_id,
                                 seq=seq,
                                 category=ErrorCategory.UNKNOWN,
-                                message="provider produced an unknown event",
+                                message=self._failure_message(
+                                    "provider produced an unknown event",
+                                    side_effect_tool_started,
+                                ),
                             )
                             return
                 if finish is None:
@@ -177,10 +195,33 @@ class AgentEngine:
                         run_id=run_id,
                         seq=seq,
                         category=ErrorCategory.MALFORMED,
-                        message="provider stream ended without a terminal event",
+                        message=self._failure_message(
+                            "provider stream ended without a terminal event",
+                            side_effect_tool_started,
+                        ),
                     )
                     return
                 if not finish.tool_calls:
+                    completed_messages.append(
+                        Message(
+                            role=MessageRole.ASSISTANT,
+                            content="".join(step_text),
+                        )
+                    )
+                    if completed_messages_sink is not None:
+                        try:
+                            completed_messages_sink(tuple(completed_messages))
+                        except Exception:  # noqa: BLE001 - safe completion boundary
+                            yield RunFailed(
+                                run_id=run_id,
+                                seq=seq,
+                                category=ErrorCategory.UNKNOWN,
+                                message=self._failure_message(
+                                    "completed message handling failed",
+                                    side_effect_tool_started,
+                                ),
+                            )
+                            return
                     yield RunCompleted(run_id=run_id, seq=seq)
                     return
                 if self._tool_executor is None:
@@ -188,7 +229,9 @@ class AgentEngine:
                         run_id=run_id,
                         seq=seq,
                         category=ErrorCategory.UNKNOWN,
-                        message="tool execution is unavailable",
+                        message=self._failure_message(
+                            "tool execution is unavailable", side_effect_tool_started
+                        ),
                     )
                     return
                 batch_size = len(finish.tool_calls)
@@ -197,16 +240,21 @@ class AgentEngine:
                         run_id=run_id,
                         seq=seq,
                         category=ErrorCategory.LIMIT,
-                        message="tool call limit reached",
+                        message=self._failure_message(
+                            "tool call limit reached", side_effect_tool_started
+                        ),
                     )
                     return
                 tool_calls_total += batch_size
-                assistant_message = Message(
-                    role=MessageRole.ASSISTANT,
-                    content="".join(step_text),
-                    tool_calls=finish.tool_calls,
+                assistant_message = sanitize_tool_message(
+                    Message(
+                        role=MessageRole.ASSISTANT,
+                        content="".join(step_text),
+                        tool_calls=finish.tool_calls,
+                    )
                 )
                 messages = messages + (assistant_message,)
+                completed_messages.append(assistant_message)
                 for call in finish.tool_calls:
                     tool_request = ToolRequest(call.call_id, call.name, call.arguments)
                     result: ToolResult | None = None
@@ -236,6 +284,8 @@ class AgentEngine:
                         elif signal.kind == "started":
                             started = signal.value
                             assert isinstance(started, ToolRequest)
+                            if started.name in _SIDE_EFFECT_TOOL_NAMES:
+                                side_effect_tool_started = True
                             yield ToolStarted(
                                 run_id=run_id,
                                 seq=seq,
@@ -262,19 +312,23 @@ class AgentEngine:
                             run_id=run_id,
                             seq=seq,
                             category=ErrorCategory.UNKNOWN,
-                            message="tool execution failed",
+                            message=self._failure_message(
+                                "tool execution failed", side_effect_tool_started
+                            ),
                         )
                         return
                     if result.status is ToolResultStatus.CANCELLED:
                         yield RunCancelled(run_id=run_id, seq=seq)
                         return
-                    messages = messages + (
+                    tool_message = sanitize_tool_message(
                         Message(
                             role=MessageRole.TOOL,
                             content=self._tool_result_message(result),
                             tool_call_id=call.call_id,
-                        ),
+                        )
                     )
+                    messages = messages + (tool_message,)
+                    completed_messages.append(tool_message)
         except CancellationRequested:
             yield RunCancelled(run_id=run_id, seq=seq)
             return
@@ -286,7 +340,9 @@ class AgentEngine:
                 run_id=run_id,
                 seq=seq,
                 category=ErrorCategory.UNKNOWN,
-                message="unexpected engine error",
+                message=self._failure_message(
+                    "unexpected engine error", side_effect_tool_started
+                ),
             )
             return
         finally:
@@ -413,6 +469,12 @@ class AgentEngine:
             allow_nan=False,
             separators=(",", ":"),
         )
+
+    @staticmethod
+    def _failure_message(message: str, side_effect_tool_started: bool) -> str:
+        if side_effect_tool_started:
+            return f"{message}; {_SIDE_EFFECT_WARNING}"
+        return message
 
     @staticmethod
     def _map_error(error: object) -> ErrorCategory:

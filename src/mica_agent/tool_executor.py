@@ -72,6 +72,11 @@ class ToolExecutor:
         self._interaction_broker = interaction_broker or InteractionBroker()
 
     @property
+    def tool_specs(self) -> tuple[ToolSpec, ...]:
+        """返回仅含公开工具定义的确定性不可变快照。"""
+        return tuple(self._registry.specs())
+
+    @property
     def interaction_broker(self) -> InteractionBroker:
         """Engine 或前端用来观察请求和提交响应的 broker。"""
         return self._interaction_broker
