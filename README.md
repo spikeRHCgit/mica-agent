@@ -37,7 +37,7 @@ Mica 是一个面向个人开发者的轻量 Agent 基座。
 - 支持 OpenAI-compatible Chat Completions 的流式输出（SSE），文本增量实时写出。
 - 基础 CLI 已装配六个工具：`read`、`ls`、`write`、`edit`、`bash` 和 `ask`。`read`/`ls` 查看工作区，`write`/`edit` 修改工作区，`bash` 在工作区运行受限 Bash 命令，`ask` 在当前 Run 中暂停并询问用户。
 - 可用权限模式：`--permission-mode default`（修改和 Bash 通常询问）、`--permission-mode accept-edits`（自动允许 `write`/`edit`，Bash 仍询问）和 `--permission-mode solo`（自动允许文件工具，Bash 仍询问）。工作区越界、敏感路径和工具硬性边界始终拒绝。
-- `write`、`edit` 和 `bash` 可能需要输入 `y`/`yes` 确认；其他回答或空回答拒绝本次调用。`ask` 的回答可以为空，并只作为当前工具结果返回模型。
+- `write`、`edit` 和 `bash` 可能需要输入 ASCII `y`/`yes` 确认；`n`/`no` 或空回答拒绝本次调用，其他输入会提示后重新询问。`ask` 的回答可以为空，并只作为当前工具结果返回模型。
 - 持久化多轮历史：完整成功的轮次写入当前工作区的 JSONL 会话，后续请求携带完整前文和工具历史。
 - 默认 `mica cli` 创建当前工作区的新会话；`mica cli --continue` 恢复该工作区最后活跃的健康会话；`mica cli --resume` 展示并选择该工作区的健康会话。
 - 当前恢复会话会把旧消息和完整工具历史加入后续模型请求，但基础 CLI 不会在启动时重新显示旧对话；历史回放属于后续完整 TUI。
@@ -86,4 +86,4 @@ uv build --offline
 - `docs/phase2_plan.md`：第二阶段（Engine、Provider、App、CLI 闭环）的范围与验收标准。
 - `docs/phase3_plan.md`：第三阶段（工作区隔离、JSONL 会话、恢复与上下文）的范围与验收标准。
 - `docs/phase4_plan.md`：第四阶段（仓库收口与旧实现清理）的范围与验收标准。
-- `docs/phase5_plan.md`：已批准并开始实施的第五阶段（工具执行、权限控制与统一取消）计划。
+- `docs/phase5_plan.md`：已完成并通过验收的第五阶段（工具执行、权限控制与统一取消）计划。

@@ -131,9 +131,9 @@ role、content 和 tool_call_id。
 和 finish_reason 的普通 chunk 仍拒绝，不会被静默忽略。
 
 请求测试通过真实 HTTP mock transport 捕获至少两个 ToolSpec 的 JSON，验证工具名称、描述、
-Schema 和顺序均与 ProviderRequest 一致；畸形工具参数测试实际包含虚假哨兵
-`sk-secret-value`，并验证 MalformedResponseError 的字符串和 repr 都不泄漏原始参数、调用
-ID、工具名称或 traceback。P5-05 只负责协议适配，不执行工具、不访问 ToolRegistry、不接入
+Schema 和顺序均与 ProviderRequest 一致；畸形工具参数测试包含伪造的凭据样式哨兵，并验证
+MalformedResponseError 的字符串和 repr 都不泄漏原始参数、调用 ID、工具名称或 traceback。
+P5-05 只负责协议适配，不执行工具、不访问 ToolRegistry、不接入
 Engine 循环。
 
 # P5-06 Engine 多步工具循环
