@@ -438,7 +438,8 @@ def test_successful_tool_run_persists_complete_v2_history_for_next_run(
     ]
     assert (workspace_path / "saved.txt").read_text(encoding="utf-8") == "saved"
     assert provider.requests[2].messages[-1].content == "continue"
-    assert [message.role for message in provider.requests[2].messages[:-1]] == [
+    assert provider.requests[2].messages[0].role is MessageRole.SYSTEM
+    assert [message.role for message in provider.requests[2].messages[1:-1]] == [
         MessageRole.USER,
         MessageRole.ASSISTANT,
         MessageRole.TOOL,

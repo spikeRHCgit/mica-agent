@@ -182,7 +182,8 @@ def test_exit_reload_restores_redacted_complete_tool_context(tmp_path: Path) -> 
     assert isinstance(second_events[-1], RunCompleted)
     restored = second_provider.requests[0].messages
     assert restored[-1] == Message(MessageRole.USER, "continue")
-    assert [message.role for message in restored[:-1]] == [
+    assert restored[0].role is MessageRole.SYSTEM
+    assert [message.role for message in restored[1:-1]] == [
         MessageRole.USER,
         MessageRole.ASSISTANT,
         MessageRole.TOOL,

@@ -443,6 +443,7 @@ def test_wheel_contains_only_mica_package_and_metadata(
         "mica_agent",
         f"mica_agent-{VERSION}.dist-info",
     }
+    assert "mica_agent/prompts/system.md" in members
 
 
 def test_sdist_contains_only_mica_source_package(
@@ -461,6 +462,7 @@ def test_sdist_contains_only_mica_source_package(
         or (len(parts) > 1 and parts[1] in {"mica_agent", "mica_agent.egg-info"})
         for parts in source_paths
     )
+    assert ("src", "mica_agent", "prompts", "system.md") in packaged_paths
 
 
 def test_installed_distribution_declares_runtime_dependencies(
@@ -727,10 +729,12 @@ def test_installed_wheel_restores_session_from_unicode_workspace(
         assert str(workspace) not in second.stderr
 
         assert len(server.requests) == 2
-        assert server.requests[0]["messages"] == [
+        assert server.requests[0]["messages"][0]["role"] == "system"
+        assert server.requests[0]["messages"][1:] == [
             {"role": "user", "content": first_prompt},
         ]
-        assert server.requests[1]["messages"] == [
+        assert server.requests[1]["messages"][0]["role"] == "system"
+        assert server.requests[1]["messages"][1:] == [
             {"role": "user", "content": first_prompt},
             {"role": "assistant", "content": "first model reply"},
             {"role": "user", "content": second_prompt},
@@ -753,6 +757,86 @@ def test_installed_wheel_restores_session_from_unicode_workspace(
     ]
     assert snapshot_files(workspace) == before_workspace
     assert not (workspace / ".mica").exists()
+
+
+def test_installed_wheel_loads_prompt_and_agents_outside_repository(
+    full_distribution: InstalledDistribution,
+) -> None:
+    dist = full_distribution
+    case_root = dist.outside_repository / "P5-09 installed case"
+    home = case_root / "isolated home"
+    workspace = case_root / "工作区 & with spaces"
+    home.joinpath(".mica").mkdir(parents=True)
+    workspace.mkdir(parents=True)
+    global_agents = "# installed global rules"
+    workspace_agents = "# installed workspace rules"
+    home.joinpath(".mica", "AGENTS.md").write_text(global_agents, encoding="utf-8")
+    workspace.joinpath("AGENTS.md").write_text(workspace_agents, encoding="utf-8")
+    fake_key = "installed-loopback-key-sentinel"
+    environment = cli_environment(home, fake_credentials=True)
+    environment.update(MICA_API_KEY=fake_key, MICA_MODEL="installed-test-model")
+
+    with LoopbackSSEServer(("installed response",)) as server:
+        environment["MICA_API_URL"] = server.base_url
+        result = run_command(
+            [dist.mica, "cli"],
+            cwd=workspace,
+            environment=environment,
+            input_text="installed question\n",
+        )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "installed response\n"
+    assert result.stderr == ""
+    assert len(server.requests) == 1
+    messages = server.requests[0]["messages"]
+    assert [message["role"] for message in messages] == [
+        "system",
+        "system",
+        "system",
+        "user",
+    ]
+    system_prompt = messages[0]["content"]
+    escaped_workspace = (
+        resolve_workspace(workspace).workspace_path.as_posix().replace("&", "&amp;")
+    )
+    assert system_prompt.startswith("# Mica\n")
+    assert "<environment_context>" in system_prompt
+    assert f"<cwd>{escaped_workspace}</cwd>" in system_prompt
+    assert f"<root>{escaped_workspace}</root>" in system_prompt
+    assert messages[1]["content"] == (
+        f'<INSTRUCTIONS source="global">\n{global_agents}\n</INSTRUCTIONS>'
+    )
+    assert messages[2]["content"] == (
+        f'<INSTRUCTIONS source="workspace">\n{workspace_agents}\n</INSTRUCTIONS>'
+    )
+    assert messages[3] == {"role": "user", "content": "installed question"}
+
+    service = SessionService(
+        JsonlSessionStore(resolve_workspace(workspace), home / ".mica")
+    )
+    raw = next(service.store.session_directory.glob("*.jsonl")).read_text(
+        encoding="utf-8"
+    )
+    for forbidden in (
+        "# Mica",
+        "<environment_context>",
+        global_agents,
+        workspace_agents,
+        fake_key,
+    ):
+        assert forbidden not in raw
+    observed_output = result.stdout + result.stderr
+    for private in (
+        system_prompt,
+        global_agents,
+        workspace_agents,
+        str(workspace),
+        fake_key,
+        environment["MICA_API_URL"],
+    ):
+        assert private not in observed_output
+    assert server._thread.is_alive() is False
 
 
 def test_installed_wheel_runs_bash_with_git_bash_in_unicode_workspace(
@@ -872,13 +956,14 @@ def test_installed_wheel_write_and_continue_restore_complete_tool_history(
 
     assert len(server.requests) == 3
     assert [message["role"] for message in server.requests[2]["messages"]] == [
+        "system",
         "user",
         "assistant",
         "tool",
         "assistant",
         "user",
     ]
-    tool_call = server.requests[2]["messages"][1]["tool_calls"][0]
+    tool_call = server.requests[2]["messages"][2]["tool_calls"][0]
     assert tool_call["function"]["name"] == "write"
     assert server.requests[2]["messages"][-1]["content"] == (
         "continue without rewriting"

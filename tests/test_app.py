@@ -18,7 +18,7 @@ import pytest
 
 from mica_agent.app import AppBusyError, AppClosedError, MicaApp
 from mica_agent.cancellation import CancellationToken
-from mica_agent.context_builder import ContextBuilder
+from mica_agent.context_builder import ContextBuilder, ContextBuildResult
 from mica_agent.events import (
     EngineEvent,
     PermissionRequested,
@@ -237,12 +237,20 @@ def test_tool_run_commits_one_complete_turn_and_restores_full_history() -> None:
         ]
     )
     service, session_id, context_builder = _make_session_components(provider)
+    context_builder.data_root.mkdir(exist_ok=True)
+    context_builder.data_root.joinpath("AGENTS.md").write_text(
+        "global tool rules", encoding="utf-8"
+    )
+    context_builder.workspace.workspace_path.joinpath("AGENTS.md").write_text(
+        "workspace tool rules", encoding="utf-8"
+    )
     app = MicaApp(
         provider,
         "test-model",
         session_service=service,
         session_id=session_id,
         context_builder=context_builder,
+        system_prompt="tool system snapshot",
         run_id_factory=lambda: "run-tools",
         turn_id_factory=lambda: "turn-tools",
         tool_executor=executor,
@@ -252,6 +260,12 @@ def test_tool_run_commits_one_complete_turn_and_restores_full_history() -> None:
 
     assert isinstance(events[-1], RunCompleted)
     assert provider.requests[0].tools == (spec,)
+    assert provider.requests[0].messages[:3] == provider.requests[1].messages[:3]
+    assert [message.role for message in provider.requests[0].messages[:3]] == [
+        MessageRole.SYSTEM,
+        MessageRole.SYSTEM,
+        MessageRole.SYSTEM,
+    ]
     assert len(service.load_session(session_id).turns) == 1
     assert app.history == (
         Message(MessageRole.USER, "inspect"),
@@ -398,7 +412,9 @@ def test_successful_run_commits_user_and_assistant_atomically() -> None:
         RunCompleted(run_id="run-test", seq=3),
     ]
     assert app.history == (_user("first prompt"), _assistant("hello world"))
-    assert provider.requests[0].messages == (_user("first prompt"),)
+    assert provider.requests[0].messages[0].role is MessageRole.SYSTEM
+    assert provider.requests[0].messages[0].content.startswith("# Mica\n")
+    assert provider.requests[0].messages[1:] == (_user("first prompt"),)
 
 
 def test_successful_run_without_text_commits_empty_assistant() -> None:
@@ -440,6 +456,172 @@ def test_system_prompt_is_first_and_appears_once() -> None:
     )
 
 
+def test_app_freezes_header_once_but_refreshes_history_for_each_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _ScriptedProvider(
+        [
+            [ProviderTextDelta("answer one"), Finish()],
+            [ProviderTextDelta("answer two"), Finish()],
+        ]
+    )
+    service, session_id, builder = _make_session_components(provider)
+    builder.data_root.mkdir(exist_ok=True)
+    global_path = builder.data_root / "AGENTS.md"
+    workspace_path = builder.workspace.workspace_path / "AGENTS.md"
+    global_path.write_text("global one", encoding="utf-8")
+    workspace_path.write_text("workspace one", encoding="utf-8")
+    original_build = builder.build
+    build_calls = 0
+
+    def counted_build(*args: object, **kwargs: object):
+        nonlocal build_calls
+        build_calls += 1
+        return original_build(*args, **kwargs)
+
+    monkeypatch.setattr(builder, "build", counted_build)
+    app = MicaApp(
+        provider,
+        "test-model",
+        session_service=service,
+        session_id=session_id,
+        context_builder=builder,
+        system_prompt="system snapshot 2026-08-28",
+    )
+
+    assert build_calls == 1
+    global_path.write_text("global two", encoding="utf-8")
+    workspace_path.unlink()
+    _run_collect(app, "question one")
+    _run_collect(app, "question two")
+
+    expected_header = (
+        Message(MessageRole.SYSTEM, "system snapshot 2026-08-28"),
+        Message(
+            MessageRole.SYSTEM,
+            '<INSTRUCTIONS source="global">\nglobal one\n</INSTRUCTIONS>',
+        ),
+        Message(
+            MessageRole.SYSTEM,
+            '<INSTRUCTIONS source="workspace">\nworkspace one\n</INSTRUCTIONS>',
+        ),
+    )
+    assert build_calls == 1
+    assert provider.requests[0].messages[:3] == expected_header
+    assert provider.requests[1].messages[:3] == expected_header
+    assert provider.requests[1].messages[3:] == (
+        _user("question one"),
+        _assistant("answer one"),
+        _user("question two"),
+    )
+    raw = service.store.path_for_session(session_id).read_text(encoding="utf-8")
+    for header_text in ("system snapshot", "global one", "workspace one"):
+        assert header_text not in raw
+
+    second_provider = _ScriptedProvider([[Finish()]])
+    second_app = MicaApp(
+        second_provider,
+        "test-model",
+        session_service=service,
+        session_id=session_id,
+        context_builder=builder,
+        system_prompt="system snapshot 2026-08-29",
+    )
+    assert build_calls == 2
+    _run_collect(second_app, "question three")
+    assert second_provider.requests[0].messages[:2] == (
+        Message(MessageRole.SYSTEM, "system snapshot 2026-08-29"),
+        Message(
+            MessageRole.SYSTEM,
+            '<INSTRUCTIONS source="global">\nglobal two\n</INSTRUCTIONS>',
+        ),
+    )
+
+
+def test_default_system_prompt_is_built_once_across_midnight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import mica_agent.app as app_module
+
+    provider = _ScriptedProvider([[Finish()], [Finish()]])
+    service, session_id, builder = _make_session_components(provider)
+    dates = iter(("2026-08-28", "2026-08-29"))
+    prompt_calls = 0
+
+    def prompt_for_activation(_workspace: object) -> str:
+        nonlocal prompt_calls
+        prompt_calls += 1
+        return f"system date {next(dates)}"
+
+    monkeypatch.setattr(app_module, "build_system_prompt", prompt_for_activation)
+    app = MicaApp(
+        provider,
+        "test-model",
+        session_service=service,
+        session_id=session_id,
+        context_builder=builder,
+    )
+    _run_collect(app, "before midnight")
+    _run_collect(app, "after midnight")
+
+    assert prompt_calls == 1
+    assert provider.requests[0].messages[0] == Message(
+        MessageRole.SYSTEM, "system date 2026-08-28"
+    )
+    assert provider.requests[1].messages[0] == provider.requests[0].messages[0]
+
+    second_provider = _ScriptedProvider([[Finish()]])
+    second_app = MicaApp(
+        second_provider,
+        "test-model",
+        session_service=service,
+        session_id=session_id,
+        context_builder=builder,
+    )
+    _run_collect(second_app, "new activation")
+    assert prompt_calls == 2
+    assert second_provider.requests[0].messages[0] == Message(
+        MessageRole.SYSTEM, "system date 2026-08-29"
+    )
+
+
+def test_prebuilt_context_snapshot_is_used_without_rebuilding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _ScriptedProvider([[Finish()]])
+    service, session_id, builder = _make_session_components(provider)
+    snapshot = ContextBuildResult(
+        messages=(
+            Message(
+                MessageRole.SYSTEM,
+                '<INSTRUCTIONS source="global">\nfrozen\n</INSTRUCTIONS>',
+            ),
+        ),
+        diagnostics=(),
+    )
+
+    def forbidden_build(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("context must not be rebuilt")
+
+    monkeypatch.setattr(builder, "build", forbidden_build)
+    app = MicaApp(
+        provider,
+        "test-model",
+        session_service=service,
+        session_id=session_id,
+        context_builder=builder,
+        system_prompt="system snapshot",
+        context_snapshot=snapshot,
+    )
+    _run_collect(app, "question")
+
+    assert provider.requests[0].messages == (
+        Message(MessageRole.SYSTEM, "system snapshot"),
+        *snapshot.messages,
+        _user("question"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # 失败 / 取消 / 提前关闭时历史回滚
 # ---------------------------------------------------------------------------
@@ -460,7 +642,8 @@ def test_failed_run_rolls_back_history() -> None:
 
     assert isinstance(events[-1], RunFailed)
     assert app.history == ()  # 用户消息与部分文本都不提交
-    assert provider.requests[0].messages == (_user("question"),)
+    assert provider.requests[0].messages[0].role is MessageRole.SYSTEM
+    assert provider.requests[0].messages[1:] == (_user("question"),)
 
 
 def test_cancelled_run_rolls_back_history() -> None:
@@ -548,8 +731,10 @@ def test_second_run_carries_full_committed_context() -> None:
     _run_collect(app, "question two")
 
     assert len(provider.requests) == 2
-    assert provider.requests[0].messages == (_user("question one"),)
-    assert provider.requests[1].messages == (
+    header = provider.requests[0].messages[:1]
+    assert header[0].role is MessageRole.SYSTEM
+    assert provider.requests[0].messages[1:] == (_user("question one"),)
+    assert provider.requests[1].messages == header + (
         _user("question one"),
         _assistant("answer one"),
         _user("question two"),
@@ -574,8 +759,9 @@ def test_failed_run_does_not_break_following_successful_run() -> None:
     _run_collect(app, "first")
     _run_collect(app, "second")
 
-    # 失败轮未提交，第二轮请求只有自己的用户消息。
-    assert provider.requests[1].messages == (_user("second"),)
+    # 失败轮未提交，第二轮请求在固定头部后只有自己的用户消息。
+    assert provider.requests[1].messages[0].role is MessageRole.SYSTEM
+    assert provider.requests[1].messages[1:] == (_user("second"),)
     assert app.history == (_user("second"), _assistant("retry ok"))
 
 

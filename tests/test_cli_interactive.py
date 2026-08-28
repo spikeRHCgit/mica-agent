@@ -278,8 +278,10 @@ def test_multi_turn_reuses_single_app_and_carries_context() -> None:
     assert code == 0
     assert provider.aclose_calls == 1  # 会话结束恰好关闭一次
     assert len(provider.requests) == 2
-    # 第二轮请求携带第一轮已提交的上下文。
-    assert provider.requests[1].messages == (
+    # 第二轮复用同一系统头部，并携带第一轮已提交的上下文。
+    header = provider.requests[0].messages[:1]
+    assert header[0].role is MessageRole.SYSTEM
+    assert provider.requests[1].messages == header + (
         Message(role=MessageRole.USER, content="hello"),
         Message(role=MessageRole.ASSISTANT, content="hi"),
         Message(role=MessageRole.USER, content="again"),
@@ -350,7 +352,8 @@ def test_blank_lines_are_ignored_without_provider_request() -> None:
 
     assert code == 0
     assert len(provider.requests) == 1
-    assert provider.requests[0].messages == (
+    assert provider.requests[0].messages[0].role is MessageRole.SYSTEM
+    assert provider.requests[0].messages[1:] == (
         Message(role=MessageRole.USER, content="q"),
     )
     assert out.text == "ok\n"

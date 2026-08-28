@@ -8,7 +8,7 @@ from contextlib import aclosing
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from .context_builder import ContextBuilder
+from .context_builder import ContextBuilder, ContextBuildResult
 from .engine import AgentEngine, RunIdFactory
 from .events import EngineEvent, ErrorCategory, RunCompleted, RunFailed
 from .interactions import PermissionResponse, UserInputResponse
@@ -16,6 +16,7 @@ from .models import Message, MessageRole
 from .providers import Provider, ProviderRequest
 from .session_contracts import TurnEntry
 from .session_service import SessionService
+from .system_prompt import build_system_prompt
 from .tool_executor import ToolExecutor
 
 TurnIdFactory = Callable[[], str]
@@ -51,6 +52,7 @@ class MicaApp:
         session_id: str,
         context_builder: ContextBuilder,
         system_prompt: str | None = None,
+        context_snapshot: ContextBuildResult | None = None,
         run_id_factory: RunIdFactory | None = None,
         turn_id_factory: TurnIdFactory | None = None,
         clock: Clock | None = None,
@@ -74,12 +76,31 @@ class MicaApp:
             raise TypeError(
                 f"system_prompt must be a str or None, got {type(system_prompt).__name__}"
             )
+        if context_snapshot is not None and not isinstance(
+            context_snapshot, ContextBuildResult
+        ):
+            raise TypeError("context_snapshot must be a ContextBuildResult or None")
+        resolved_context = (
+            context_builder.build() if context_snapshot is None else context_snapshot
+        )
+        if any(
+            message.role is not MessageRole.SYSTEM
+            for message in resolved_context.messages
+        ):
+            raise ValueError("context_snapshot must contain only system messages")
+        resolved_system_prompt = (
+            build_system_prompt(context_builder.workspace)
+            if system_prompt is None
+            else system_prompt
+        )
         self._model = model
         self._provider = provider
         self._session_service = session_service
         self._session_id = session_id
-        self._context_builder = context_builder
-        self._system_prompt = system_prompt
+        self._header_messages = (
+            Message(role=MessageRole.SYSTEM, content=resolved_system_prompt),
+            *resolved_context.messages,
+        )
         self._turn_id_factory = turn_id_factory or (lambda: uuid4().hex)
         self._clock = clock or (lambda: datetime.now(UTC))
         self._tool_executor = tool_executor
@@ -132,15 +153,9 @@ class MicaApp:
         completed_messages: list[tuple[Message, ...]] = []
         try:
             session_messages = self._session_service.context_snapshot(self._session_id)
-            context = self._context_builder.build(session_messages)
-            prefix = (
-                (Message(role=MessageRole.SYSTEM, content=self._system_prompt),)
-                if self._system_prompt is not None
-                else ()
-            )
             request = ProviderRequest(
                 model=self._model,
-                messages=prefix + context.messages + (user_message,),
+                messages=self._header_messages + session_messages + (user_message,),
                 tools=(
                     self._tool_executor.tool_specs
                     if self._tool_executor is not None

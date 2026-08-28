@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
@@ -13,6 +14,11 @@ from .workspace import WorkspaceIdentity
 
 MAX_AGENTS_FILE_BYTES = 64 * 1024
 """每个 global/workspace AGENTS.md 的统一字节上限。"""
+
+_INSTRUCTIONS_TAG_RE = re.compile(
+    r"<\s*/?\s*instructions\b[^>]*>",
+    flags=re.IGNORECASE,
+)
 
 
 class AgentFileSource(Enum):
@@ -48,7 +54,7 @@ class ContextBuildResult:
 
 
 class ContextBuilder:
-    """每次按固定顺序读取 AGENTS.md 并组合标准消息。"""
+    """每次显式调用按固定顺序读取并封装 AGENTS.md。"""
 
     def __init__(
         self,
@@ -82,7 +88,9 @@ class ContextBuilder:
             if diagnostic is not None:
                 diagnostics.append(diagnostic)
             elif content:
-                context.append(Message(MessageRole.SYSTEM, content))
+                context.append(
+                    Message(MessageRole.SYSTEM, self._wrap_agents(source, content))
+                )
         context.extend(messages)
         return ContextBuildResult(tuple(context), tuple(diagnostics))
 
@@ -114,6 +122,23 @@ class ContextBuilder:
         except UnicodeDecodeError:
             return None, self._diagnostic(source, ContextDiagnosticKind.INVALID_UTF8)
         return content, None
+
+    @staticmethod
+    def _wrap_agents(source: AgentFileSource, content: str) -> str:
+        def escape_boundary(match: re.Match[str]) -> str:
+            return (
+                match.group(0)
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+            )
+
+        protected = _INSTRUCTIONS_TAG_RE.sub(escape_boundary, content)
+        separator = "" if protected.endswith("\n") else "\n"
+        return (
+            f'<INSTRUCTIONS source="{source.value}">\n'
+            f"{protected}{separator}</INSTRUCTIONS>"
+        )
 
     @staticmethod
     def _validate_session_messages(

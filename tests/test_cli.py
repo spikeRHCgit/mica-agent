@@ -29,6 +29,29 @@ def run_command(
     )
 
 
+def test_missing_config_precedes_context_prompt_and_provider_setup(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    for name in ("MICA_API_URL", "MICA_API_KEY", "MICA_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    calls: list[str] = []
+
+    def forbidden(*_args: object, **_kwargs: object) -> object:
+        calls.append("startup")
+        raise AssertionError("startup work must not run")
+
+    monkeypatch.setattr(cli.ContextBuilder, "build", forbidden)
+    monkeypatch.setattr(cli, "build_system_prompt", forbidden)
+    monkeypatch.setattr(cli, "run_interactive", forbidden)
+
+    assert cli._main_cli() == 2
+    captured = capsys.readouterr()
+    assert calls == []
+    assert captured.out == ""
+    assert captured.err.startswith("mica: missing required environment variables")
+
+
 def test_main_cli_shuts_down_async_generators_before_return(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

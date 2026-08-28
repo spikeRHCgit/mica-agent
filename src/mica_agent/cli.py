@@ -43,6 +43,7 @@ from .interactions import (
 from .jsonl_store import JsonlSessionStore, StoredSession
 from .permissions import PermissionMode
 from .session_service import NoHealthySessionError, SessionService
+from .system_prompt import build_system_prompt
 from .workspace import (
     WorkspaceIdentity,
     WorkspaceResolutionError,
@@ -254,9 +255,15 @@ async def _run_selected_session(
     session_id = selected.meta.session_id
     _report_cleanup(service, session_id, err)
     try:
-        context = builder.build(service.context_snapshot(session_id))
+        service.context_snapshot(session_id)
+        context = builder.build()
     except Exception:  # noqa: BLE001 - do not expose storage details
         err("mica: unable to prepare session context\n")
+        return 2
+    try:
+        system_prompt = build_system_prompt(workspace)
+    except Exception:  # noqa: BLE001 - prompt details must stay private
+        err("mica: unable to prepare system prompt\n")
         return 2
     for diagnostic in context.diagnostics:
         err(f"warning: {diagnostic.message}\n")
@@ -294,6 +301,8 @@ async def _run_selected_session(
             session_service=service,
             session_id=session_id,
             context_builder=builder,
+            system_prompt=system_prompt,
+            context_snapshot=context,
             turn_id_factory=turn_id_factory,
             clock=clock,
             tool_executor=executor,

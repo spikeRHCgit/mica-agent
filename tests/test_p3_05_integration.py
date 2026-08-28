@@ -151,6 +151,8 @@ def test_successful_app_round_is_persisted_and_recovered_with_agents(
     )
     assert b"global rules" not in raw_after_first
     assert b"workspace rules" not in raw_after_first
+    assert b"<environment_context>" not in raw_after_first
+    assert b"<INSTRUCTIONS" not in raw_after_first
 
     second_provider = ScriptedProvider(
         [[ProviderTextDelta(text="second answer"), Finish()]]
@@ -167,9 +169,17 @@ def test_successful_app_round_is_persisted_and_recovered_with_agents(
     second_events = run_collect(second_app, "second question")
 
     assert isinstance(second_events[-1], RunCompleted)
-    assert second_provider.requests[0].messages == (
-        Message(MessageRole.SYSTEM, "global rules"),
-        Message(MessageRole.SYSTEM, "workspace rules"),
+    assert second_provider.requests[0].messages[0].role is MessageRole.SYSTEM
+    assert second_provider.requests[0].messages[0].content.startswith("# Mica\n")
+    assert second_provider.requests[0].messages[1:] == (
+        Message(
+            MessageRole.SYSTEM,
+            '<INSTRUCTIONS source="global">\nglobal rules\n</INSTRUCTIONS>',
+        ),
+        Message(
+            MessageRole.SYSTEM,
+            '<INSTRUCTIONS source="workspace">\nworkspace rules\n</INSTRUCTIONS>',
+        ),
         Message(MessageRole.USER, "first question"),
         Message(MessageRole.ASSISTANT, "first answer"),
         Message(MessageRole.USER, "second question"),
@@ -206,7 +216,8 @@ def test_two_successful_rounds_have_exactly_two_turns_and_snapshot_history(
         Message(MessageRole.USER, "question two"),
         Message(MessageRole.ASSISTANT, "answer two"),
     )
-    assert provider.requests[1].messages == (
+    assert provider.requests[1].messages[0].role is MessageRole.SYSTEM
+    assert provider.requests[1].messages[1:] == (
         Message(MessageRole.USER, "question one"),
         Message(MessageRole.ASSISTANT, "answer one"),
         Message(MessageRole.USER, "question two"),
@@ -426,7 +437,7 @@ def test_cli_context_preflight_failure_does_not_construct_provider(
     service, builder, _, _, _ = setup_session(tmp_path)
     provider = ScriptedProvider([])
 
-    def fail_build(_messages: object) -> object:
+    def fail_build() -> object:
         raise RuntimeError("context failure with private path")
 
     monkeypatch.setattr(builder, "build", fail_build)
@@ -572,8 +583,14 @@ def test_cli_preflight_displays_safe_agents_diagnostics(
     assert code == 0
     assert created == [True]
     assert err.text == "warning: global AGENTS.md is not valid UTF-8\n"
-    assert provider.requests[0].messages == (
-        Message(MessageRole.SYSTEM, "workspace warning rules"),
+    assert provider.requests[0].messages[0].role is MessageRole.SYSTEM
+    assert provider.requests[0].messages[1:] == (
+        Message(
+            MessageRole.SYSTEM,
+            '<INSTRUCTIONS source="workspace">\n'
+            "workspace warning rules\n"
+            "</INSTRUCTIONS>",
+        ),
         Message(MessageRole.USER, "question"),
     )
     assert (
