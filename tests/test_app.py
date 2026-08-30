@@ -22,6 +22,7 @@ from mica_agent.context_builder import ContextBuilder, ContextBuildResult
 from mica_agent.events import (
     EngineEvent,
     PermissionRequested,
+    ReasoningDelta,
     RunCancelled,
     RunCompleted,
     RunFailed,
@@ -39,11 +40,13 @@ from mica_agent.providers import (
     OpenAICompatibleProvider,
     ProviderErrorEvent,
     ProviderEvent,
+    ProviderReasoningDelta,
     ProviderRequest,
 )
 from mica_agent.providers import (
     TextDelta as ProviderTextDelta,
 )
+from mica_agent.reasoning import ReasoningEffort
 from mica_agent.session_service import SessionService
 from mica_agent.tool_contracts import (
     ToolCall,
@@ -199,6 +202,145 @@ def test_non_str_prompt_is_rejected_before_provider() -> None:
         _run_collect(app, 123)  # type: ignore[arg-type]
 
     assert provider.requests == []
+
+
+def test_each_run_selects_reasoning_effort_without_rebuilding_header() -> None:
+    provider = _ScriptedProvider([[Finish()], [Finish()]])
+    app = _make_app(provider, system_prompt="frozen system prompt")
+
+    async def collect(prompt: str, effort: ReasoningEffort) -> None:
+        async for _ in app.run(prompt, reasoning_effort=effort):
+            pass
+
+    asyncio.run(collect("first", ReasoningEffort.HIGH))
+    asyncio.run(collect("second", ReasoningEffort.LOW))
+
+    assert [request.reasoning_effort for request in provider.requests] == [
+        ReasoningEffort.HIGH,
+        ReasoningEffort.LOW,
+    ]
+    assert provider.requests[0].messages[0] is provider.requests[1].messages[0]
+    assert provider.requests[0].messages[0].content == "frozen system prompt"
+
+
+def test_reasoning_is_visible_per_run_but_not_saved_or_restored() -> None:
+    provider = _ScriptedProvider(
+        [
+            [
+                ProviderReasoningDelta("private thought"),
+                ProviderTextDelta("answer"),
+                Finish(),
+            ]
+        ]
+    )
+    service, session_id, builder = _make_session_components(provider)
+    app = MicaApp(
+        provider,
+        "test-model",
+        session_service=service,
+        session_id=session_id,
+        context_builder=builder,
+        system_prompt="system snapshot",
+        run_id_factory=lambda: "run-reasoning-app",
+        turn_id_factory=lambda: "turn-reasoning-app",
+    )
+
+    async def collect() -> list[EngineEvent]:
+        return [
+            event
+            async for event in app.run(
+                "question", reasoning_effort=ReasoningEffort.HIGH
+            )
+        ]
+
+    events = asyncio.run(collect())
+
+    assert ReasoningDelta("run-reasoning-app", "private thought", 1) in events
+    assert app.history == (_user("question"), _assistant("answer"))
+    raw = service.store.path_for_session(session_id).read_text(encoding="utf-8")
+    assert "private thought" not in raw
+
+    restored_provider = _ScriptedProvider([[Finish()]])
+    restored_app = MicaApp(
+        restored_provider,
+        "test-model",
+        session_service=service,
+        session_id=session_id,
+        context_builder=builder,
+        system_prompt="system snapshot",
+    )
+    _run_collect(restored_app, "next")
+    assert restored_provider.requests[0].messages == (
+        Message(MessageRole.SYSTEM, "system snapshot"),
+        _user("question"),
+        _assistant("answer"),
+        _user("next"),
+    )
+    assert provider.requests[0].reasoning_effort is ReasoningEffort.HIGH
+    assert restored_provider.requests[0].reasoning_effort is ReasoningEffort.OFF
+
+
+def test_reasoning_then_failure_does_not_commit_partial_turn() -> None:
+    provider = _ScriptedProvider(
+        [
+            [
+                ProviderReasoningDelta("private failed thought"),
+                ProviderErrorEvent(AuthenticationError("auth")),
+            ]
+        ]
+    )
+    app = _make_app(provider)
+
+    events = _run_collect(app, "question")
+
+    assert any(isinstance(event, ReasoningDelta) for event in events)
+    assert isinstance(events[-1], RunFailed)
+    assert app.history == ()
+
+
+def test_consumer_closing_app_after_reasoning_cleans_stream_and_history() -> None:
+    class Provider:
+        def __init__(self) -> None:
+            self.stream_closed = False
+            self.aclose_calls = 0
+
+        async def stream(
+            self, request: ProviderRequest
+        ) -> AsyncIterator[ProviderEvent]:
+            try:
+                yield ProviderReasoningDelta("thinking")
+                await asyncio.sleep(30)
+                yield Finish()
+            finally:
+                self.stream_closed = True
+
+        async def aclose(self) -> None:
+            self.aclose_calls += 1
+
+    async def scenario() -> tuple[MicaApp, Provider, list[EngineEvent]]:
+        provider = Provider()
+        service, session_id, builder = _make_session_components(provider)
+        app = MicaApp(
+            provider,
+            "test-model",
+            session_service=service,
+            session_id=session_id,
+            context_builder=builder,
+            system_prompt="system snapshot",
+        )
+        stream = app.run("question", reasoning_effort=ReasoningEffort.MEDIUM)
+        events = [await anext(stream), await anext(stream)]
+        await stream.aclose()
+        await app.aclose()
+        await app.aclose()
+        return app, provider, events
+
+    app, provider, events = asyncio.run(scenario())
+
+    assert isinstance(events[1], ReasoningDelta)
+    assert app.history == ()
+    assert provider.stream_closed is True
+    assert provider.aclose_calls == 1
 
 
 # ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@ from .events import (
     EngineEvent,
     ErrorCategory,
     PermissionRequested,
+    ReasoningDelta,
     RunCancelled,
     RunCompleted,
     RunFailed,
@@ -38,6 +39,7 @@ from .providers import (
     ProviderError,
     ProviderErrorEvent,
     ProviderEvent,
+    ProviderReasoningDelta,
     ProviderRequest,
     ProviderTimeoutError,
     RateLimitError,
@@ -143,12 +145,18 @@ class AgentEngine:
                     model=request.model,
                     messages=messages,
                     tools=request.tools,
+                    reasoning_effort=request.reasoning_effort,
                 )
                 async with aclosing(
                     self._provider_events(current_request, token)
                 ) as provider_events:
                     async for provider_event in provider_events:
-                        if isinstance(provider_event, ProviderTextDelta):
+                        if isinstance(provider_event, ProviderReasoningDelta):
+                            yield ReasoningDelta(
+                                run_id=run_id, seq=seq, text=provider_event.text
+                            )
+                            seq += 1
+                        elif isinstance(provider_event, ProviderTextDelta):
                             if not isinstance(provider_event.text, str):
                                 yield RunFailed(
                                     run_id=run_id,

@@ -310,3 +310,62 @@ LIST 权限成员、列表常量或执行映射。
 改写请求。目录查看因此需要用户确认命令，当前不提供免确认的只读命令分类。文件 I/O、Bash
 沙箱边界、POSIX 原机覆盖和工具副作用不回滚等既有风险不变。本任务不实现思考后端、工具展示
 快照、Bash 动态输出、结构化 ask、Textual TUI 或其他后续阶段能力。
+
+# P5-11 思考后端契约
+
+## 目标与公共契约
+
+新增供应商无关的 `ReasoningEffort` 枚举，稳定 wire value 为 `off`、`minimal`、`low`、
+`medium`、`high`、`xhigh`、`max`，并从 `mica_agent` 顶层导出。`ProviderRequest` 追加默认
+`ReasoningEffort.OFF` 字段，保留既有三项位置参数和关键字构造，拒绝字符串、整数、`None` 等
+冒充值；请求对象继续 frozen。MicaApp 通过 `run(..., reasoning_effort=...)` 选择当前 Run 的
+档位，缺省为 OFF；该参数不重组系统提示词，不重新构建 ContextBuilder 快照，也不要求重建
+App 或会话。
+
+## Provider 适配与事件
+
+OpenAI-compatible Chat Completions 在 OFF 时完全不增加 `reasoning_effort`、`reasoning` 或
+`thinking` 字段；MockTransport 捕获的 OFF JSON 仍只有原有 `model`、`messages`、`stream` 等
+请求字段。非 OFF 默认按统一档位发送对应小写值。Provider 构造器支持可选、复制并冻结的
+`thinking_level_map` 注入；非空映射只允许合法非 OFF `ReasoningEffort` 键和非空可打印字符串
+目标。自定义映射请求未列出的档位会在发 HTTP 前返回固定 `ProviderError`，不泄漏映射值或
+内部 `KeyError`。
+
+Provider 新增独立 frozen `ProviderReasoningDelta`，仅在 `delta.reasoning_content` 为非空
+字符串时产生；缺失、`null`、空字符串不产生事件，数字、布尔、列表、对象等类型产生一次
+安全 `MalformedResponseError`，随后不再产生任何思考、文本或结束事件。同一 delta 的处理顺序
+固定为 reasoning、正式 content、工具调用碎片；思考不拼入工具参数。Provider 事件通过
+`mica_agent.providers.ProviderReasoningDelta` 导出，避免与 Engine 的 `ReasoningDelta` 同名。
+
+## Engine、App 与 CLI 闭环
+
+Engine 新增顶层可导入的 frozen `ReasoningDelta(run_id, text, seq)`，与文本、工具、交互和终态
+事件共享严格递增序列。Provider reasoning 只转换成该事件，不转换成普通 TextDelta。思考内容
+不进入 assistant Message、ToolResult、工具调用、下一次 Provider 请求历史、completion sink
+或 v2 会话 JSONL。多步工具循环已验证两次模型步骤的 reasoning 都能按序展示，而标准消息仍只
+包含 USER、ASSISTANT(tool_calls)、TOOL、最终 ASSISTANT。Provider 错误、协作式取消、外部 Task
+取消和消费者提前关闭都保持唯一终态、流关闭和历史回滚；Provider 流的 `finally` 在关闭边界
+完成，未出现 pending task 或异步生成器警告。
+
+基础 CLI 显式忽略 Engine `ReasoningDelta`，不新增命令行参数、环境变量或模型配置，不把思考
+正文写入 stdout/stderr；正式输出、工具状态、EOF、Ctrl+C 和 Provider 单次关闭行为保持兼容。
+
+## RED、GREEN 与验证
+
+TDD 按公共 seam 逐个执行：先以缺失模块、字段、Provider 映射、事件类型、Engine 分支和 App
+关键字参数取得 RED，再以最小实现逐项 GREEN；畸形映射最初暴露未捕获 `KeyError`，随后收敛为
+安全 ProviderError。目标测试 `418 passed`，含 `-W error`；覆盖枚举、ProviderRequest、真实
+MockTransport 请求 JSON、SSE reasoning 规则、Engine 事件序列、工具循环、App 提交边界、CLI
+静默兼容和跨层闭环。
+
+本次实现已完成全量测试、Ruff、格式检查、离线构建和 wheel 验证：全量 `919 passed,
+1 skipped`，分发测试 `15 passed`，Ruff 与格式检查通过，`uv build --offline` 成功。独立安装态
+Python 从 wheel 导入 `ReasoningEffort`、`ReasoningDelta` 和
+`ProviderReasoningDelta`，不依赖仓库源码；安装态依赖由 wheel 元数据声明并在分发测试中验证。
+
+## 未实现范围与风险
+
+P5-11 不实现 openai-responses、models.json 或 Phase 7 配置系统，不实现思考显示模式、灰色文本、
+折叠、Ctrl+O、thinking 面板、动画或 Textual TUI；也不实现会话 v3、工具快照、Bash 动态输出、
+结构化 ask 或后续阶段能力。当前适配器只识别明确的 `reasoning_content` 字段，其他供应商字段
+不会自动探测；非空自定义映射代表调用方已声明允许档位，模型能力限制尚未由配置系统执行。

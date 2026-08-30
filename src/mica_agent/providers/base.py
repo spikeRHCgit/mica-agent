@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from ..models import Message
+from ..reasoning import ReasoningEffort
 from ..tool_contracts import ToolCall, ToolSpec
 
 
@@ -29,6 +30,7 @@ class ProviderRequest:
     model: str
     messages: tuple[Message, ...]
     tools: tuple[ToolSpec, ...] = ()
+    reasoning_effort: ReasoningEffort = ReasoningEffort.OFF
 
     def __post_init__(self) -> None:
         if not isinstance(self.model, str):
@@ -47,6 +49,8 @@ class ProviderRequest:
             raise TypeError("tools must be a tuple")
         if not all(isinstance(tool, ToolSpec) for tool in self.tools):
             raise TypeError("every item in tools must be a ToolSpec")
+        if not isinstance(self.reasoning_effort, ReasoningEffort):
+            raise TypeError("reasoning_effort must be a ReasoningEffort")
 
 
 _SENSITIVE_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -115,6 +119,19 @@ class MalformedResponseError(ProviderError):
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderReasoningDelta:
+    """协议适配器识别出的非空思考文本增量。"""
+
+    text: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.text, str):
+            raise TypeError("text must be a str")
+        if not self.text:
+            raise ValueError("text must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
 class TextDelta:
     """流式文本增量片段。"""
 
@@ -145,7 +162,7 @@ class ProviderErrorEvent:
     error: ProviderError
 
 
-ProviderEvent = TextDelta | Finish | ProviderErrorEvent
+ProviderEvent = ProviderReasoningDelta | TextDelta | Finish | ProviderErrorEvent
 """Provider 流式输出的统一事件类型。"""
 
 

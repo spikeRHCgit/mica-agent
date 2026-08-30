@@ -23,12 +23,14 @@ from mica_agent.providers import (
     ProviderError,
     ProviderErrorEvent,
     ProviderEvent,
+    ProviderReasoningDelta,
     ProviderRequest,
     ProviderTimeoutError,
     RateLimitError,
     TemporaryServerError,
     TextDelta,
 )
+from mica_agent.reasoning import ReasoningEffort
 from mica_agent.tool_contracts import ToolCall, ToolSpec
 
 
@@ -40,6 +42,33 @@ def build_request() -> ProviderRequest:
             Message(role=MessageRole.USER, content="hi"),
         ),
     )
+
+
+def test_request_reasoning_effort_defaults_to_off() -> None:
+    request = build_request()
+
+    assert request.reasoning_effort is ReasoningEffort.OFF
+
+
+@pytest.mark.parametrize("effort", list(ReasoningEffort))
+def test_request_accepts_explicit_reasoning_effort(effort: ReasoningEffort) -> None:
+    request = ProviderRequest(
+        "test-model",
+        (Message(MessageRole.USER, "hi"),),
+        reasoning_effort=effort,
+    )
+
+    assert request.reasoning_effort is effort
+
+
+@pytest.mark.parametrize("invalid", ["high", 1, None, object()])
+def test_request_rejects_non_enum_reasoning_effort(invalid: object) -> None:
+    with pytest.raises(TypeError, match="reasoning_effort must be a ReasoningEffort"):
+        ProviderRequest(
+            "test-model",
+            (Message(MessageRole.USER, "hi"),),
+            reasoning_effort=invalid,  # type: ignore[arg-type]
+        )
 
 
 def test_request_tools_default_to_empty_tuple() -> None:
@@ -176,6 +205,18 @@ def test_request_rejects_non_message_element() -> None:
             model="test-model",
             messages=("not a message",),
         )
+
+
+def test_reasoning_delta_is_a_strict_provider_event() -> None:
+    event = ProviderReasoningDelta(text="先分析")
+
+    assert event.text == "先分析"
+    assert isinstance(event, get_args(ProviderEvent))
+    with pytest.raises(FrozenInstanceError):
+        event.text = "changed"  # type: ignore[misc]
+    for invalid in ("", None, 3):
+        with pytest.raises((TypeError, ValueError)):
+            ProviderReasoningDelta(text=invalid)  # type: ignore[arg-type]
 
 
 def test_text_delta_event_carries_text() -> None:

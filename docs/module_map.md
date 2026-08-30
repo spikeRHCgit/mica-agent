@@ -20,7 +20,7 @@
 | `src/mica_agent/cli.py` | 当前基础终端入口；负责参数解析、环境配置检查、工作区与会话选择、工具装配、权限/ask 输入、事件消费和资源关闭。 |
 | `src/mica_agent/context_builder.py` | 会话激活时读取 global/workspace `AGENTS.md`，生成独立指令消息和安全诊断；不负责系统提示词正文。 |
 | `src/mica_agent/engine.py` | 单次 Run 的核心循环；按序推进 Provider 请求、文本事件、工具调用、交互等待、限制、取消和唯一终态。 |
-| `src/mica_agent/events.py` | Engine 对前端公开的有序事件契约，包括 Run、文本、工具、权限、用户输入和终态事件。 |
+| `src/mica_agent/events.py` | Engine 对前端公开的有序事件契约，包括 Run、思考与文本增量、工具、权限、用户输入和终态事件。 |
 | `src/mica_agent/file_tools.py` | 当前文件工具实现与注册入口；提供 `read`、`write`、`edit`，并执行大小限制、UTF-8、原子写入和安全结果转换。 |
 | `src/mica_agent/interactions.py` | Engine 与前端之间的交互 Broker；分配不复用的交互 ID，等待权限/ask 回答，并清理取消、迟到或失效响应。 |
 | `src/mica_agent/jsonl_store.py` | 一个会话一个 JSONL 文件的存储层；负责严格解析、锁内创建/读取/重写/删除、原子替换、扫描损坏和 v1 到 v2 升级。 |
@@ -39,6 +39,7 @@
 | `src/mica_agent/workspace.py` | 工作区身份与数据根边界；优先识别 Git 根目录，否则使用启动目录，并生成规范路径、slug、SHA-256 ID 和会话目录。 |
 | `src/mica_agent/workspace_paths.py` | 文件工具共享的工作区路径解析器；拒绝绝对/越界路径、重解析点、Windows 别名、ADS 和集中定义的敏感文件。 |
 | `src/mica_agent/providers/__init__.py` | Provider 子包的公共出口；只重导出供应商无关契约和错误，不执行网络请求。 |
-| `src/mica_agent/providers/base.py` | Provider 公共协议；定义 ProviderRequest、流式文本/结束/错误事件、错误分类和 Provider 生命周期接口。 |
-| `src/mica_agent/providers/openai_compatible.py` | OpenAI-compatible Chat Completions 适配器；构造 HTTP 请求、解析 SSE、组装工具调用、分类错误并执行有限网络重试。 |
+| `src/mica_agent/providers/base.py` | Provider 公共协议；定义 ProviderRequest、思考/文本/结束/错误事件、错误分类和 Provider 生命周期接口。 |
+| `src/mica_agent/providers/openai_compatible.py` | OpenAI-compatible Chat Completions 适配器；构造含可选思考强度的 HTTP 请求、解析 SSE 思考/文本增量、组装工具调用、分类错误并执行有限网络重试。 |
 | `src/mica_agent/prompts/system.md` | 随 wheel 分发的 UTF-8 内置系统提示词模板；只保存稳定正文和环境上下文占位符，不含会话动态状态或 `AGENTS.md` 内容。 |
+| `src/mica_agent/reasoning.py` | 供应商无关的 `ReasoningEffort` 思考强度枚举；定义稳定的小写 wire value，不读取配置或执行运行时装配。 |

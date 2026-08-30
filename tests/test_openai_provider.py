@@ -23,6 +23,7 @@ from mica_agent.providers import (
     ProviderError,
     ProviderErrorEvent,
     ProviderEvent,
+    ProviderReasoningDelta,
     ProviderRequest,
     ProviderTimeoutError,
     RateLimitError,
@@ -30,6 +31,7 @@ from mica_agent.providers import (
     TextDelta,
 )
 from mica_agent.providers.openai_compatible import resolve_endpoint
+from mica_agent.reasoning import ReasoningEffort
 from mica_agent.tool_contracts import ToolCall, ToolSpec
 
 # ---------------------------------------------------------------------------
@@ -99,6 +101,7 @@ def make_provider(
     base_url: str = "https://api.example.com/v1",
     max_retries: int = 0,
     retry_backoff: float = 1.0,
+    thinking_level_map: dict[ReasoningEffort, str] | None = None,
 ) -> OpenAICompatibleProvider:
     return OpenAICompatibleProvider(
         api_key=api_key,
@@ -107,6 +110,7 @@ def make_provider(
         max_retries=max_retries,
         retry_backoff=retry_backoff,
         sleep=_noop_sleep,
+        thinking_level_map=thinking_level_map,
     )
 
 
@@ -190,8 +194,12 @@ def test_request_body_uses_wire_roles_and_stream_flag() -> None:
     assert isinstance(request, httpx.Request)
     body = request.read()
     payload = json.loads(body)
+    assert set(payload) == {"model", "messages", "stream"}
     assert payload["model"] == "gpt-test"
     assert payload["stream"] is True
+    assert "reasoning_effort" not in payload
+    assert "reasoning" not in payload
+    assert "thinking" not in payload
     assert "tools" not in payload
     assert "tool_choice" not in payload
     assert payload["messages"] == [
@@ -199,6 +207,129 @@ def test_request_body_uses_wire_roles_and_stream_flag() -> None:
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi there"},
     ]
+
+
+@pytest.mark.parametrize(
+    ("effort", "wire_value"),
+    [
+        (ReasoningEffort.MINIMAL, "minimal"),
+        (ReasoningEffort.LOW, "low"),
+        (ReasoningEffort.MEDIUM, "medium"),
+        (ReasoningEffort.HIGH, "high"),
+        (ReasoningEffort.XHIGH, "xhigh"),
+        (ReasoningEffort.MAX, "max"),
+    ],
+)
+def test_request_sends_non_off_reasoning_effort(
+    effort: ReasoningEffort, wire_value: str
+) -> None:
+    captured: dict[str, httpx.Request] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["request"] = request
+        return httpx.Response(200, text="data: [DONE]\n\n", request=request)
+
+    request = ProviderRequest(
+        "gpt-test",
+        (Message(MessageRole.USER, "think"),),
+        reasoning_effort=effort,
+    )
+    provider = make_provider(handler)
+    _run_collect(provider, request)
+
+    assert json.loads(captured["request"].read())["reasoning_effort"] == wire_value
+
+
+def test_request_uses_custom_thinking_level_map() -> None:
+    captured: dict[str, httpx.Request] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["request"] = request
+        return httpx.Response(200, text="data: [DONE]\n\n", request=request)
+
+    request = ProviderRequest(
+        "gpt-test",
+        (Message(MessageRole.USER, "think"),),
+        reasoning_effort=ReasoningEffort.HIGH,
+    )
+    provider = make_provider(
+        handler, thinking_level_map={ReasoningEffort.HIGH: "balanced"}
+    )
+    _run_collect(provider, request)
+
+    assert json.loads(captured["request"].read())["reasoning_effort"] == "balanced"
+
+
+def test_custom_thinking_level_map_is_copied_and_not_mutable() -> None:
+    mapping = {ReasoningEffort.HIGH: "balanced"}
+    provider = make_provider(
+        lambda request: httpx.Response(200, text=DONE_SSE, request=request),
+        thinking_level_map=mapping,
+    )
+    mapping[ReasoningEffort.HIGH] = "changed"
+
+    request = ProviderRequest(
+        "gpt-test",
+        (Message(MessageRole.USER, "think"),),
+        reasoning_effort=ReasoningEffort.HIGH,
+    )
+    events = _run_collect(provider, request)
+
+    assert events == [Finish()]
+
+
+def test_unmapped_custom_reasoning_effort_fails_safely_before_http() -> None:
+    requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(200, text=DONE_SSE, request=request)
+
+    request = ProviderRequest(
+        "gpt-test",
+        (Message(MessageRole.USER, "think"),),
+        reasoning_effort=ReasoningEffort.LOW,
+    )
+    provider = make_provider(
+        handler, thinking_level_map={ReasoningEffort.HIGH: "balanced"}
+    )
+
+    events = _run_collect(provider, request)
+
+    assert requests == 0
+    assert len(events) == 1
+    assert isinstance(events[0], ProviderErrorEvent)
+    assert type(events[0].error) is ProviderError
+    assert str(events[0].error) == "reasoning effort is not supported"
+
+
+@pytest.mark.parametrize(
+    "invalid_map",
+    [
+        {"high": "secret-sk-mapping-value"},
+        {ReasoningEffort.OFF: "secret-sk-mapping-value"},
+        {ReasoningEffort.HIGH: ""},
+        {ReasoningEffort.HIGH: "   "},
+        {ReasoningEffort.HIGH: "unsafe\nvalue"},
+        {ReasoningEffort.HIGH: 3},
+        object(),
+    ],
+)
+def test_invalid_thinking_level_map_fails_without_echoing_values(
+    invalid_map: object,
+) -> None:
+    with pytest.raises((TypeError, ValueError)) as captured:
+        OpenAICompatibleProvider(
+            api_key="test-api-key",
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, text=DONE_SSE, request=request)
+            ),
+            thinking_level_map=invalid_map,  # type: ignore[arg-type]
+        )
+
+    assert "secret-sk-mapping-value" not in str(captured.value)
+    assert "secret-sk-mapping-value" not in repr(captured.value)
 
 
 def test_request_sends_tool_specs_as_standard_tools_payload() -> None:
@@ -402,6 +533,115 @@ def _sse_response(*lines: str) -> httpx.Response:
 
 def _text_delta(text: str) -> TextDelta:
     return TextDelta(text=text)
+
+
+def test_reasoning_precedes_content_from_the_same_delta() -> None:
+    provider = make_provider(
+        lambda request: _sse_response(
+            'data: {"choices":[{"delta":{"reasoning_content":"先分析","content":"正式回答"}}]}\n\n',
+            DONE_SSE,
+        )
+    )
+
+    events = _run_collect(provider, _make_request())
+
+    assert events == [
+        ProviderReasoningDelta("先分析"),
+        TextDelta("正式回答"),
+        Finish(),
+    ]
+
+
+def test_reasoning_only_deltas_preserve_order_unicode_and_ignore_empty_values() -> None:
+    provider = make_provider(
+        lambda request: _sse_response(
+            'data: {"choices":[{"delta":{"reasoning_content":"第一步"}}]}\n\n',
+            'data: {"choices":[{"delta":{"reasoning_content":null}}]}\n\n',
+            'data: {"choices":[{"delta":{"reasoning_content":""}}]}\n\n',
+            'data: {"choices":[{"delta":{"reasoning_content":"\ud574\uc11d \u2713"}}]}\n\n',
+            DONE_SSE,
+        )
+    )
+
+    events = _run_collect(provider, _make_request())
+
+    assert events == [
+        ProviderReasoningDelta("第一步"),
+        ProviderReasoningDelta("해석 ✓"),
+        Finish(),
+    ]
+
+
+def test_reasoning_precedes_tool_call_assembly_without_pollution() -> None:
+    provider = make_provider(
+        lambda request: _sse_response(
+            'data: {"choices":[{"delta":{"reasoning_content":"inspect","tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"lookup","arguments":"{}"}}]}}]}\n\n',
+            'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+        )
+    )
+
+    events = _run_collect(provider, _make_request())
+
+    assert events == [
+        ProviderReasoningDelta("inspect"),
+        Finish(
+            reason="tool_calls",
+            tool_calls=(ToolCall("call-1", "lookup", {}),),
+        ),
+    ]
+
+
+@pytest.mark.parametrize("invalid", [3, True, [], {"token": "sk-secret-sentinel"}])
+def test_invalid_reasoning_content_is_one_safe_terminal_error(invalid: object) -> None:
+    unsafe_chunk = json.dumps(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "reasoning_content": invalid,
+                        "content": "must not appear",
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "sensitive-call-id",
+                                "type": "function",
+                                "function": {
+                                    "name": "sensitive_tool",
+                                    "arguments": "{}",
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+    )
+    provider = make_provider(
+        lambda request: _sse_response(
+            f"data: {unsafe_chunk}\n\n",
+            'data: {"choices":[{"delta":{"reasoning_content":"later","content":"later"}}]}\n\n',
+            DONE_SSE,
+        ),
+        api_key="sk-provider-secret",
+        base_url="https://secret.example/v1",
+    )
+
+    events = _run_collect(provider, _make_request())
+
+    assert len(events) == 1
+    assert isinstance(events[0], ProviderErrorEvent)
+    assert type(events[0].error) is MalformedResponseError
+    rendered = f"{events[0].error!s} {events[0].error!r}"
+    for secret in (
+        "sk-secret-sentinel",
+        "sk-provider-secret",
+        "secret.example",
+        "sensitive-call-id",
+        "sensitive_tool",
+        "must not appear",
+        "traceback",
+    ):
+        assert secret not in rendered
 
 
 def test_stream_assembles_one_fragmented_tool_call() -> None:

@@ -29,11 +29,13 @@ from mica_agent.providers import (
     Finish,
     ProviderErrorEvent,
     ProviderEvent,
+    ProviderReasoningDelta,
     ProviderRequest,
 )
 from mica_agent.providers import (
     TextDelta as ProviderTextDelta,
 )
+from mica_agent.reasoning import ReasoningEffort
 from mica_agent.session_service import SessionService
 from mica_agent.workspace import resolve_workspace
 
@@ -308,6 +310,27 @@ def test_streaming_deltas_are_written_verbatim_in_order() -> None:
     # 增量原样、按序、无额外空格；RunCompleted 只补一个换行。
     assert out.text == "Hello, world!\n"
     assert err.text == ""
+
+
+def test_cli_ignores_reasoning_and_keeps_formal_output() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderReasoningDelta("private thought"),
+                ProviderTextDelta("formal answer"),
+                Finish(),
+            ]
+        ]
+    )
+
+    code, out, err = asyncio.run(run_core(provider, "q"))
+
+    assert code == 0
+    assert out.text == "formal answer\n"
+    assert err.text == ""
+    assert "private thought" not in out.text + err.text
+    assert provider.requests[0].reasoning_effort is ReasoningEffort.OFF
+    assert provider.aclose_calls == 1
 
 
 def test_completed_run_does_not_double_newline() -> None:

@@ -31,6 +31,8 @@ from mica_agent import (
     PolicyEngine,
     PolicyInput,
     PolicyOperation,
+    ReasoningDelta,
+    ReasoningEffort,
     RegisteredTool,
     RunStatus,
     SessionError,
@@ -132,6 +134,15 @@ def test_top_level_exports_context_builder() -> None:
     assert mica_agent.ContextBuilder is ContextBuilder
     assert mica_agent.ContextDiagnostic is ContextDiagnostic
     assert mica_agent.ContextDiagnosticKind is ContextDiagnosticKind
+
+
+def test_top_level_exports_reasoning_contracts() -> None:
+    from mica_agent.events import ReasoningDelta as EngineReasoningDelta
+    from mica_agent.reasoning import ReasoningEffort as ReasoningEffortEnum
+
+    assert ReasoningEffort is ReasoningEffortEnum
+    assert mica_agent.ReasoningDelta is EngineReasoningDelta
+    assert ReasoningDelta is EngineReasoningDelta
 
 
 def test_top_level_exports_models_and_events() -> None:

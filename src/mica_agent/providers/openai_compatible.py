@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from types import MappingProxyType
 from typing import Any
 
 import httpx
 
+from ..reasoning import ReasoningEffort
 from ..tool_contracts import ToolCall, to_mutable_json
 from .base import (
     AuthenticationError,
@@ -22,6 +24,7 @@ from .base import (
     ProviderError,
     ProviderErrorEvent,
     ProviderEvent,
+    ProviderReasoningDelta,
     ProviderRequest,
     ProviderTimeoutError,
     RateLimitError,
@@ -30,6 +33,39 @@ from .base import (
 )
 
 SleepFn = Callable[[float], Awaitable[None]]
+_DEFAULT_THINKING_LEVEL_MAP = MappingProxyType(
+    {
+        ReasoningEffort.MINIMAL: "minimal",
+        ReasoningEffort.LOW: "low",
+        ReasoningEffort.MEDIUM: "medium",
+        ReasoningEffort.HIGH: "high",
+        ReasoningEffort.XHIGH: "xhigh",
+        ReasoningEffort.MAX: "max",
+    }
+)
+
+
+def _validated_thinking_level_map(
+    value: Mapping[ReasoningEffort, str] | None,
+) -> Mapping[ReasoningEffort, str]:
+    if value is None:
+        return _DEFAULT_THINKING_LEVEL_MAP
+    if not isinstance(value, Mapping):
+        raise TypeError("thinking_level_map must be a mapping or None")
+    if not value:
+        return _DEFAULT_THINKING_LEVEL_MAP
+    copied: dict[ReasoningEffort, str] = {}
+    for effort, target in value.items():
+        if not isinstance(effort, ReasoningEffort) or effort is ReasoningEffort.OFF:
+            raise TypeError("thinking_level_map contains an invalid effort")
+        if (
+            not isinstance(target, str)
+            or not target.strip()
+            or not target.isprintable()
+        ):
+            raise ValueError("thinking_level_map contains an invalid target")
+        copied[effort] = target
+    return MappingProxyType(copied)
 
 
 def resolve_endpoint(base_url: str) -> str:
@@ -75,6 +111,7 @@ class OpenAICompatibleProvider:
         retry_backoff: float = 1.0,
         sleep: SleepFn | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        thinking_level_map: Mapping[ReasoningEffort, str] | None = None,
     ) -> None:
         if not isinstance(api_key, str) or not api_key.strip():
             raise ValueError("api_key must be a non-empty, non-blank string")
@@ -91,6 +128,7 @@ class OpenAICompatibleProvider:
         self._max_retries = max_retries
         self._retry_backoff = retry_backoff
         self._sleep: SleepFn = sleep if sleep is not None else asyncio.sleep
+        self._thinking_level_map = _validated_thinking_level_map(thinking_level_map)
         self._client = httpx.AsyncClient(
             timeout=timeout,
             transport=transport
@@ -111,8 +149,7 @@ class OpenAICompatibleProvider:
 
     # -- 请求与响应 --------------------------------------------------------
 
-    @staticmethod
-    def _build_payload(request: ProviderRequest) -> dict[str, Any]:
+    def _build_payload(self, request: ProviderRequest) -> dict[str, Any]:
         """把供应商无关请求转换为 Chat Completions JSON 载荷。"""
         messages: list[dict[str, Any]] = []
         for message in request.messages:
@@ -146,6 +183,10 @@ class OpenAICompatibleProvider:
             "messages": messages,
             "stream": True,
         }
+        if request.reasoning_effort is not ReasoningEffort.OFF:
+            payload["reasoning_effort"] = self._thinking_level_map[
+                request.reasoning_effort
+            ]
         if request.tools:
             payload["tools"] = [
                 {
@@ -217,6 +258,9 @@ class OpenAICompatibleProvider:
             if not isinstance(delta, dict):
                 raise MalformedResponseError("'delta' must be a JSON object")
 
+        reasoning = delta.get("reasoning_content")
+        if reasoning is not None and not isinstance(reasoning, str):
+            raise MalformedResponseError("'delta.reasoning_content' must be a string")
         content = delta.get("content")
         if content is not None and not isinstance(content, str):
             raise MalformedResponseError("'delta.content' must be a string")
@@ -269,9 +313,15 @@ class OpenAICompatibleProvider:
                     fragment["function"] = function_fragment
                 fragments.append(fragment)
 
-        if content is None and not fragments and finish_reason is None:
+        if (
+            reasoning is None
+            and content is None
+            and not fragments
+            and finish_reason is None
+        ):
             return None
         return {
+            "reasoning_content": reasoning,
             "content": content,
             "tool_calls": fragments,
             "finish_reason": finish_reason,
@@ -313,7 +363,13 @@ class OpenAICompatibleProvider:
         return tuple(calls)
 
     async def stream(self, request: ProviderRequest) -> AsyncIterator[ProviderEvent]:
-        payload = self._build_payload(request)
+        try:
+            payload = self._build_payload(request)
+        except KeyError:
+            yield ProviderErrorEvent(
+                error=ProviderError("reasoning effort is not supported")
+            )
+            return
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
@@ -365,6 +421,10 @@ class OpenAICompatibleProvider:
                             return
                         if parsed is None:
                             continue
+                        reasoning = parsed["reasoning_content"]
+                        if reasoning:
+                            produced = True
+                            yield ProviderReasoningDelta(text=reasoning)
                         content = parsed["content"]
                         if content is not None:
                             produced = True

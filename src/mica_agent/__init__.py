@@ -19,6 +19,7 @@ from .events import (
     EngineEvent,
     ErrorCategory,
     PermissionRequested,
+    ReasoningDelta,
     RunCancelled,
     RunCompleted,
     RunFailed,
@@ -54,6 +55,7 @@ from .jsonl_store import (
 from .models import Message, MessageRole
 from .permissions import PermissionMode, PolicyDecision
 from .policy import PolicyEngine, PolicyInput, PolicyOperation
+from .reasoning import ReasoningEffort
 from .session_contracts import (
     CURRENT_SESSION_FORMAT_VERSION,
     SessionError,
@@ -126,6 +128,8 @@ __all__ = [
     "PolicyEngine",
     "PolicyInput",
     "PolicyOperation",
+    "ReasoningDelta",
+    "ReasoningEffort",
     "RegisteredTool",
     "RunCancelled",
     "RunCompleted",

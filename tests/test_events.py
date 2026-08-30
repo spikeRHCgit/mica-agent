@@ -17,6 +17,7 @@ from mica_agent.events import (
     EngineEvent,
     ErrorCategory,
     PermissionRequested,
+    ReasoningDelta,
     RunCancelled,
     RunCompleted,
     RunFailed,
@@ -52,6 +53,17 @@ def test_terminal_status_cannot_be_overridden() -> None:
 
     with pytest.raises(TypeError):
         RunCancelled(run_id="run-1", seq=1, status=RunStatus.COMPLETED)
+
+
+def test_reasoning_delta_carries_run_id_text_and_seq() -> None:
+    event = ReasoningDelta(run_id="run-1", text="先分析", seq=1)
+
+    assert event.run_id == "run-1"
+    assert event.text == "先分析"
+    assert event.seq == 1
+    assert isinstance(event, get_args(EngineEvent))
+    with pytest.raises(FrozenInstanceError):
+        event.text = "changed"  # type: ignore[misc]
 
 
 def test_text_delta_carries_run_id_text_and_seq() -> None:

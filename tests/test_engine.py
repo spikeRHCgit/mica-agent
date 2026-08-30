@@ -17,6 +17,7 @@ from mica_agent.events import (
     EngineEvent,
     ErrorCategory,
     PermissionRequested,
+    ReasoningDelta,
     RunCancelled,
     RunCompleted,
     RunFailed,
@@ -42,6 +43,7 @@ from mica_agent.providers import (
     ProviderError,
     ProviderErrorEvent,
     ProviderEvent,
+    ProviderReasoningDelta,
     ProviderRequest,
     ProviderTimeoutError,
     RateLimitError,
@@ -50,6 +52,7 @@ from mica_agent.providers import (
 from mica_agent.providers import (
     TextDelta as ProviderTextDelta,
 )
+from mica_agent.reasoning import ReasoningEffort
 from mica_agent.tool_contracts import (
     ToolCall,
     ToolRequest,
@@ -944,6 +947,196 @@ def test_provider_stream_closes_before_provider_error_returns() -> None:
     assert closed is True
 
 
+def test_reasoning_is_sequenced_but_excluded_from_completed_messages() -> None:
+    completed: list[tuple[Message, ...]] = []
+    engine = _engine(
+        [
+            ProviderReasoningDelta("first thought"),
+            ProviderReasoningDelta("second thought"),
+            ProviderTextDelta("answer"),
+            Finish(),
+        ]
+    )
+
+    async def collect() -> list[EngineEvent]:
+        return [
+            event
+            async for event in engine.run(
+                _request(), completed_messages_sink=completed.append
+            )
+        ]
+
+    events = asyncio.run(collect())
+
+    assert events == [
+        RunStarted("run-test"),
+        ReasoningDelta("run-test", "first thought", 1),
+        ReasoningDelta("run-test", "second thought", 2),
+        TextDelta("run-test", "answer", 3),
+        RunCompleted("run-test", 4),
+    ]
+    assert completed == [(Message(MessageRole.ASSISTANT, "answer"),)]
+
+
+def test_reasoning_then_provider_error_has_one_failed_terminal() -> None:
+    completed: list[tuple[Message, ...]] = []
+    engine = _engine(
+        [
+            ProviderReasoningDelta("partial thought"),
+            ProviderErrorEvent(MalformedResponseError("bad response")),
+            ProviderTextDelta("must not appear"),
+            Finish(),
+        ]
+    )
+
+    async def collect() -> list[EngineEvent]:
+        return [
+            event
+            async for event in engine.run(
+                _request(), completed_messages_sink=completed.append
+            )
+        ]
+
+    events = asyncio.run(collect())
+
+    assert events == [
+        RunStarted("run-test"),
+        ReasoningDelta("run-test", "partial thought", 1),
+        RunFailed("run-test", "bad response", ErrorCategory.MALFORMED, 2),
+    ]
+    assert completed == []
+
+
+def test_tool_loop_exposes_each_reasoning_step_without_message_pollution() -> None:
+    executor, registry = _lookup_executor()
+    call = ToolCall("call-1", "lookup", {"query": "mica"})
+    provider = _ScriptedProvider(
+        [
+            [ProviderReasoningDelta("plan tool"), Finish(tool_calls=(call,))],
+            [
+                ProviderReasoningDelta("use result"),
+                ProviderTextDelta("done"),
+                Finish(),
+            ],
+        ]
+    )
+    completed: list[tuple[Message, ...]] = []
+    request = ProviderRequest(
+        "test-model",
+        (Message(MessageRole.USER, "inspect"),),
+        registry.specs(),
+        ReasoningEffort.HIGH,
+    )
+    engine = AgentEngine(
+        provider,
+        tool_executor=executor,
+        run_id_factory=lambda: "run-reasoning-tools",
+    )
+
+    async def collect() -> list[EngineEvent]:
+        return [
+            event
+            async for event in engine.run(
+                request, completed_messages_sink=completed.append
+            )
+        ]
+
+    events = asyncio.run(collect())
+
+    assert [event.text for event in events if isinstance(event, ReasoningDelta)] == [
+        "plan tool",
+        "use result",
+    ]
+    assert [request.reasoning_effort for request in provider.requests] == [
+        ReasoningEffort.HIGH,
+        ReasoningEffort.HIGH,
+    ]
+    assert [message.role for message in provider.requests[1].messages] == [
+        MessageRole.USER,
+        MessageRole.ASSISTANT,
+        MessageRole.TOOL,
+    ]
+    assert all(
+        "plan tool" not in message.content and "use result" not in message.content
+        for message in provider.requests[1].messages
+    )
+    assert completed and [message.role for message in completed[0]] == [
+        MessageRole.ASSISTANT,
+        MessageRole.TOOL,
+        MessageRole.ASSISTANT,
+    ]
+    assert completed[0][-1].content == "done"
+
+
+def test_reasoning_then_cancellation_closes_provider_stream() -> None:
+    class Provider:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def stream(
+            self, request: ProviderRequest
+        ) -> AsyncIterator[ProviderEvent]:
+            try:
+                yield ProviderReasoningDelta("thinking")
+                await asyncio.sleep(30)
+                yield Finish()
+            finally:
+                self.closed = True
+
+    async def scenario() -> tuple[list[EngineEvent], bool]:
+        provider = Provider()
+        token = CancellationToken()
+        stream = AgentEngine(
+            provider, run_id_factory=lambda: "run-reasoning-cancel"
+        ).run(_request(), cancellation=token)
+        events = [await anext(stream), await anext(stream)]
+        token.cancel()
+        events.extend([event async for event in stream])
+        return events, provider.closed
+
+    events, closed = asyncio.run(scenario())
+
+    assert events == [
+        RunStarted("run-reasoning-cancel"),
+        ReasoningDelta("run-reasoning-cancel", "thinking", 1),
+        RunCancelled("run-reasoning-cancel", 2),
+    ]
+    assert closed is True
+
+
+def test_consumer_closing_after_reasoning_closes_provider_stream() -> None:
+    class Provider:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def stream(
+            self, request: ProviderRequest
+        ) -> AsyncIterator[ProviderEvent]:
+            try:
+                yield ProviderReasoningDelta("thinking")
+                await asyncio.sleep(30)
+                yield Finish()
+            finally:
+                self.closed = True
+
+    async def scenario() -> tuple[list[EngineEvent], bool]:
+        provider = Provider()
+        stream = AgentEngine(
+            provider, run_id_factory=lambda: "run-reasoning-close"
+        ).run(_request())
+        events = [await anext(stream), await anext(stream)]
+        await stream.aclose()
+        return events, provider.closed
+
+    events, closed = asyncio.run(scenario())
+
+    assert events == [
+        RunStarted("run-reasoning-close"),
+        ReasoningDelta("run-reasoning-close", "thinking", 1),
+    ]
+    assert closed is True
+
+
 def test_normal_text_run_yields_strictly_sequenced_events() -> None:
     engine = _engine(
         [
@@ -1316,6 +1509,48 @@ class _HangingProvider:
         yield ProviderTextDelta(text="first")
         await asyncio.sleep(30)
         yield Finish()
+
+
+def test_external_task_cancellation_after_reasoning_closes_stream() -> None:
+    class Provider:
+        def __init__(self) -> None:
+            self.waiting = asyncio.Event()
+            self.closed = False
+
+        async def stream(
+            self, request: ProviderRequest
+        ) -> AsyncIterator[ProviderEvent]:
+            try:
+                yield ProviderReasoningDelta("thinking")
+                self.waiting.set()
+                await asyncio.sleep(30)
+                yield Finish()
+            finally:
+                self.closed = True
+
+    provider = Provider()
+    engine = AgentEngine(provider, run_id_factory=lambda: "run-reasoning-task-cancel")
+    collected: list[EngineEvent] = []
+
+    async def consume() -> None:
+        async for event in engine.run(_request()):
+            collected.append(event)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(consume())
+        await provider.waiting.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+    assert collected == [
+        RunStarted("run-reasoning-task-cancel"),
+        ReasoningDelta("run-reasoning-task-cancel", "thinking", 1),
+        RunCancelled("run-reasoning-task-cancel", 2),
+    ]
+    assert provider.closed is True
 
 
 def test_cancellation_maps_to_single_runcancelled() -> None:

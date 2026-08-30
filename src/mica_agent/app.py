@@ -14,6 +14,7 @@ from .events import EngineEvent, ErrorCategory, RunCompleted, RunFailed
 from .interactions import PermissionResponse, UserInputResponse
 from .models import Message, MessageRole
 from .providers import Provider, ProviderRequest
+from .reasoning import ReasoningEffort
 from .session_contracts import TurnEntry
 from .session_service import SessionService
 from .system_prompt import build_system_prompt
@@ -137,7 +138,12 @@ class MicaApp:
         self._closed = True
         await self._provider.aclose()
 
-    async def run(self, prompt: str) -> AsyncIterator[EngineEvent]:
+    async def run(
+        self,
+        prompt: str,
+        *,
+        reasoning_effort: ReasoningEffort = ReasoningEffort.OFF,
+    ) -> AsyncIterator[EngineEvent]:
         """启动一次 Run，并仅在 RunCompleted 后提交完整 TurnEntry。"""
         if self._closed:
             raise AppClosedError("app is closed; cannot start a new run")
@@ -145,6 +151,8 @@ class MicaApp:
             raise TypeError(f"prompt must be a str, got {type(prompt).__name__}")
         if not prompt.strip():
             raise ValueError("prompt must be a non-empty, non-blank string")
+        if not isinstance(reasoning_effort, ReasoningEffort):
+            raise TypeError("reasoning_effort must be a ReasoningEffort")
         if self._active_run:
             raise AppBusyError("another run is already active")
 
@@ -161,6 +169,7 @@ class MicaApp:
                     if self._tool_executor is not None
                     else ()
                 ),
+                reasoning_effort=reasoning_effort,
             )
             async with aclosing(
                 self._engine.run(

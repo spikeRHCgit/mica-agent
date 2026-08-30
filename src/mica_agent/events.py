@@ -76,6 +76,23 @@ class RunStarted:
 
 
 @dataclass(frozen=True, slots=True)
+class ReasoningDelta:
+    """按序排列的模型思考增量，不属于正式助手文本。"""
+
+    run_id: str
+    text: str
+    seq: int
+
+    def __post_init__(self) -> None:
+        _validate_run_id(self.run_id)
+        _validate_seq(self.seq)
+        if not isinstance(self.text, str):
+            raise TypeError("text must be a str")
+        if not self.text:
+            raise ValueError("text must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
 class TextDelta:
     """按序排列的文本增量，CLI 将其连续追加即可还原完整回复。"""
 
@@ -210,6 +227,7 @@ class RunCancelled:
 
 EngineEvent = (
     RunStarted
+    | ReasoningDelta
     | TextDelta
     | ToolStarted
     | ToolFinished

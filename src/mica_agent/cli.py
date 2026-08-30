@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Literal, TypeAlias
 from .context_builder import ContextBuilder
 from .events import (
     PermissionRequested,
+    ReasoningDelta,
     RunCancelled,
     RunCompleted,
     RunFailed,
@@ -454,6 +455,8 @@ async def _interact(
         try:
             async with aclosing(app.run(line)) as stream:
                 async for event in stream:
+                    if isinstance(event, ReasoningDelta):
+                        continue
                     if isinstance(event, TextDelta):
                         # 空字符串也原样写出，但不改变换行状态。
                         write_out(event.text)
