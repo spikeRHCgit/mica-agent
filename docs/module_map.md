@@ -42,4 +42,3 @@
 | `src/mica_agent/providers/base.py` | Provider 公共协议；定义 ProviderRequest、流式文本/结束/错误事件、错误分类和 Provider 生命周期接口。 |
 | `src/mica_agent/providers/openai_compatible.py` | OpenAI-compatible Chat Completions 适配器；构造 HTTP 请求、解析 SSE、组装工具调用、分类错误并执行有限网络重试。 |
 | `src/mica_agent/prompts/system.md` | 随 wheel 分发的 UTF-8 内置系统提示词模板；只保存稳定正文和环境上下文占位符，不含会话动态状态或 `AGENTS.md` 内容。 |
-
