@@ -6,7 +6,6 @@ import os
 import stat
 import tempfile
 from functools import partial
-from itertools import islice
 from pathlib import Path
 
 from .cancellation import CancellationRequested, CancellationToken
@@ -16,8 +15,6 @@ from .workspace import WorkspaceIdentity
 from .workspace_paths import WorkspacePathError, WorkspacePathResolver
 
 MAX_FILE_BYTES = 262_144
-MAX_LIST_ENTRIES = 1_000
-MAX_LIST_OUTPUT_BYTES = 262_144
 
 
 class _FileTooLargeError(Exception):
@@ -31,15 +28,6 @@ _READ_SPEC = ToolSpec(
         "type": "object",
         "properties": {"path": {"type": "string", "minLength": 1}},
         "required": ["path"],
-        "additionalProperties": False,
-    },
-)
-_LS_SPEC = ToolSpec(
-    name="ls",
-    description="List one workspace directory level.",
-    input_schema={
-        "type": "object",
-        "properties": {"path": {"type": "string", "minLength": 1}},
         "additionalProperties": False,
     },
 )
@@ -225,74 +213,6 @@ async def _write_handler(
         )
 
 
-def _ls_path_argument(request: ToolRequest) -> str | None:
-    arguments = request.arguments
-    if not arguments:
-        return "."
-    if set(arguments) != {"path"}:
-        return None
-    path = arguments["path"]
-    return path if isinstance(path, str) and path.strip() else None
-
-
-def _entry_name(entry: Path) -> str:
-    details = entry.lstat()
-    if stat.S_ISDIR(details.st_mode):
-        return f"{entry.name}/"
-    return entry.name
-
-
-async def _ls_handler(
-    request: ToolRequest,
-    cancellation: CancellationToken,
-    resolver: WorkspacePathResolver,
-) -> ToolResult:
-    try:
-        cancellation.raise_if_cancelled()
-        path = _ls_path_argument(request)
-        if path is None:
-            return _result(
-                request, ToolResultStatus.INVALID_ARGUMENTS, "invalid file arguments"
-            )
-        target = resolver.resolve(path)
-        if resolver.is_sensitive(target):
-            return _result(
-                request, ToolResultStatus.PERMISSION_DENIED, "file access denied"
-            )
-        if not target.is_dir():
-            return _result(
-                request, ToolResultStatus.EXECUTION_FAILED, "file operation failed"
-            )
-        scanned_entries = list(islice(target.iterdir(), MAX_LIST_ENTRIES + 1))
-        if len(scanned_entries) > MAX_LIST_ENTRIES:
-            return _result(
-                request, ToolResultStatus.EXECUTION_FAILED, "file operation failed"
-            )
-        entries = sorted(
-            (entry for entry in scanned_entries if not resolver.is_sensitive(entry)),
-            key=lambda entry: (entry.name.casefold(), entry.name),
-        )
-        output = (
-            "\n".join(_entry_name(entry) for entry in entries) or "(empty directory)"
-        )
-        if len(output.encode("utf-8")) > MAX_LIST_OUTPUT_BYTES:
-            return _result(
-                request, ToolResultStatus.EXECUTION_FAILED, "file operation failed"
-            )
-        cancellation.raise_if_cancelled()
-        return _result(request, ToolResultStatus.SUCCESS, "directory listed", output)
-    except CancellationRequested:
-        return _result(request, ToolResultStatus.CANCELLED, "operation cancelled")
-    except WorkspacePathError:
-        return _result(
-            request, ToolResultStatus.PERMISSION_DENIED, "file access denied"
-        )
-    except OSError:
-        return _result(
-            request, ToolResultStatus.EXECUTION_FAILED, "file operation failed"
-        )
-
-
 def _edit_arguments(request: ToolRequest) -> tuple[str, str, str] | None:
     arguments = request.arguments
     if set(arguments) != {"path", "old_text", "new_text"}:
@@ -367,19 +287,18 @@ async def _not_available(
 
 
 def register_file_tools(registry: ToolRegistry, workspace: WorkspaceIdentity) -> None:
-    """显式、原子地注册当前工作区的四个文件工具。"""
+    """显式、原子地注册当前工作区的三个文件工具。"""
     if not isinstance(registry, ToolRegistry):
         raise TypeError("registry must be a ToolRegistry")
     if not isinstance(workspace, WorkspaceIdentity):
         raise TypeError("workspace must be a WorkspaceIdentity")
     resolver = WorkspacePathResolver(workspace)
-    specs = (_READ_SPEC, _LS_SPEC, _WRITE_SPEC, _EDIT_SPEC)
+    specs = (_READ_SPEC, _WRITE_SPEC, _EDIT_SPEC)
     names = {spec.name for spec in registry.specs()}
     if names.intersection(spec.name for spec in specs):
         raise DuplicateToolError("tool name is already registered")
     handlers = {
         "read": partial(_read_handler, resolver=resolver),
-        "ls": partial(_ls_handler, resolver=resolver),
         "write": partial(_write_handler, resolver=resolver),
         "edit": partial(_edit_handler, resolver=resolver),
     }

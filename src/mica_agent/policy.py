@@ -14,7 +14,6 @@ class PolicyOperation(Enum):
     """权限矩阵识别的稳定操作类别。"""
 
     READ = "read"
-    LIST = "list"
     WRITE = "write"
     EDIT = "edit"
     SAFE_READ_ONLY_COMMAND = "safe_read_only_command"
@@ -48,7 +47,6 @@ class PolicyInput:
 _DEFAULT_MATRIX: dict[PermissionMode, dict[PolicyOperation, PolicyDecision]] = {
     PermissionMode.DEFAULT: {
         PolicyOperation.READ: PolicyDecision.ALLOW,
-        PolicyOperation.LIST: PolicyDecision.ALLOW,
         PolicyOperation.WRITE: PolicyDecision.ASK,
         PolicyOperation.EDIT: PolicyDecision.ASK,
         PolicyOperation.SAFE_READ_ONLY_COMMAND: PolicyDecision.ASK,
@@ -58,7 +56,6 @@ _DEFAULT_MATRIX: dict[PermissionMode, dict[PolicyOperation, PolicyDecision]] = {
     },
     PermissionMode.ACCEPT_EDITS: {
         PolicyOperation.READ: PolicyDecision.ALLOW,
-        PolicyOperation.LIST: PolicyDecision.ALLOW,
         PolicyOperation.WRITE: PolicyDecision.ALLOW,
         PolicyOperation.EDIT: PolicyDecision.ALLOW,
         PolicyOperation.SAFE_READ_ONLY_COMMAND: PolicyDecision.ASK,
@@ -68,7 +65,6 @@ _DEFAULT_MATRIX: dict[PermissionMode, dict[PolicyOperation, PolicyDecision]] = {
     },
     PermissionMode.SOLO: {
         PolicyOperation.READ: PolicyDecision.ALLOW,
-        PolicyOperation.LIST: PolicyDecision.ALLOW,
         PolicyOperation.WRITE: PolicyDecision.ALLOW,
         PolicyOperation.EDIT: PolicyDecision.ALLOW,
         PolicyOperation.SAFE_READ_ONLY_COMMAND: PolicyDecision.ALLOW,

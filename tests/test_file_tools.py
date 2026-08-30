@@ -1,4 +1,4 @@
-"""P5-03 四个文件工具的公共行为测试。"""
+"""read、write、edit 三个文件工具的公共行为测试。"""
 
 from __future__ import annotations
 
@@ -9,18 +9,14 @@ from pathlib import Path
 import pytest
 
 from mica_agent.cancellation import CancellationToken
-from mica_agent.file_tools import (
-    MAX_FILE_BYTES,
-    MAX_LIST_ENTRIES,
-    register_file_tools,
-)
+from mica_agent.file_tools import MAX_FILE_BYTES, register_file_tools
 from mica_agent.schema_validation import validate_tool_schema
 from mica_agent.tool_contracts import ToolRequest, ToolResultStatus
 from mica_agent.tool_registry import ToolRegistry
 from mica_agent.workspace import resolve_workspace
 
 
-def test_register_file_tools_exposes_four_valid_sorted_specs(tmp_path: Path) -> None:
+def test_register_file_tools_exposes_three_valid_sorted_specs(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     registry = ToolRegistry()
@@ -28,15 +24,36 @@ def test_register_file_tools_exposes_four_valid_sorted_specs(tmp_path: Path) -> 
     register_file_tools(registry, resolve_workspace(workspace))
 
     specs = registry.specs()
-    assert [spec.name for spec in specs] == ["edit", "ls", "read", "write"]
+    assert [spec.name for spec in specs] == ["edit", "read", "write"]
     for spec in specs:
         validate_tool_schema(spec)
-    assert specs[2].input_schema == {
+    assert specs[1].input_schema == {
         "type": "object",
         "properties": {"path": {"type": "string", "minLength": 1}},
         "required": ("path",),
         "additionalProperties": False,
     }
+
+
+def test_register_file_tools_does_not_access_filesystem_or_run_handlers(
+    tmp_path: Path, monkeypatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    identity = resolve_workspace(workspace)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("registration must not access the filesystem")
+
+    monkeypatch.setattr(Path, "cwd", forbidden)
+    monkeypatch.setattr(Path, "open", forbidden)
+    monkeypatch.setattr(Path, "iterdir", forbidden)
+    monkeypatch.setattr(Path, "lstat", forbidden)
+    registry = ToolRegistry()
+
+    register_file_tools(registry, identity)
+
+    assert [spec.name for spec in registry.specs()] == ["edit", "read", "write"]
 
 
 def test_registered_read_returns_complete_utf8_text_preserving_newlines(
@@ -169,7 +186,6 @@ def test_registered_handlers_safely_deny_windows_path_aliases(
         ("read", {"path": path}),
         ("write", {"path": path, "content": "changed"}),
         ("edit", {"path": path, "old_text": "unchanged", "new_text": "changed"}),
-        ("ls", {"path": path}),
     )
     results = [
         asyncio.run(
@@ -246,35 +262,6 @@ def test_registered_write_creates_exact_utf8_bytes_atomically(tmp_path: Path) ->
     assert result.status is ToolResultStatus.SUCCESS
     assert (workspace / "new.txt").read_bytes() == "你好\r\n".encode()
     assert not list(workspace.glob(".new.txt.*.tmp"))
-
-
-def test_registered_ls_lists_one_level_in_stable_order_and_empty_directory(
-    tmp_path: Path,
-) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    (workspace / "zeta.txt").write_text("z", encoding="utf-8")
-    (workspace / "alpha").mkdir()
-    (workspace / "空 格.txt").write_text("x", encoding="utf-8")
-    (workspace / "empty").mkdir()
-    registry = ToolRegistry()
-    register_file_tools(registry, resolve_workspace(workspace))
-
-    root_result = asyncio.run(
-        registry.resolve("ls").handler(
-            ToolRequest("call-4", "ls", {}), CancellationToken()
-        )
-    )
-    empty_result = asyncio.run(
-        registry.resolve("ls").handler(
-            ToolRequest("call-5", "ls", {"path": "empty"}), CancellationToken()
-        )
-    )
-
-    assert root_result.status is ToolResultStatus.SUCCESS
-    assert root_result.data == "alpha/\nempty/\nzeta.txt\n空 格.txt"
-    assert empty_result.status is ToolResultStatus.SUCCESS
-    assert empty_result.data == "(empty directory)"
 
 
 def test_registered_edit_replaces_one_unique_match_without_changing_crlf(
@@ -369,32 +356,6 @@ def test_registered_write_replace_failure_preserves_bytes_cleans_temp_and_recove
     )
     assert recovered.status is ToolResultStatus.SUCCESS
     assert target.read_bytes() == b"changed"
-
-
-def test_registered_ls_denies_sensitive_target_and_omits_it_from_root(
-    tmp_path: Path,
-) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    (workspace / ".git").mkdir()
-    (workspace / "visible.txt").write_text("visible", encoding="utf-8")
-    registry = ToolRegistry()
-    register_file_tools(registry, resolve_workspace(workspace))
-
-    root = asyncio.run(
-        registry.resolve("ls").handler(
-            ToolRequest("call-9", "ls", {}), CancellationToken()
-        )
-    )
-    denied = asyncio.run(
-        registry.resolve("ls").handler(
-            ToolRequest("call-10", "ls", {"path": ".git"}), CancellationToken()
-        )
-    )
-
-    assert root.status is ToolResultStatus.SUCCESS
-    assert root.data == "visible.txt"
-    assert denied.status is ToolResultStatus.PERMISSION_DENIED
 
 
 def test_read_rejects_invalid_utf8_and_edit_requires_exactly_one_match(
@@ -562,20 +523,22 @@ def test_edit_replace_failure_preserves_original_and_recovers(
     assert target.read_bytes() == b"before changed after"
 
 
-def test_register_file_tools_is_atomic_when_a_name_is_already_registered(
-    tmp_path: Path,
+@pytest.mark.parametrize("duplicate_name", ["edit", "read", "write"])
+def test_register_file_tools_is_atomic_when_any_name_is_already_registered(
+    tmp_path: Path, duplicate_name: str
 ) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     registry = ToolRegistry()
     existing = ToolRegistry()
     register_file_tools(existing, resolve_workspace(workspace))
-    registry.register(existing.resolve("write").spec, existing.resolve("write").handler)
+    registered = existing.resolve(duplicate_name)
+    registry.register(registered.spec, registered.handler)
 
     with pytest.raises(Exception, match="already registered"):
         register_file_tools(registry, resolve_workspace(workspace))
 
-    assert [spec.name for spec in registry.specs()] == ["write"]
+    assert [spec.name for spec in registry.specs()] == [duplicate_name]
 
 
 def test_file_size_limit_allows_exactly_maximum_bytes(tmp_path: Path) -> None:
@@ -602,90 +565,3 @@ def test_file_size_limit_allows_exactly_maximum_bytes(tmp_path: Path) -> None:
     assert written.status is ToolResultStatus.SUCCESS
     assert read.status is ToolResultStatus.SUCCESS
     assert read.data == payload
-
-
-def test_ls_allows_exactly_maximum_number_of_entries(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    for number in range(1000):
-        (workspace / f"{number:04d}").write_text("", encoding="utf-8")
-    registry = ToolRegistry()
-    register_file_tools(registry, resolve_workspace(workspace))
-
-    result = asyncio.run(
-        registry.resolve("ls").handler(
-            ToolRequest("call-24", "ls", {}), CancellationToken()
-        )
-    )
-
-    assert result.status is ToolResultStatus.SUCCESS
-    assert result.data is not None
-    assert len(result.data.splitlines()) == 1000
-
-
-def test_ls_stops_scanning_after_maximum_plus_one_entries(
-    tmp_path: Path, monkeypatch
-) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    for number in range(MAX_LIST_ENTRIES + 2):
-        (workspace / f"{number:04d}").write_text("", encoding="utf-8")
-    registry = ToolRegistry()
-    register_file_tools(registry, resolve_workspace(workspace))
-    original_iterdir = Path.iterdir
-    scanned = 0
-
-    def bounded_iterdir(path: Path):
-        nonlocal scanned
-        for entry in original_iterdir(path):
-            scanned += 1
-            if scanned > MAX_LIST_ENTRIES + 1:
-                raise AssertionError("ls scanned too many entries")
-            yield entry
-
-    monkeypatch.setattr(Path, "iterdir", bounded_iterdir)
-    result = asyncio.run(
-        registry.resolve("ls").handler(
-            ToolRequest("bounded-ls", "ls", {}), CancellationToken()
-        )
-    )
-
-    assert result.status is ToolResultStatus.EXECUTION_FAILED
-    assert result.data is None
-    assert scanned == MAX_LIST_ENTRIES + 1
-
-
-def test_ls_fails_as_a_whole_for_too_many_entries(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    for number in range(1001):
-        (workspace / f"{number:04d}").write_text("", encoding="utf-8")
-    registry = ToolRegistry()
-    register_file_tools(registry, resolve_workspace(workspace))
-
-    result = asyncio.run(
-        registry.resolve("ls").handler(
-            ToolRequest("call-24", "ls", {}), CancellationToken()
-        )
-    )
-
-    assert result.status is ToolResultStatus.EXECUTION_FAILED
-    assert result.data is None
-
-
-def test_ls_fails_as_a_whole_when_utf8_output_exceeds_limit(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    for number in range(1000):
-        (workspace / ("界" * 90 + f"{number:03d}")).write_text("", encoding="utf-8")
-    registry = ToolRegistry()
-    register_file_tools(registry, resolve_workspace(workspace))
-
-    result = asyncio.run(
-        registry.resolve("ls").handler(
-            ToolRequest("call-25", "ls", {}), CancellationToken()
-        )
-    )
-
-    assert result.status is ToolResultStatus.EXECUTION_FAILED
-    assert result.data is None

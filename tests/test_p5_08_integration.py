@@ -331,7 +331,7 @@ def test_default_cli_prompts_once_then_writes_with_safe_status_output(
     assert sensitive not in observed
 
 
-def test_default_cli_exposes_six_tools_and_runs_read_and_ls_without_permission(
+def test_default_cli_exposes_five_tools_and_recovers_from_unknown_ls(
     tmp_path: Path,
 ) -> None:
     service, builder, workspace_path = make_dependencies(tmp_path)
@@ -366,7 +366,6 @@ def test_default_cli_exposes_six_tools_and_runs_read_and_ls_without_permission(
         "ask",
         "bash",
         "edit",
-        "ls",
         "read",
         "write",
     )
@@ -376,14 +375,15 @@ def test_default_cli_exposes_six_tools_and_runs_read_and_ls_without_permission(
             "ask",
             "bash",
             "edit",
-            "ls",
             "read",
             "write",
         )
     assert provider.requests[1].messages[-1].role is MessageRole.TOOL
     assert '"status":"success"' in provider.requests[1].messages[-1].content
     assert provider.requests[2].messages[-1].role is MessageRole.TOOL
-    assert '"status":"success"' in provider.requests[2].messages[-1].content
+    assert '"status":"unknown_tool"' in provider.requests[2].messages[-1].content
+    assert "tool is not available" in provider.requests[2].messages[-1].content
+    assert "safe contents" not in provider.requests[2].messages[-1].content
     assert out.text == "inspection complete\n"
     assert "permission required" not in err.text.lower()
 

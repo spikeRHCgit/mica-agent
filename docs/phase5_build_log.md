@@ -270,3 +270,43 @@ default 模式询问并授权后创建预期临时文件、返回最终回答并
 验收证据至此齐全。剩余风险包括其他 OpenAI-compatible 服务对 tools 的实际支持差异、POSIX
 Bash 未做当前原机验证，以及工具副作用不自动回滚。本任务未实现 Textual TUI、配置文件、
 斜杠命令、扩展系统、npm 启动器或正式发布。
+
+# P5-10 内置工具收口
+
+## 目标与产品边界
+
+为避免 `read` 与目录工具职责混杂，并把命令执行统一留在既有权限边界内，Mica 删除独立内置
+`ls`。文件工具注册现在只提供 `read`、`write`、`edit`；完整运行时按名称确定排序后向 Provider
+暴露 `ask`、`bash`、`edit`、`read`、`write` 五个 ToolSpec。目录查看改走现有 `bash`，不做
+自动命令转换，也不让 `read` 承担目录列举。
+
+删除范围包括 `ls` 的 ToolSpec、handler、参数与目录项辅助逻辑、列表条目和输出限制常量，
+以及 ToolExecutor 的内置名称映射。顶层公共 API 同步移除 `MAX_LIST_ENTRIES` 与
+`MAX_LIST_OUTPUT_BYTES`，不保留兼容别名或隐藏入口。Policy 删除 `PolicyOperation.LIST` 和三种
+模式下的 LIST 决策；`READ`、`WRITE`、`EDIT`、`COMMAND`、`ASK`、
+`SAFE_READ_ONLY_COMMAND`、`OTHER` 保持。`SAFE_READ_ONLY_COMMAND` 仍是未启用扩展点，所有
+`bash` 调用继续归为 `COMMAND`，在 default、accept-edits、solo 三种模式下均询问。
+
+## 测试与验证
+
+按 TDD 先把文件工具注册公共断言改为三个 ToolSpec，旧实现明确因仍包含 `ls` 而失败，再做最小
+产品修改。回归覆盖三个文件 ToolSpec 的有效性、无文件访问注册、任一重名下的原子失败，原有
+read/write/edit 路径、敏感文件、UTF-8 大小、原子写入和取消边界；同时覆盖 LIST 枚举消失、
+权限矩阵保持、顶层列表常量消失，以及未注册 `ls` 的安全未知工具结果。CLI 集成证明每个模型
+步骤都取得相同五工具快照，模型虚构 `ls` 后收到 `unknown_tool` 并可继续完成 Run。通用 Engine
+顺序测试继续保留 `ls` 作为任意工具名，并显式注入与测试目的相符的 READ 策略，不把它重新定义
+为内置工具。
+
+指定目标组为 `134 passed`，全量为 `867 passed, 1 skipped`；Ruff 检查、Ruff 格式检查、离线
+sdist/wheel 构建和 diff 检查均通过。仓库外 wheel 测试使用 loopback 服务、临时 HOME 和受控
+后台线程，不使用真实 Key、真实 Provider 或外部网络；安装态每次 Provider 请求都精确发送
+`ask`、`bash`、`edit`、`read`、`write`，write/continue 与 Bash 闭环保持通过。最终 wheel 内的
+`file_tools.py`、`policy.py`、`tool_executor.py` 和顶层出口均为修改后源码，不含 `ls` ToolSpec、
+LIST 权限成员、列表常量或执行映射。
+
+## 剩余风险与后续边界
+
+模型仍可能虚构调用 `ls`，此时只得到安全 `unknown_tool` 结果，需要模型改用 Bash；Mica 不自动
+改写请求。目录查看因此需要用户确认命令，当前不提供免确认的只读命令分类。文件 I/O、Bash
+沙箱边界、POSIX 原机覆盖和工具副作用不回滚等既有风险不变。本任务不实现思考后端、工具展示
+快照、Bash 动态输出、结构化 ask、Textual TUI 或其他后续阶段能力。

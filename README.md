@@ -2,7 +2,7 @@
 
 Mica 是一个面向个人开发者的轻量 Agent 基座。
 
-> 当前状态：基础文字 CLI、六个工作区工具、权限确认、交互式 ask、持久化会话和仓库收口已完成。`mica cli` 可以连接 OpenAI-compatible 服务，按当前工作区创建、恢复和继续会话；第五阶段工具与权限闭环已交付，最终 TUI 仍未实现。
+> 当前状态：基础文字 CLI、五个内置工具、权限确认、交互式 ask、持久化会话和仓库收口已完成。`mica cli` 可以连接 OpenAI-compatible 服务，按当前工作区创建、恢复和继续会话；第五阶段工具与权限闭环已交付，最终 TUI 仍未实现。
 
 ## 当前可用能力
 
@@ -35,8 +35,8 @@ Mica 是一个面向个人开发者的轻量 Agent 基座。
   ```
 
 - 支持 OpenAI-compatible Chat Completions 的流式输出（SSE），文本增量实时写出。
-- 基础 CLI 已装配六个工具：`read`、`ls`、`write`、`edit`、`bash` 和 `ask`。`read`/`ls` 查看工作区，`write`/`edit` 修改工作区，`bash` 在工作区运行受限 Bash 命令，`ask` 在当前 Run 中暂停并询问用户。
-- 可用权限模式：`--permission-mode default`（修改和 Bash 通常询问）、`--permission-mode accept-edits`（自动允许 `write`/`edit`，Bash 仍询问）和 `--permission-mode solo`（自动允许文件工具，Bash 仍询问）。工作区越界、敏感路径和工具硬性边界始终拒绝。
+- 基础 CLI 已装配五个工具：`read`、`write`、`edit`、`bash` 和 `ask`。Mica 不再提供独立 `ls`；目录查看通过需要权限确认的 `bash` 完成。`read` 读取工作区文件，`write`/`edit` 修改工作区，`ask` 在当前 Run 中暂停并询问用户。
+- 可用权限模式：`--permission-mode default`（修改和 Bash 询问）、`--permission-mode accept-edits`（自动允许 `write`/`edit`，Bash 仍询问）和 `--permission-mode solo`（自动允许文件工具，Bash 仍询问）。当前三种模式下所有 Bash 调用都需要确认；工作区越界、敏感路径和工具硬性边界始终拒绝。
 - `write`、`edit` 和 `bash` 可能需要输入 ASCII `y`/`yes` 确认；`n`/`no` 或空回答拒绝本次调用，其他输入会提示后重新询问。`ask` 的回答可以为空，并只作为当前工具结果返回模型。
 - 持久化多轮历史：完整成功的轮次写入当前工作区的 JSONL 会话，后续请求携带完整前文和工具历史。
 - 默认 `mica cli` 创建当前工作区的新会话；`mica cli --continue` 恢复该工作区最后活跃的健康会话；`mica cli --resume` 展示并选择该工作区的健康会话。
@@ -49,7 +49,7 @@ Mica 是一个面向个人开发者的轻量 Agent 基座。
 `~/.mica/sessions/<workspace-slug>-<path-hash>/`。工作区移动后视为新的工作区；自动化使用的
 数据根目录可以注入，不会依赖真实用户目录。
 
-工具遵守工作区路径边界、敏感文件拒绝、UTF-8 文件大小和目录输出限制；`edit` 要求旧文本
+文件工具遵守工作区路径边界、敏感文件拒绝和 UTF-8 文件大小限制；`edit` 要求旧文本
 唯一匹配；Bash 具有清理后的环境、超时、输出限制和取消后的进程树回收，当前优先支持
 Windows Git Bash。
 

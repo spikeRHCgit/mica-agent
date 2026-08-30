@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -108,6 +110,33 @@ def test_known_tool_validates_and_executes_once_when_allowed() -> None:
     assert calls == 1
 
 
+def test_registered_ls_has_no_builtin_list_privilege() -> None:
+    operations: list[PolicyOperation] = []
+
+    def observe(policy_input: PolicyInput) -> bool:
+        operations.append(policy_input.operation)
+        return True
+
+    async def handler(
+        request: ToolRequest, cancellation: CancellationToken
+    ) -> ToolResult:
+        return ToolResult(
+            request.call_id, request.name, ToolResultStatus.SUCCESS, "custom tool ran"
+        )
+
+    registry = ToolRegistry()
+    registry.register(_spec("ls"), handler)
+    executor = ToolExecutor(
+        registry,
+        PolicyEngine(PermissionMode.DEFAULT, allow_rules=[observe]),
+    )
+
+    result = asyncio.run(executor.execute(_request("ls"), CancellationToken()))
+
+    assert result.status is ToolResultStatus.SUCCESS
+    assert operations == [PolicyOperation.OTHER]
+
+
 def test_unknown_tool_returns_unknown_tool_without_handler_call() -> None:
     registry = ToolRegistry()
     calls = 0
@@ -129,6 +158,33 @@ def test_unknown_tool_returns_unknown_tool_without_handler_call() -> None:
     assert result.status is ToolResultStatus.UNKNOWN_TOOL
     assert calls == 0
     assert result.message == "tool is not available"
+
+
+def test_unregistered_ls_fails_safely_without_filesystem_or_command_execution(
+    monkeypatch,
+) -> None:
+    def forbidden(*args, **kwargs):
+        raise AssertionError("unknown ls must not perform side effects")
+
+    monkeypatch.setattr(Path, "open", forbidden)
+    monkeypatch.setattr(Path, "iterdir", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
+    executor = ToolExecutor(ToolRegistry(), PolicyEngine(PermissionMode.DEFAULT))
+    secret = "credential-like-argument"
+
+    result = asyncio.run(
+        executor.execute(
+            ToolRequest("unknown-ls", "ls", {"path": secret}), CancellationToken()
+        )
+    )
+
+    assert result.status is ToolResultStatus.UNKNOWN_TOOL
+    assert result.tool_name == "ls"
+    assert result.message == "tool is not available"
+    assert result.data is None
+    assert secret not in result.message
+    assert "Traceback" not in result.message
 
 
 def test_invalid_arguments_return_invalid_arguments_without_handler_call() -> None:

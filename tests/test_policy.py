@@ -14,7 +14,6 @@ from mica_agent.policy import PolicyEngine, PolicyInput, PolicyOperation
     ("operation", "wire_value"),
     [
         (PolicyOperation.READ, "read"),
-        (PolicyOperation.LIST, "list"),
         (PolicyOperation.WRITE, "write"),
         (PolicyOperation.EDIT, "edit"),
         (PolicyOperation.SAFE_READ_ONLY_COMMAND, "safe_read_only_command"),
@@ -27,6 +26,10 @@ def test_policy_operation_wire_values(
     operation: PolicyOperation, wire_value: str
 ) -> None:
     assert operation.value == wire_value
+
+
+def test_policy_operation_has_no_list_member() -> None:
+    assert not hasattr(PolicyOperation, "LIST")
 
 
 def test_policy_input_is_immutable_and_strictly_typed() -> None:
@@ -55,7 +58,6 @@ def test_policy_input_is_immutable_and_strictly_typed() -> None:
     ("mode", "operation", "expected"),
     [
         (PermissionMode.DEFAULT, PolicyOperation.READ, PolicyDecision.ALLOW),
-        (PermissionMode.DEFAULT, PolicyOperation.LIST, PolicyDecision.ALLOW),
         (PermissionMode.DEFAULT, PolicyOperation.WRITE, PolicyDecision.ASK),
         (PermissionMode.DEFAULT, PolicyOperation.EDIT, PolicyDecision.ASK),
         (
@@ -67,7 +69,6 @@ def test_policy_input_is_immutable_and_strictly_typed() -> None:
         (PermissionMode.DEFAULT, PolicyOperation.ASK, PolicyDecision.ALLOW),
         (PermissionMode.DEFAULT, PolicyOperation.OTHER, PolicyDecision.ASK),
         (PermissionMode.ACCEPT_EDITS, PolicyOperation.READ, PolicyDecision.ALLOW),
-        (PermissionMode.ACCEPT_EDITS, PolicyOperation.LIST, PolicyDecision.ALLOW),
         (PermissionMode.ACCEPT_EDITS, PolicyOperation.WRITE, PolicyDecision.ALLOW),
         (PermissionMode.ACCEPT_EDITS, PolicyOperation.EDIT, PolicyDecision.ALLOW),
         (
@@ -79,7 +80,6 @@ def test_policy_input_is_immutable_and_strictly_typed() -> None:
         (PermissionMode.ACCEPT_EDITS, PolicyOperation.ASK, PolicyDecision.ALLOW),
         (PermissionMode.ACCEPT_EDITS, PolicyOperation.OTHER, PolicyDecision.ASK),
         (PermissionMode.SOLO, PolicyOperation.READ, PolicyDecision.ALLOW),
-        (PermissionMode.SOLO, PolicyOperation.LIST, PolicyDecision.ALLOW),
         (PermissionMode.SOLO, PolicyOperation.WRITE, PolicyDecision.ALLOW),
         (PermissionMode.SOLO, PolicyOperation.EDIT, PolicyDecision.ALLOW),
         (

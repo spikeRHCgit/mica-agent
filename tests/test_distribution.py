@@ -437,6 +437,7 @@ def test_wheel_contains_only_mica_package_and_metadata(
 ) -> None:
     with zipfile.ZipFile(built_distribution.wheel) as wheel:
         members = set(wheel.namelist())
+        file_tools_source = wheel.read("mica_agent/file_tools.py").decode("utf-8")
 
     assert members
     assert {member.split("/", maxsplit=1)[0] for member in members} == {
@@ -444,6 +445,9 @@ def test_wheel_contains_only_mica_package_and_metadata(
         f"mica_agent-{VERSION}.dist-info",
     }
     assert "mica_agent/prompts/system.md" in members
+    assert 'name="ls"' not in file_tools_source
+    assert "MAX_LIST_ENTRIES" not in file_tools_source
+    assert "MAX_LIST_OUTPUT_BYTES" not in file_tools_source
 
 
 def test_sdist_contains_only_mica_source_package(
@@ -875,6 +879,11 @@ def test_installed_wheel_runs_bash_with_git_bash_in_unicode_workspace(
     )
     assert snapshot_files(workspace) == before
     assert len(server.requests) == 2
+    assert all(
+        tuple(tool["function"]["name"] for tool in request["tools"])
+        == ("ask", "bash", "edit", "read", "write")
+        for request in server.requests
+    )
     tool_result = server.requests[1]["messages"][-1]["content"]
     assert "git-bash-out" in tool_result
     assert "git-bash-err" in tool_result
@@ -955,6 +964,11 @@ def test_installed_wheel_write_and_continue_restore_complete_tool_history(
     assert not (workspace / ".mica").exists()
 
     assert len(server.requests) == 3
+    assert all(
+        tuple(tool["function"]["name"] for tool in request["tools"])
+        == ("ask", "bash", "edit", "read", "write")
+        for request in server.requests
+    )
     assert [message["role"] for message in server.requests[2]["messages"]] == [
         "system",
         "user",

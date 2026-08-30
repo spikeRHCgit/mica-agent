@@ -324,7 +324,13 @@ def test_engine_executes_multiple_tool_calls_in_model_order() -> None:
     )
     engine = AgentEngine(
         provider,
-        tool_executor=ToolExecutor(registry, PolicyEngine(PermissionMode.DEFAULT)),
+        tool_executor=ToolExecutor(
+            registry,
+            PolicyEngine(PermissionMode.DEFAULT),
+            policy_input_factory=lambda request, spec: PolicyInput(
+                request.name, PolicyOperation.READ, False, False
+            ),
+        ),
         run_id_factory=lambda: "run-order",
     )
 

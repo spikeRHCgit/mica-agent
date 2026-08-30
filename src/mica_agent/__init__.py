@@ -96,8 +96,6 @@ __all__ = [
     "MAX_AGENTS_FILE_BYTES",
     "MAX_COMMAND_OUTPUT_BYTES",
     "MAX_FILE_BYTES",
-    "MAX_LIST_ENTRIES",
-    "MAX_LIST_OUTPUT_BYTES",
     "AgentEngine",
     "AgentFileSource",
     "CancellationRequested",
@@ -231,8 +229,6 @@ def __getattr__(name: str) -> object:
         return getattr(workspace_paths, name)
     file_tool_exports = {
         "MAX_FILE_BYTES",
-        "MAX_LIST_ENTRIES",
-        "MAX_LIST_OUTPUT_BYTES",
         "register_file_tools",
     }
     if name in file_tool_exports:

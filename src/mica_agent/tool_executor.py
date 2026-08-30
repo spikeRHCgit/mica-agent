@@ -19,7 +19,6 @@ LifecycleCallback: TypeAlias = Callable[[ToolRequest | ToolResult], None]
 
 _OPERATION_BY_NAME = {
     "read": PolicyOperation.READ,
-    "ls": PolicyOperation.LIST,
     "write": PolicyOperation.WRITE,
     "edit": PolicyOperation.EDIT,
     "bash": PolicyOperation.COMMAND,

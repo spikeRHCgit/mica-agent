@@ -307,11 +307,7 @@ def test_top_level_exports_p5_02_contracts() -> None:
 
 
 def test_top_level_exports_p5_03_contracts() -> None:
-    from mica_agent.file_tools import (
-        MAX_FILE_BYTES,
-        MAX_LIST_ENTRIES,
-        MAX_LIST_OUTPUT_BYTES,
-    )
+    from mica_agent.file_tools import MAX_FILE_BYTES
     from mica_agent.file_tools import (
         register_file_tools as register_file_tools_function,
     )
@@ -321,9 +317,11 @@ def test_top_level_exports_p5_03_contracts() -> None:
     )
 
     assert mica_agent.MAX_FILE_BYTES == MAX_FILE_BYTES
-    assert mica_agent.MAX_LIST_ENTRIES == MAX_LIST_ENTRIES
-    assert mica_agent.MAX_LIST_OUTPUT_BYTES == MAX_LIST_OUTPUT_BYTES
     assert mica_agent.register_file_tools is register_file_tools_function
+    assert not hasattr(mica_agent, "MAX_LIST_ENTRIES")
+    assert not hasattr(mica_agent, "MAX_LIST_OUTPUT_BYTES")
+    assert "MAX_LIST_ENTRIES" not in mica_agent.__all__
+    assert "MAX_LIST_OUTPUT_BYTES" not in mica_agent.__all__
     assert mica_agent.WorkspacePathError is WorkspacePathErrorClass
     assert mica_agent.WorkspacePathResolver is WorkspacePathResolverClass
 
