@@ -82,6 +82,8 @@ uv build --offline
 - `tests/`：CLI 契约、Provider/Engine/App 测试与分发隔离验证。
 - `pyproject.toml`：分发元数据、入口与开发依赖。
 - `PROJECT_PLAN.md`：Mica 的正式项目方向和长期架构边界。
+- `docs/module_map.md`：按单个源码文件说明职责的技术地图，用于快速定位修改入口。
+- `docs/tui_design.md`：已经确认的 Textual TUI 交互、视觉和动态呈现规则。
 - `docs/phase1_plan.md`：第一阶段的范围、验收标准和未包含内容。
 - `docs/phase2_plan.md`：第二阶段（Engine、Provider、App、CLI 闭环）的范围与验收标准。
 - `docs/phase3_plan.md`：第三阶段（工作区隔离、JSONL 会话、恢复与上下文）的范围与验收标准。
