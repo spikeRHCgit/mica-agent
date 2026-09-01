@@ -535,5 +535,26 @@ TDD 先在旧实现上观察到真实 RED：新增自由文本错误序号测试
 True 并完成等待；实现后交互与 Engine 目标组为 `136 passed`（含 `-W error`），兼容组为
 `173 passed`（含 `-W error`），分发测试为 `15 passed`，全量测试为 `1082 passed, 2 skipped`。
 Ruff、格式检查、`uv build --offline`、`git diff --check` 与 `git diff --cached --check` 均通过，
-验收未出现异步或资源清理告警。P5-14C2、Provider ToolSpec、基础 CLI 结构化选择、安装态结构化
-ask、会话闭环以及 Textual TUI 尚未开始。
+验收未出现异步或资源清理告警。
+
+P5-14C2 在既有 ask 工具上扩展 Provider 可见的结构化 ToolSpec。顶层仍为 object，`question`
+为必填非空字符串；可选 `title` 为非空字符串，`options` 为二至四个 option object（必填非空
+`label`，`description` 为非空字符串，`recommended` 为严格 bool），并支持严格 bool
+`allow_custom`；顶层和 option object 均拒绝额外字段。runtime 先通过 Draft 2020-12 参数校验，
+再构造不可变 `AskPrompt`/`AskOption`，保留 Unicode 与空白，并在非法参数或多推荐项时安全失败
+且不调用 requester；Provider 不接触 Prompt 私有对象。
+
+基础文本 CLI 保留无 options ask 的旧单行自由文本路径；有 options 时仅向 stderr 输出标题（若有）、
+问题、编号选项、可选描述和 `(recommended)` 标记，`allow_custom` 才显示虚拟 `Type something.`
+项。输入先去除首尾空白，只接受 ASCII 十进制编号；非法选择输出固定诊断并重复 `selection:`，
+不重复菜单。选择真实选项提交 zero-based index 与规范化 label，custom 项再输出 `answer:` 并接受
+包括空字符串在内的任意文本。EOF、Ctrl+C、取消和消费者关闭继续复用既有 aclosing/Broker 清理边界。
+
+安装态 wheel 与 loopback SSE 已验证 Provider 的精确 ask schema、结构化菜单、三字段 TOOL Result、
+下一轮模型上下文、v3 JSONL 和 `--continue` 恢复。测试还确认结构化 ask 不在仓库外工作区产生文件，
+会话只写入隔离临时 HOME，CLI stdout/stderr 与 JSONL 不含假 key、工作区绝对路径或 traceback，且
+第二次 `--continue` 不重新执行第一轮 ask；最终保持一个健康会话和两个完整 TurnEntry。新增
+P5-14 集成测试验证注入 Provider 下的同一会话两轮闭环。返工后目标测试为 `120 passed`（含
+`-W error`），兼容组为 `273 passed`（含 `-W error`），安装态分发测试为 `16 passed`，全量测试为
+`1105 passed, 2 skipped`；Ruff、格式检查、`uv build --offline` 和 diff 检查均通过。Textual TUI、
+会话格式新字段和其他工具扩展均不在 C2 范围内。

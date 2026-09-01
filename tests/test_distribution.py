@@ -926,6 +926,154 @@ def test_installed_cli_missing_environment_variables_exit_two(
     assert results[0].stderr == results[1].stderr  # 两入口诊断一致
 
 
+def test_installed_wheel_structured_ask_and_continue_restore_tool_history(
+    full_distribution: InstalledDistribution,
+) -> None:
+    dist = full_distribution
+    workspace = dist.outside_repository / "结构化 ask 工作区"
+    workspace.mkdir()
+    before_workspace = snapshot_files(workspace)
+    data_root = dist.home / ".mica"
+    workspace_identity = resolve_workspace(workspace)
+    service = SessionService(JsonlSessionStore(workspace_identity, data_root))
+    environment = cli_environment(dist.home, fake_credentials=True)
+    environment.update(MICA_API_KEY="sk-ask-loopback-key", MICA_MODEL="ask-model")
+    arguments = {
+        "question": "Choose encoding?",
+        "title": "File settings",
+        "options": [
+            {"label": "UTF-8", "description": "Recommended", "recommended": True},
+            {"label": "Latin-1", "description": "Legacy"},
+        ],
+        "allow_custom": False,
+    }
+
+    with LoopbackToolSSEServer(
+        tool_name="ask",
+        arguments=arguments,
+        response_texts=("ask answer", "continued answer"),
+    ) as server:
+        environment["MICA_API_URL"] = server.base_url
+        first = run_command(
+            [dist.mica, "cli"],
+            cwd=workspace,
+            environment=environment,
+            input_text="start\n2\n",
+        )
+        second = run_command(
+            [dist.mica, "cli", "--continue"],
+            cwd=workspace,
+            environment=environment,
+            input_text="continue\n",
+        )
+
+    assert first.returncode == 0, first.stderr
+    assert first.stdout == "ask answer\n"
+    assert "sk-ask-loopback-key" not in first.stdout
+    assert "sk-ask-loopback-key" not in first.stderr
+    assert str(workspace) not in first.stdout
+    assert str(workspace) not in first.stderr
+    assert "Traceback" not in first.stdout + first.stderr
+    assert first.stderr == (
+        "tool ask: started\n"
+        "[File settings]\n"
+        "Choose encoding?\n"
+        "1. UTF-8 (recommended)\n"
+        "   Recommended\n"
+        "2. Latin-1\n"
+        "   Legacy\n"
+        "selection: tool ask: success\n"
+    )
+    assert second.returncode == 0, second.stderr
+    assert second.stdout == "continued answer\n"
+    assert second.stderr == ""
+    assert "sk-ask-loopback-key" not in second.stdout
+    assert "sk-ask-loopback-key" not in second.stderr
+    assert str(workspace) not in second.stdout
+    assert str(workspace) not in second.stderr
+    assert "Traceback" not in second.stdout + second.stderr
+    assert snapshot_files(workspace) == before_workspace
+    assert not (workspace / ".mica").exists()
+
+    assert len(server.requests) == 3
+    ask_schema = server.requests[0]["tools"][0]["function"]["parameters"]
+    assert ask_schema == {
+        "type": "object",
+        "properties": {
+            "question": {"type": "string", "minLength": 1},
+            "title": {"type": "string", "minLength": 1},
+            "options": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 4,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "minLength": 1},
+                        "description": {"type": "string", "minLength": 1},
+                        "recommended": {"type": "boolean"},
+                    },
+                    "required": ["label"],
+                    "additionalProperties": False,
+                },
+            },
+            "allow_custom": {"type": "boolean"},
+        },
+        "required": ["question"],
+        "additionalProperties": False,
+    }
+    assert [message["role"] for message in server.requests[1]["messages"]] == [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+    ]
+    tool_message = server.requests[1]["messages"][-1]
+    assert tool_message["tool_call_id"] == "installed-write-call"
+    assert json.loads(tool_message["content"])["data"] == {
+        "answer": "Latin-1",
+        "selected_option_index": 1,
+        "notes": None,
+    }
+    assert [message["role"] for message in server.requests[2]["messages"]] == [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+        "user",
+    ]
+    assert server.requests[2]["messages"][-1]["content"] == "continue"
+    assert not any(
+        message["role"] == "assistant" and "tool_calls" in message
+        for message in server.requests[2]["messages"][4:]
+    )
+
+    listed = service.list_sessions()
+    assert listed.problems == ()
+    assert len(listed.sessions) == 1
+    assert len(listed.sessions[0].turns) == 2
+    assert all(turn.context_messages for turn in listed.sessions[0].turns)
+    assert service.store.session_directory.is_relative_to(data_root / "sessions")
+    assert service.store.session_directory.is_relative_to(
+        dist.home / ".mica" / "sessions"
+    )
+    raw = next(service.store.session_directory.glob("*.jsonl")).read_text(
+        encoding="utf-8"
+    )
+    assert '"format_version":3' in raw
+    first_turn = listed.sessions[0].turns[0]
+    stored_tool = first_turn.context_messages[2]
+    assert json.loads(stored_tool.content)["data"] == {
+        "answer": "Latin-1",
+        "selected_option_index": 1,
+        "notes": None,
+    }
+    assert "Latin-1" in raw
+    assert "sk-ask-loopback-key" not in raw
+    assert server._thread.is_alive() is False
+
+
 def test_installed_wheel_write_and_continue_restore_complete_tool_history(
     full_distribution: InstalledDistribution,
 ) -> None:

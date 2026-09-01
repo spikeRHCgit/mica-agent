@@ -11,6 +11,7 @@ Ctrl+C（空闲/活动 Run）以及所有退出路径的事件流与 App 关闭�
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -37,6 +38,7 @@ from mica_agent.providers import (
 )
 from mica_agent.reasoning import ReasoningEffort
 from mica_agent.session_service import SessionService
+from mica_agent.tool_contracts import ToolCall
 from mica_agent.workspace import resolve_workspace
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -265,6 +267,178 @@ def test_import_cli_is_side_effect_free() -> None:
 # ---------------------------------------------------------------------------
 # 交互行为（进程内，注入替身）
 # ---------------------------------------------------------------------------
+
+
+def test_structured_ask_menu_selects_option_without_user_message() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                Finish(
+                    tool_calls=(
+                        ToolCall(
+                            "ask-structured",
+                            "ask",
+                            {
+                                "question": "Choose encoding?",
+                                "title": "File settings",
+                                "options": [
+                                    {
+                                        "label": "UTF-8",
+                                        "description": "Best for files",
+                                        "recommended": True,
+                                    },
+                                    {"label": "Latin-1", "description": "Legacy"},
+                                ],
+                                "allow_custom": False,
+                            },
+                        ),
+                    )
+                )
+            ],
+            [ProviderTextDelta(text="selected"), Finish()],
+        ]
+    )
+
+    code, out, err = asyncio.run(run_core(provider, "question", "2"))
+
+    assert code == 0
+    assert out.text == "selected\n"
+    assert err.text == (
+        "tool ask: started\n"
+        "[File settings]\n"
+        "Choose encoding?\n"
+        "1. UTF-8 (recommended)\n"
+        "   Best for files\n"
+        "2. Latin-1\n"
+        "   Legacy\n"
+        "selection: tool ask: success\n"
+    )
+    assert len(provider.requests) == 2
+    assert [message.role for message in provider.requests[1].messages] == [
+        MessageRole.SYSTEM,
+        MessageRole.USER,
+        MessageRole.ASSISTANT,
+        MessageRole.TOOL,
+    ]
+    tool_result = json.loads(provider.requests[1].messages[-1].content)
+    assert tool_result["data"] == {
+        "answer": "Latin-1",
+        "selected_option_index": 1,
+        "notes": None,
+    }
+    assert provider.requests[1].messages[-1].tool_call_id == "ask-structured"
+
+
+def test_structured_ask_retries_invalid_selection_and_accepts_custom_empty_answer() -> (
+    None
+):
+    provider = ScriptedProvider(
+        [
+            [
+                Finish(
+                    tool_calls=(
+                        ToolCall(
+                            "ask-custom",
+                            "ask",
+                            {
+                                "question": "Choose a value",
+                                "options": [{"label": "A"}, {"label": "B"}],
+                                "allow_custom": True,
+                            },
+                        ),
+                    )
+                )
+            ],
+            [ProviderTextDelta(text="custom done"), Finish()],
+        ]
+    )
+
+    code, out, err = asyncio.run(run_core(provider, "question", "bad", "3", ""))
+
+    assert code == 0
+    assert out.text == "custom done\n"
+    assert err.text == (
+        "tool ask: started\n"
+        "Choose a value\n"
+        "1. A\n"
+        "2. B\n"
+        "3. Type something.\n"
+        "selection: mica: invalid ask selection; enter a listed number\n"
+        "selection: answer: tool ask: success\n"
+    )
+    result = json.loads(provider.requests[1].messages[-1].content)
+    assert result["data"] == {
+        "answer": "",
+        "selected_option_index": None,
+        "notes": None,
+    }
+
+
+def test_free_text_ask_keeps_legacy_single_line_behavior() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                Finish(
+                    tool_calls=(ToolCall("ask-free", "ask", {"question": "Anything?"}),)
+                )
+            ],
+            [ProviderTextDelta(text="free done"), Finish()],
+        ]
+    )
+
+    code, out, err = asyncio.run(run_core(provider, "question", "free text"))
+
+    assert code == 0
+    assert out.text == "free done\n"
+    assert err.text == "tool ask: started\nAnything?\ntool ask: success\n"
+    result = json.loads(provider.requests[1].messages[-1].content)
+    assert result["data"] == {
+        "answer": "free text",
+        "selected_option_index": None,
+        "notes": None,
+    }
+
+
+@pytest.mark.parametrize("invalid_selection", ["²", "１", "١", "+1", "1.0", ""])
+def test_structured_ask_rejects_non_ascii_decimal_then_accepts_ascii_number(
+    invalid_selection: str,
+) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                Finish(
+                    tool_calls=(
+                        ToolCall(
+                            "ask-invalid-selection",
+                            "ask",
+                            {
+                                "question": "Choose",
+                                "options": [{"label": "First"}, {"label": "Second"}],
+                            },
+                        ),
+                    )
+                )
+            ],
+            [ProviderTextDelta(text="chosen"), Finish()],
+        ]
+    )
+
+    code, out, err = asyncio.run(run_core(provider, "question", invalid_selection, "1"))
+
+    assert code == 0
+    assert out.text == "chosen\n"
+    assert err.text.count("1. First\n") == 1
+    assert err.text.count("2. Second\n") == 1
+    assert err.text.count("Choose\n") == 1
+    assert err.text.count("mica: invalid ask selection; enter a listed number\n") == 1
+    assert err.text.endswith("selection: tool ask: success\n")
+    assert len(provider.requests) == 2
+    assert [message.role for message in provider.requests[1].messages].count(
+        MessageRole.USER
+    ) == 1
+    result = json.loads(provider.requests[1].messages[-1].content)
+    assert result["data"]["answer"] == "First"
+    assert result["data"]["selected_option_index"] == 0
 
 
 def test_multi_turn_reuses_single_app_and_carries_context() -> None:

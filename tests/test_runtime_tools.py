@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from mica_agent.cancellation import CancellationToken
-from mica_agent.interactions import AskPrompt, UserInputResponse
+from mica_agent.interactions import AskOption, AskPrompt, UserInputResponse
 from mica_agent.runtime_tools import (
     DEFAULT_COMMAND_TIMEOUT_SECONDS,
     MAX_COMMAND_OUTPUT_BYTES,
@@ -56,6 +56,158 @@ def test_ask_returns_matching_user_response(tmp_path: Path) -> None:
         "selected_option_index": 0,
         "notes": "kept",
     }
+
+
+def test_ask_builds_structured_prompt_without_rewriting_input(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ToolRegistry()
+    source_options: list[dict[str, object]] = [
+        {
+            "label": " UTF-8 ",
+            "description": "跨平台 文件",
+            "recommended": True,
+        },
+        {"label": "原样 保留"},
+    ]
+    arguments = {
+        "question": "选择 编码？",
+        "title": " 文件设置 ",
+        "options": source_options,
+        "allow_custom": True,
+    }
+    request = ToolRequest("ask-structured", "ask", arguments)
+
+    async def requester(
+        interaction_id: str, prompt: AskPrompt, cancellation: CancellationToken
+    ) -> UserInputResponse:
+        assert prompt == AskPrompt(
+            question="选择 编码？",
+            title=" 文件设置 ",
+            options=(
+                AskOption(" UTF-8 ", "跨平台 文件", True),
+                AskOption("原样 保留", None, False),
+            ),
+            allow_custom=True,
+        )
+        assert isinstance(prompt.options, tuple)
+        source_options[0]["label"] = "mutated"
+        source_options.append({"label": "late"})
+        assert prompt.options[0].label == " UTF-8 "
+        return UserInputResponse(interaction_id, "原样 保留", 1, "备注")
+
+    register_runtime_tools(registry, resolve_workspace(workspace), requester)
+    result = asyncio.run(registry.resolve("ask").handler(request, CancellationToken()))
+
+    assert result.status is ToolResultStatus.SUCCESS
+    assert result.data == {
+        "answer": "原样 保留",
+        "selected_option_index": 1,
+        "notes": "备注",
+    }
+
+
+def test_ask_structured_fields_use_contract_defaults(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ToolRegistry()
+
+    async def requester(
+        interaction_id: str, prompt: AskPrompt, cancellation: CancellationToken
+    ) -> UserInputResponse:
+        assert prompt == AskPrompt(
+            "Choose",
+            options=(AskOption("First"), AskOption("Second")),
+        )
+        return UserInputResponse(interaction_id, "First", 0)
+
+    register_runtime_tools(registry, resolve_workspace(workspace), requester)
+    result = asyncio.run(
+        registry.resolve("ask").handler(
+            ToolRequest(
+                "ask-defaults",
+                "ask",
+                {
+                    "question": "Choose",
+                    "options": [{"label": "First"}, {"label": "Second"}],
+                },
+            ),
+            CancellationToken(),
+        )
+    )
+
+    assert result.status is ToolResultStatus.SUCCESS
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {
+            "question": "Choose",
+            "options": [
+                {"label": "First", "description": ""},
+                {"label": "Second"},
+            ],
+        },
+        {
+            "question": "Choose",
+            "options": [
+                {"label": "First", "description": "   "},
+                {"label": "Second"},
+            ],
+        },
+        {"question": "Choose", "options": []},
+        {"question": "Choose", "options": [{"label": "Only"}]},
+        {
+            "question": "Choose",
+            "options": [{"label": str(index)} for index in range(5)],
+        },
+        {
+            "question": "Choose",
+            "options": [
+                {"label": "First", "recommended": True},
+                {"label": "Second", "recommended": True},
+            ],
+        },
+        {"question": "Choose", "allow_custom": "true"},
+        {
+            "question": "Choose",
+            "options": [{"label": "First"}, {"label": "Second", "extra": True}],
+        },
+        {"question": "Choose", "title": 1},
+        {"question": "Choose", "options": ["First", "Second"]},
+    ],
+)
+def test_ask_rejects_invalid_structured_arguments_without_requesting_input(
+    tmp_path: Path, arguments: dict[str, object]
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ToolRegistry()
+    calls = 0
+
+    async def requester(
+        interaction_id: str, prompt: AskPrompt, cancellation: CancellationToken
+    ) -> UserInputResponse:
+        nonlocal calls
+        calls += 1
+        return UserInputResponse(interaction_id, "unexpected")
+
+    register_runtime_tools(registry, resolve_workspace(workspace), requester)
+    result = asyncio.run(
+        registry.resolve("ask").handler(
+            ToolRequest("ask-invalid-structured", "ask", arguments),
+            CancellationToken(),
+        )
+    )
+
+    assert result.status is ToolResultStatus.INVALID_ARGUMENTS
+    assert result.message == "invalid question"
+    assert result.data is None
+    assert calls == 0
+    rendered = repr(result)
+    for sentinel in ("Choose", "First", "Second", "true", "extra"):
+        assert sentinel not in rendered
 
 
 def test_ask_cancellation_cancels_waiting_requester(tmp_path: Path) -> None:
@@ -1066,7 +1218,26 @@ def test_register_runtime_tools_exposes_valid_bash_and_ask_specs(
         validate_tool_schema(spec)
     assert specs[0].input_schema == {
         "type": "object",
-        "properties": {"question": {"type": "string", "minLength": 1}},
+        "properties": {
+            "question": {"type": "string", "minLength": 1},
+            "title": {"type": "string", "minLength": 1},
+            "options": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 4,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "minLength": 1},
+                        "description": {"type": "string", "minLength": 1},
+                        "recommended": {"type": "boolean"},
+                    },
+                    "required": ("label",),
+                    "additionalProperties": False,
+                },
+            },
+            "allow_custom": {"type": "boolean"},
+        },
         "required": ("question",),
         "additionalProperties": False,
     }

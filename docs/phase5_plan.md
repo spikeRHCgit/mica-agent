@@ -294,12 +294,13 @@ stderr 实时显示输出，正式模型回复仍只进入 stdout；动态事件
 
 ### P5-14：结构化 ask
 
-状态：进行中；P5-14A、P5-14B、P5-14C1 已完成并通过 master 验收。
+状态：已完成并通过 master 验收。
 
 已建立 `AskOption`、`AskPrompt` 和扩展后的 `UserInputResponse` 公共契约，并打通 runtime ask、
 InteractionBroker、Engine 与 `UserInputRequested` 的结构化 Prompt 传递，并在 Broker 响应
-边界校验选项序号、自定义回答权限和 Prompt 一致性。后续切片负责 Provider ToolSpec、基础 CLI
-选择交互和安装态闭环；Textual TUI 仍不属于本任务。
+边界校验选项序号、自定义回答权限和 Prompt 一致性。Provider ToolSpec 已支持二至四个选项、
+标题、说明、推荐项与自定义回答；基础 CLI 已提供严格 ASCII 编号选择和自由文本回退，安装态
+wheel 已验证三字段工具结果、v3 持久化与 `--continue` 恢复。Textual TUI 仍不属于本任务。
 
 ## 8. 测试与验收
 

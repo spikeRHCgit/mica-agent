@@ -496,16 +496,12 @@ async def _interact(
                             PermissionResponse(event.interaction_id, answer)
                         )
                     elif isinstance(event, UserInputRequested):
-                        write_err(f"{event.question}\n")
-                        try:
-                            answer = await read_line()
-                        except asyncio.CancelledError:
-                            raise
-                        except (EOFError, KeyboardInterrupt):
-                            return
-                        app.respond_interaction(
-                            UserInputResponse(event.interaction_id, answer)
+                        response = await _read_user_input_response(
+                            event, read_line, write_err
                         )
+                        if response is None:
+                            return
+                        app.respond_interaction(response)
                     elif isinstance(event, (RunCompleted, RunFailed, RunCancelled)):
                         flush_tool_output_line()
                         # 有非空文本且未以换行结尾时才补一个必要换行；
@@ -521,6 +517,69 @@ async def _interact(
         except asyncio.CancelledError:
             # 活动 Run 被取消：事件流已由 aclosing 清理，退出 CLI。
             return
+
+
+async def _read_user_input_response(
+    event: UserInputRequested,
+    read_line: ReadLine,
+    write_err: Write,
+) -> UserInputResponse | None:
+    prompt = event.prompt
+    if prompt is None or not prompt.options:
+        write_err(f"{event.question}\n")
+        try:
+            answer = await read_line()
+        except asyncio.CancelledError:
+            raise
+        except (EOFError, KeyboardInterrupt):
+            return None
+        return UserInputResponse(event.interaction_id, answer)
+
+    if prompt.title is not None:
+        write_err(f"[{prompt.title}]\n")
+    write_err(f"{prompt.question}\n")
+    for index, option in enumerate(prompt.options, start=1):
+        suffix = " (recommended)" if option.recommended else ""
+        write_err(f"{index}. {option.label}{suffix}\n")
+        if option.description is not None:
+            write_err(f"   {option.description}\n")
+    custom_index = len(prompt.options) + 1 if prompt.allow_custom else None
+    if custom_index is not None:
+        write_err(f"{custom_index}. Type something.\n")
+
+    while True:
+        write_err("selection: ")
+        try:
+            value = await read_line()
+        except asyncio.CancelledError:
+            raise
+        except (EOFError, KeyboardInterrupt):
+            return None
+        normalized = value.strip() if isinstance(value, str) else None
+        if normalized is not None and normalized.isascii() and normalized.isdecimal():
+            try:
+                selected = int(normalized)
+            except (TypeError, ValueError, OverflowError):
+                selected = None
+            if selected is not None and 1 <= selected <= len(prompt.options):
+                option = prompt.options[selected - 1]
+                return UserInputResponse(
+                    event.interaction_id, option.label, selected - 1
+                )
+            if (
+                selected is not None
+                and custom_index is not None
+                and selected == custom_index
+            ):
+                write_err("answer: ")
+                try:
+                    answer = await read_line()
+                except asyncio.CancelledError:
+                    raise
+                except (EOFError, KeyboardInterrupt):
+                    return None
+                return UserInputResponse(event.interaction_id, answer)
+        write_err("mica: invalid ask selection; enter a listed number\n")
 
 
 async def _read_permission_answer(

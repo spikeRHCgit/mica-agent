@@ -14,8 +14,12 @@ from pathlib import Path
 from typing import Protocol
 
 from .cancellation import CancellationRequested, CancellationToken
-from .interactions import AskPrompt, UserInputResponse
+from .interactions import AskOption, AskPrompt, UserInputResponse
 from .message_sanitizer import sanitize_presentation_text
+from .schema_validation import (
+    ToolArgumentsValidationError,
+    validate_tool_arguments,
+)
 from .tool_contracts import ToolRequest, ToolResult, ToolResultStatus, ToolSpec
 from .tool_registry import DuplicateToolError, ToolRegistry
 from .workspace import WorkspaceIdentity
@@ -68,10 +72,29 @@ _BASH_SPEC = ToolSpec(
 )
 _ASK_SPEC = ToolSpec(
     name="ask",
-    description="Request one text response from the user.",
+    description="Request text or a structured choice from the user.",
     input_schema={
         "type": "object",
-        "properties": {"question": {"type": "string", "minLength": 1}},
+        "properties": {
+            "question": {"type": "string", "minLength": 1},
+            "title": {"type": "string", "minLength": 1},
+            "options": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 4,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "minLength": 1},
+                        "description": {"type": "string", "minLength": 1},
+                        "recommended": {"type": "boolean"},
+                    },
+                    "required": ["label"],
+                    "additionalProperties": False,
+                },
+            },
+            "allow_custom": {"type": "boolean"},
+        },
         "required": ["question"],
         "additionalProperties": False,
     },
@@ -474,17 +497,28 @@ async def _ask_handler(
     try:
         cancellation.raise_if_cancelled()
         arguments = request.arguments
-        if set(arguments) != {"question"}:
-            return _result(
-                request, ToolResultStatus.INVALID_ARGUMENTS, "invalid question"
+        try:
+            validate_tool_arguments(_ASK_SPEC, arguments)
+            options = tuple(
+                AskOption(
+                    option["label"],
+                    option.get("description"),
+                    option.get("recommended", False),
+                )
+                for option in arguments.get("options", ())
             )
-        question = arguments["question"]
-        if not isinstance(question, str) or not question.strip():
+            prompt = AskPrompt(
+                question=arguments["question"],
+                title=arguments.get("title"),
+                options=options,
+                allow_custom=arguments.get("allow_custom", False),
+            )
+        except (ToolArgumentsValidationError, TypeError, ValueError):
             return _result(
                 request, ToolResultStatus.INVALID_ARGUMENTS, "invalid question"
             )
         requester_task = asyncio.ensure_future(
-            requester(request.call_id, AskPrompt(question), cancellation)
+            requester(request.call_id, prompt, cancellation)
         )
         cancellation_task = asyncio.create_task(cancellation.wait())
         try:

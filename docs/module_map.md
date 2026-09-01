@@ -28,7 +28,7 @@
 | `src/mica_agent/models.py` | 供应商无关的标准 `Message` 与角色定义，包含普通文本、工具调用和工具结果关联字段。 |
 | `src/mica_agent/permissions.py` | 权限模式和策略决定的基础枚举：`default`、`accept_edits`、`solo` 以及 `ALLOW`、`ASK`、`DENY`。 |
 | `src/mica_agent/policy.py` | 内存权限决策引擎；根据规范化操作、硬性拒绝、一次性授权、允许规则和权限模式给出策略决定。 |
-| `src/mica_agent/runtime_tools.py` | 运行时工具实现与注册入口；提供 Windows 优先的受限 `bash` 和当前自由文本 `ask`，管理环境清理、输出上限、超时、进程树与等待取消。 |
+| `src/mica_agent/runtime_tools.py` | 运行时工具实现与注册入口；提供 Windows 优先的受限 `bash`，以及自由文本或结构化选择的 `ask`，管理环境清理、输出上限、超时、进程树与等待取消。 |
 | `src/mica_agent/schema_validation.py` | 使用固定 JSON Schema Draft 2020-12 校验 ToolSpec Schema 和实际工具参数，拒绝远程引用并返回安全错误。 |
 | `src/mica_agent/session_contracts.py` | 会话公共数据和 JSON wire 契约；定义 SessionMeta、带工具展示的 v3 TurnEntry、v1/v2 严格兼容读取、消息角色顺序和格式错误边界。 |
 | `src/mica_agent/session_service.py` | 会话业务层；在 Store 之上提供创建、加载、列表、重命名、分支、回退、清空、提交、最后活跃选择和过期清理。 |
