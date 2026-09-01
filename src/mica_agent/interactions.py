@@ -234,6 +234,26 @@ class InteractionBroker:
             response, UserInputResponse
         ):
             return False
+        if isinstance(response, UserInputResponse):
+            prompt = pending.request.ask_prompt
+            if prompt is None:
+                return False
+            selected_index = response.selected_option_index
+            if not prompt.options:
+                if selected_index is not None:
+                    return False
+            elif selected_index is None:
+                if not prompt.allow_custom:
+                    return False
+            elif selected_index >= len(prompt.options):
+                return False
+            else:
+                response = UserInputResponse(
+                    response.interaction_id,
+                    prompt.options[selected_index].label,
+                    selected_index,
+                    response.notes,
+                )
         pending.future.set_result(response)
         return True
 

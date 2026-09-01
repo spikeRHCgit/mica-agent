@@ -522,5 +522,18 @@ P5-14B 目标测试为 `275 passed`（含 `-W error`），P5-08 普通回答与�
 `git diff --cached --check` 均通过。经 master 明确授权，`tests/test_p5_08_integration.py` 仅将
 参数化 ask 测试中旧的 `assert result["data"] == answer` 更新为上述三字段对象，普通回答和空回答
 均通过；该文件的 status、tool_call_id、TOOL Message、安全性及其他 P5-08 产品语义断言未修改。
-`tasks/lessons.md` 保留 master 管理的既有修改，worker 未编辑。P5-14C 的 CLI 或会话闭环以及
-Textual TUI 尚未开始。
+`tasks/lessons.md` 保留 master 管理的既有修改，worker 未编辑。
+
+P5-14C1 在 InteractionBroker 的响应边界增加结构化一致性校验。自由文本 Prompt 只接受
+`selected_option_index=None`，仍允许空 answer 与任意 notes；有选项 Prompt 拒绝越界序号，并在
+`allow_custom=False` 时拒绝无序号的自定义回答。合法选项响应以 Prompt 对应的 option label
+规范化 answer，selected index 与 notes 原样保留；`allow_custom=True` 时无序号响应保留 answer
+原文，包括空字符串。所有非法响应在完成 Future 前返回 False，不消耗当前 pending，后续合法响应仍
+可提交；权限响应、旧字符串 Prompt、取消、clear、迟到和重复响应语义保持不变。
+
+TDD 先在旧实现上观察到真实 RED：新增自由文本错误序号测试首个失败为 `respond()` 错误返回
+True 并完成等待；实现后交互与 Engine 目标组为 `136 passed`（含 `-W error`），兼容组为
+`173 passed`（含 `-W error`），分发测试为 `15 passed`，全量测试为 `1082 passed, 2 skipped`。
+Ruff、格式检查、`uv build --offline`、`git diff --check` 与 `git diff --cached --check` 均通过，
+验收未出现异步或资源清理告警。P5-14C2、Provider ToolSpec、基础 CLI 结构化选择、安装态结构化
+ask、会话闭环以及 Textual TUI 尚未开始。

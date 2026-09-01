@@ -271,6 +271,170 @@ def test_interaction_broker_never_reuses_completed_factory_id() -> None:
     asyncio.run(scenario())
 
 
+def test_interaction_broker_rejects_selection_for_free_text_until_valid_response() -> (
+    None
+):
+    async def scenario() -> None:
+        broker = InteractionBroker()
+        waiting = asyncio.create_task(
+            broker.request_user_input(
+                "call-free-text", AskPrompt("Describe it"), CancellationToken()
+            )
+        )
+        request = await asyncio.wait_for(broker.next_request(), timeout=0.1)
+        assert broker.pending_count == 1
+        assert (
+            broker.respond(
+                UserInputResponse(request.interaction_id, "ignored", 0, "note")
+            )
+            is False
+        )
+        assert broker.pending_count == 1
+        assert not waiting.done()
+        assert broker.respond(
+            UserInputResponse(request.interaction_id, "", None, "note")
+        )
+        assert await asyncio.wait_for(waiting, timeout=0.1) == UserInputResponse(
+            "call-free-text", "", None, "note"
+        )
+        assert broker.pending_count == 0
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("selected_option_index", [0, 2])
+def test_interaction_broker_accepts_first_and_last_option(
+    selected_option_index: int,
+) -> None:
+    async def scenario() -> None:
+        prompt = AskPrompt(
+            "Choose one",
+            options=(AskOption("First"), AskOption("Middle"), AskOption("Last")),
+        )
+        broker = InteractionBroker()
+        waiting = asyncio.create_task(
+            broker.request_user_input("call-options", prompt, CancellationToken())
+        )
+        request = await asyncio.wait_for(broker.next_request(), timeout=0.1)
+        assert broker.respond(
+            UserInputResponse(request.interaction_id, "stale", selected_option_index)
+        )
+        assert await asyncio.wait_for(waiting, timeout=0.1) == UserInputResponse(
+            "call-options",
+            prompt.options[selected_option_index].label,
+            selected_option_index,
+            None,
+        )
+        assert broker.pending_count == 0
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("selected_option_index", [3, 99])
+def test_interaction_broker_rejects_out_of_range_option_until_valid_selection(
+    selected_option_index: int,
+) -> None:
+    async def scenario() -> None:
+        broker = InteractionBroker()
+        waiting = asyncio.create_task(
+            broker.request_user_input(
+                "call-bounds",
+                AskPrompt(
+                    "Choose one",
+                    options=(AskOption("First"), AskOption("Last")),
+                ),
+                CancellationToken(),
+            )
+        )
+        request = await asyncio.wait_for(broker.next_request(), timeout=0.1)
+        assert broker.pending_count == 1
+        assert (
+            broker.respond(
+                UserInputResponse(
+                    request.interaction_id, "invalid", selected_option_index
+                )
+            )
+            is False
+        )
+        assert broker.pending_count == 1
+        assert not waiting.done()
+        assert broker.respond(UserInputResponse(request.interaction_id, "Last", 1))
+        assert await asyncio.wait_for(waiting, timeout=0.1) == UserInputResponse(
+            "call-bounds", "Last", 1
+        )
+
+    asyncio.run(scenario())
+
+
+def test_interaction_broker_normalizes_selected_answer_and_hides_stale_text() -> None:
+    sentinel = "stale-frontend-answer-secret"
+
+    async def scenario() -> None:
+        broker = InteractionBroker()
+        prompt = AskPrompt(
+            "Choose encoding",
+            options=(AskOption("UTF-8"), AskOption("Latin-1")),
+        )
+        waiting = asyncio.create_task(
+            broker.request_user_input("call-normalize", prompt, CancellationToken())
+        )
+        request = await asyncio.wait_for(broker.next_request(), timeout=0.1)
+        assert broker.respond(
+            UserInputResponse(request.interaction_id, sentinel, 0, "portable")
+        )
+        response = await asyncio.wait_for(waiting, timeout=0.1)
+        assert response == UserInputResponse("call-normalize", "UTF-8", 0, "portable")
+        assert sentinel not in response.answer
+        assert sentinel not in repr(response)
+
+    asyncio.run(scenario())
+
+
+def test_interaction_broker_requires_selection_when_custom_answers_are_disabled() -> (
+    None
+):
+    async def scenario() -> None:
+        broker = InteractionBroker()
+        prompt = AskPrompt(
+            "Choose one",
+            options=(AskOption("First"), AskOption("Last")),
+            allow_custom=False,
+        )
+        waiting = asyncio.create_task(
+            broker.request_user_input("call-required", prompt, CancellationToken())
+        )
+        request = await asyncio.wait_for(broker.next_request(), timeout=0.1)
+        assert not broker.respond(UserInputResponse(request.interaction_id, "custom"))
+        assert broker.pending_count == 1
+        assert not waiting.done()
+        assert broker.respond(UserInputResponse(request.interaction_id, "ignored", 1))
+        assert await asyncio.wait_for(waiting, timeout=0.1) == UserInputResponse(
+            "call-required", "Last", 1
+        )
+
+    asyncio.run(scenario())
+
+
+def test_interaction_broker_allows_empty_custom_answer_and_preserves_notes() -> None:
+    async def scenario() -> None:
+        broker = InteractionBroker()
+        prompt = AskPrompt(
+            "Choose or explain",
+            options=(AskOption("First"), AskOption("Last")),
+            allow_custom=True,
+        )
+        waiting = asyncio.create_task(
+            broker.request_user_input("call-custom", prompt, CancellationToken())
+        )
+        request = await asyncio.wait_for(broker.next_request(), timeout=0.1)
+        assert broker.respond(UserInputResponse(request.interaction_id, "", None, ""))
+        assert await asyncio.wait_for(waiting, timeout=0.1) == UserInputResponse(
+            "call-custom", "", None, ""
+        )
+
+    asyncio.run(scenario())
+
+
 def test_responses_are_immutable() -> None:
     permission = PermissionResponse("interaction-1", PermissionAnswer.DENY)
     user_input = UserInputResponse("interaction-2", "answer")

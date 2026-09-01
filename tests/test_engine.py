@@ -691,7 +691,7 @@ def test_engine_ask_uses_user_input_requester_and_appends_answer() -> None:
     assert isinstance(events[-1], RunCompleted)
     assert provider.requests[1].messages[-1].content == (
         '{"status":"success","message":"answer received","data":'
-        '{"answer":"yes","selected_option_index":0,"notes":"confirmed"}}'
+        '{"answer":"Yes","selected_option_index":0,"notes":"confirmed"}}'
     )
 
 
