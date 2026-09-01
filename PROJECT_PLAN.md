@@ -282,7 +282,7 @@ Mica 核心交付 ExtensionAPI、扩展发现与加载、稳定注册契约、�
 | Phase 2：基础对话 | 已完成 | 打通 OpenAI-compatible Provider、AgentEngine、有序事件和基础流式 CLI 对话。 | `docs/phase2_plan.md` |
 | Phase 3：会话持久化 | 已完成 | 建立工作区身份、JSONL Store、SessionService、上下文加载和退出后恢复。 | `docs/phase3_plan.md` |
 | Phase 4：仓库收口 | 已完成 | 删除历史实现，统一 Mica 仓库、包名、入口和本地工作目录。 | `docs/phase4_plan.md` |
-| Phase 5：工具与权限 | 已完成 | 建立工具契约、文件/Bash/ask、权限策略、多步工具循环、会话 v2 和系统提示词快照。 | `docs/phase5_plan.md`、`docs/system_prompt_design.md` |
+| Phase 5：工具与权限 | 已完成 | 建立工具契约、文件/Bash/结构化 ask、权限策略、多步工具循环、思考事件、工具展示与会话 v3、动态输出和系统提示词快照。 | `docs/phase5_plan.md`、`docs/system_prompt_design.md` |
 | Phase 6：Textual TUI | 设计确认中，尚未构建 | 交付启动界面、历史回放、输入编辑、工作状态、思考展示、工具卡片、权限/ask 窗口和可靠取消。 | `docs/tui_design.md`；阶段设计完成后创建 `docs/phase6_plan.md` |
 | Phase 7：配置与模型 | 未开始 | 建立 JSON 配置、首次向导、模型发现与切换、思考/工作/权限模式和界面偏好。 | 阶段开始前创建 |
 | Phase 8：会话命令与上下文 | 未开始 | 交付会话选择和 `/new`、`/rename`、`/branch`、`/rewind`、`/clear`、`/btw`、`/compact`，以及上下文用量和压缩。 | 阶段开始前创建 |
@@ -305,8 +305,8 @@ Mica 核心交付 ExtensionAPI、扩展发现与加载、稳定注册契约、�
 | P5-13：Bash 动态输出 | 已完成 | 增加有序、经过清洗的 Bash 输出增量事件，同时保持总输出上限、超时、取消和进程树回收。 |
 | P5-14：结构化 ask | 已完成 | 扩展可选标题、选项说明、推荐项、自定义回答和备注契约，同时保持交互 ID 不复用、迟到响应失效和等待清理。 |
 
-上述任务的产品表现以 `docs/tui_design.md` 为事实源。每项开始前由 master 派发独立任务单，
-通过验收后按项目 Git 规则提交并推送；不得在一个 worker 任务中同时开始 Textual 布局实现。
+上述补充任务均已完成并通过验收，其产品表现以 `docs/tui_design.md` 为事实源。Phase 6 可以
+直接复用这些公共契约；具体 Textual 施工范围仍由 `docs/phase6_plan.md` 在开工前确认。
 
 ## 14. 项目级验收原则
 

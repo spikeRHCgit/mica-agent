@@ -20,7 +20,7 @@
 | `src/mica_agent/cli.py` | 当前基础终端入口；负责参数解析、环境配置检查、工作区与会话选择、工具装配、权限/ask 输入、事件消费和资源关闭。 |
 | `src/mica_agent/context_builder.py` | 会话激活时读取 global/workspace `AGENTS.md`，生成独立指令消息和安全诊断；不负责系统提示词正文。 |
 | `src/mica_agent/engine.py` | 单次 Run 的核心循环；按序推进 Provider 请求、文本事件、工具调用、交互等待、限制、取消和唯一终态。 |
-| `src/mica_agent/events.py` | Engine 对前端公开的有序事件契约，包括 Run、思考与文本增量、工具准备/开始/完成、权限、用户输入和终态事件。 |
+| `src/mica_agent/events.py` | Engine 对前端公开的有序事件契约，包括 Run、思考与文本增量、工具准备/开始/完成、工具展示快照、动态输出、权限、用户输入和终态事件。 |
 | `src/mica_agent/file_tools.py` | 当前文件工具实现与注册入口；提供 `read`、`write`、`edit`，并执行大小限制、UTF-8、原子写入和安全结果转换。 |
 | `src/mica_agent/interactions.py` | Engine 与前端之间的交互 Broker；分配不复用的交互 ID，等待权限/ask 回答，并清理取消、迟到或失效响应。 |
 | `src/mica_agent/jsonl_store.py` | 一个会话一个 JSONL 文件的存储层；负责严格解析、锁内创建/读取/重写/删除、原子替换、扫描损坏和 v1/v2 到 v3 升级。 |
