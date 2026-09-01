@@ -464,3 +464,31 @@ P5-13 整体尚未完成。
 P5-13C1 ToolExecutor 与 Engine 目标测试 `84 passed`，runtime/events 兼容组 `146 passed`，
 App/P5-12 组 `37 passed`，分发测试 `15 passed`，全量测试 `1021 passed, 2 skipped`；Ruff
 检查、格式检查、`uv build --offline` 和 diff 检查均通过。本章节不记录测试凭据或原始敏感值。
+
+## P5-13C2：CLI 装配、基础动态显示与安装态验收
+
+C2 将 CLI 的工具装配顺序固定为共享 `InteractionBroker`、`ToolRegistry` 和
+`ToolExecutor`，先注册文件工具，再把同一个 `executor.output_reporter` 传入
+`register_runtime_tools()` 注册 Bash 与 ask，最后把该 Executor 注入 `MicaApp`。上下文、
+AGENTS 与系统提示词预检仍在 Provider 构造之前；工具初始化失败仍返回固定安全诊断且不构造
+Provider。Provider 工具顺序保持为 `ask, bash, edit, read, write`，没有隐藏的第二套执行器、
+Broker 或 Registry。
+
+基础 CLI 处理 `ToolOutputDelta` 时只向 stderr 按 Engine 顺序原样写出 `event.text`；正式
+assistant 回复仍只写 stdout。CLI 不显示 call ID、参数、绝对路径或完整 ToolResult，也不再次
+清洗、不持久化动态事件。完整 LF/CRLF 输出不增加空行；未换行的最后一条增量在下一条工具
+状态或终态诊断前只补一个换行；无动态输出工具保持原有状态行行为。
+
+安装态验收扩展了 Unicode 与空格工作区的真实 Windows Git Bash wheel 测试：通过安装后的
+`mica cli` 和 loopback SSE 执行 Bash，stdout/stderr 两条记录按顺序出现在 `tool bash:
+started` 与 `tool bash: success` 之间；stdout 只有最终模型回复，第二次 Provider 请求收到
+完整清洗后的 ToolResult，工具顺序不变，工作区无额外副作用，临时 HOME、服务线程和子进程
+完成清理。动态输出只在 stderr 临时显示，ToolOutputDelta 不进入 JSONL；原始凭据、工作区
+绝对路径和 traceback 均未出现在用户输出或持久化记录中。
+
+C2 同时保留取消、事件流关闭、工具路由解除和资源清理边界；本切片未修改 runtime tools、
+ToolExecutor、Engine、事件、Provider、会话或 TUI。C2 目标与既有 CLI 生命周期测试为
+`30 passed`，runtime/tools/Engine/events 兼容组为 `230 passed`，安装态分发测试为
+`15 passed`，全量测试为 `1024 passed, 2 skipped`；Ruff、格式检查、`uv build --offline`
+和 diff 检查均通过。P5-13 已完成并通过 master 验收。P5-14、结构化 ask 和 Textual TUI
+尚未开始。

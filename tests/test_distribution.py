@@ -875,7 +875,15 @@ def test_installed_wheel_runs_bash_with_git_bash_in_unicode_workspace(
     assert result.stderr == (
         "permission required for tool bash [y/N]: "
         "tool bash: started\n"
+        "git-bash-out\n"
+        "git-bash-err\n"
         "tool bash: success\n"
+    )
+    assert (
+        result.stderr.index("tool bash: started\n")
+        < result.stderr.index("git-bash-out\n")
+        < result.stderr.index("git-bash-err\n")
+        < result.stderr.index("tool bash: success\n")
     )
     assert snapshot_files(workspace) == before
     assert len(server.requests) == 2

@@ -34,7 +34,7 @@ Mica 是一个面向个人开发者的轻量 Agent 基座。
   mica cli
   ```
 
-- 支持 OpenAI-compatible Chat Completions 的流式输出（SSE），文本增量实时写出。
+- 支持 OpenAI-compatible Chat Completions 的流式输出（SSE），文本增量实时写出；基础 CLI 也会实时显示经过清洗的 Bash 输出。
 - 基础 CLI 已装配五个工具：`read`、`write`、`edit`、`bash` 和 `ask`。Mica 不再提供独立 `ls`；目录查看通过需要权限确认的 `bash` 完成。`read` 读取工作区文件，`write`/`edit` 修改工作区，`ask` 在当前 Run 中暂停并询问用户。
 - 可用权限模式：`--permission-mode default`（修改和 Bash 询问）、`--permission-mode accept-edits`（自动允许 `write`/`edit`，Bash 仍询问）和 `--permission-mode solo`（自动允许文件工具，Bash 仍询问）。当前三种模式下所有 Bash 调用都需要确认；工作区越界、敏感路径和工具硬性边界始终拒绝。
 - `write`、`edit` 和 `bash` 可能需要输入 ASCII `y`/`yes` 确认；`n`/`no` 或空回答拒绝本次调用，其他输入会提示后重新询问。`ask` 的回答可以为空，并只作为当前工具结果返回模型。

@@ -33,6 +33,7 @@ from .events import (
     RunFailed,
     TextDelta,
     ToolFinished,
+    ToolOutputDelta,
     ToolStarted,
     UserInputRequested,
 )
@@ -279,12 +280,17 @@ async def _run_selected_session(
 
         broker = InteractionBroker()
         registry = ToolRegistry()
-        register_file_tools(registry, workspace)
-        register_runtime_tools(registry, workspace, broker)
         executor = ToolExecutor(
             registry,
             PolicyEngine(permission_mode),
             interaction_broker=broker,
+        )
+        register_file_tools(registry, workspace)
+        register_runtime_tools(
+            registry,
+            workspace,
+            broker,
+            output_reporter=executor.output_reporter,
         )
     except Exception:  # noqa: BLE001 - tool startup diagnostics must stay safe
         err("mica: unable to initialize tools\n")
@@ -452,6 +458,14 @@ async def _interact(
             continue
         has_output = False
         ends_with_newline = False
+        pending_tool_output_newline = False
+
+        def flush_tool_output_line() -> None:
+            nonlocal pending_tool_output_newline
+            if pending_tool_output_newline:
+                write_err("\n")
+                pending_tool_output_newline = False
+
         try:
             async with aclosing(app.run(line)) as stream:
                 async for event in stream:
@@ -463,9 +477,14 @@ async def _interact(
                         if event.text:
                             has_output = True
                             ends_with_newline = event.text.endswith("\n")
+                    elif isinstance(event, ToolOutputDelta):
+                        write_err(event.text)
+                        pending_tool_output_newline = not event.text.endswith("\n")
                     elif isinstance(event, ToolStarted):
+                        flush_tool_output_line()
                         write_err(f"tool {event.tool_name}: started\n")
                     elif isinstance(event, ToolFinished):
+                        flush_tool_output_line()
                         write_err(f"tool {event.tool_name}: {event.status.value}\n")
                     elif isinstance(event, PermissionRequested):
                         answer = await _read_permission_answer(
@@ -488,6 +507,7 @@ async def _interact(
                             UserInputResponse(event.interaction_id, answer)
                         )
                     elif isinstance(event, (RunCompleted, RunFailed, RunCancelled)):
+                        flush_tool_output_line()
                         # 有非空文本且未以换行结尾时才补一个必要换行；
                         # 无文本的终态不得向 stdout 写空行。
                         if has_output and not ends_with_newline:

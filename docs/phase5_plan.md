@@ -283,6 +283,15 @@ Textual TUI 仍属于后续任务。
 继续严格读取且不重新执行工具或读取工作区来补造旧卡片；Bash 实时增量和结构化 `ask` 分别
 保留给 P5-13、P5-14。
 
+### P5-13：Bash 动态输出
+
+状态：已完成并通过 master 验收。
+
+建立 `ToolOutputReporter → ToolExecutor → AgentEngine → ToolOutputDelta → CLI` 的有序安全
+输出链路；Bash 继续遵守总字节上限、超时、取消、进程树回收和集中凭据清洗。基础 CLI 只在
+stderr 实时显示输出，正式模型回复仍只进入 stdout；动态事件不进入 Provider 消息、完成快照
+或 JSONL。安装态 wheel 已在 Unicode 与空格工作区使用真实 Windows Git Bash 完成验收。
+
 ## 8. 测试与验收
 
 默认测试不得访问真实网络、真实 HOME、真实 Key 或工作区外用户文件。至少覆盖：
