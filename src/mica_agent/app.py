@@ -19,6 +19,7 @@ from .session_contracts import TurnEntry
 from .session_service import SessionService
 from .system_prompt import build_system_prompt
 from .tool_executor import ToolExecutor
+from .tool_presentation import ToolPresentationSnapshot
 
 TurnIdFactory = Callable[[], str]
 Clock = Callable[[], datetime]
@@ -109,6 +110,7 @@ class MicaApp:
             provider=provider,
             run_id_factory=run_id_factory,
             tool_executor=tool_executor,
+            presentation_workspace=context_builder.workspace,
         )
         self._active_run = False
         self._closed = False
@@ -159,6 +161,7 @@ class MicaApp:
         self._active_run = True
         user_message = Message(role=MessageRole.USER, content=prompt)
         completed_messages: list[tuple[Message, ...]] = []
+        completed_tool_presentations: list[tuple[ToolPresentationSnapshot, ...]] = []
         try:
             session_messages = self._session_service.context_snapshot(self._session_id)
             request = ProviderRequest(
@@ -175,13 +178,17 @@ class MicaApp:
                 self._engine.run(
                     request,
                     completed_messages_sink=completed_messages.append,
+                    completed_tool_presentations_sink=completed_tool_presentations.append,
                 )
             ) as events:
                 async for event in events:
                     if isinstance(
                         event, RunCompleted
                     ) and not self._commit_completed_turn(
-                        event, user_message, completed_messages
+                        event,
+                        user_message,
+                        completed_messages,
+                        completed_tool_presentations,
                     ):
                         yield RunFailed(
                             run_id=event.run_id,
@@ -211,11 +218,17 @@ class MicaApp:
         event: RunCompleted,
         user_message: Message,
         completed_messages: list[tuple[Message, ...]],
+        completed_tool_presentations: list[tuple[ToolPresentationSnapshot, ...]],
     ) -> bool:
         try:
-            if len(completed_messages) != 1 or not completed_messages[0]:
+            if (
+                len(completed_messages) != 1
+                or not completed_messages[0]
+                or len(completed_tool_presentations) != 1
+            ):
                 return False
             transcript = completed_messages[0]
+            presentations = completed_tool_presentations[0]
             turn = TurnEntry(
                 turn_id=self._turn_id_factory(),
                 run_id=event.run_id,
@@ -223,6 +236,7 @@ class MicaApp:
                 assistant_message=transcript[-1],
                 completed_at=self._clock(),
                 intermediate_messages=transcript[:-1],
+                tool_presentations=presentations,
             )
             self._session_service.commit_turn(self._session_id, turn)
         except asyncio.CancelledError:

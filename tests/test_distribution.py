@@ -994,5 +994,5 @@ def test_installed_wheel_write_and_continue_restore_complete_tool_history(
     assert fake_key not in observed_output
     assert sensitive not in observed_output
     assert str(workspace) not in observed_output
-    assert '"format_version":2' in raw
+    assert '"format_version":3' in raw
     assert server._thread.is_alive() is False

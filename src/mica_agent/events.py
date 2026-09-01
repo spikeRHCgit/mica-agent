@@ -10,6 +10,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from .tool_contracts import ToolResultStatus, _validate_tool_name
+from .tool_presentation import (
+    ToolPresentationSnapshot,
+    ToolPresentationStatus,
+)
 
 
 def _validate_run_id(run_id: str) -> None:
@@ -106,6 +110,33 @@ class TextDelta:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolPrepared:
+    """工具调用已提出但尚未授权或执行。"""
+
+    run_id: str
+    seq: int
+    presentation: ToolPresentationSnapshot
+
+    def __post_init__(self) -> None:
+        _validate_run_id(self.run_id)
+        _validate_seq(self.seq)
+        if not isinstance(self.presentation, ToolPresentationSnapshot):
+            raise TypeError("presentation must be a ToolPresentationSnapshot")
+        if self.presentation.status is not ToolPresentationStatus.PENDING:
+            raise ValueError("prepared presentation must be pending")
+
+    @property
+    def call_id(self) -> str:
+        """从展示快照读取稳定工具调用 ID。"""
+        return self.presentation.call_id
+
+    @property
+    def tool_name(self) -> str:
+        """从展示快照读取稳定工具名称。"""
+        return self.presentation.tool_name
+
+
+@dataclass(frozen=True, slots=True)
 class ToolStarted:
     """一次工具调用开始，不包含工具参数。"""
 
@@ -130,6 +161,7 @@ class ToolFinished:
     call_id: str
     tool_name: str
     status: ToolResultStatus
+    presentation: ToolPresentationSnapshot | None = None
 
     def __post_init__(self) -> None:
         _validate_run_id(self.run_id)
@@ -137,7 +169,26 @@ class ToolFinished:
         _validate_non_blank_text(self.call_id, "call_id")
         _validate_tool_name(self.tool_name, "tool_name")
         if not isinstance(self.status, ToolResultStatus):
-            raise TypeError("status must be a ToolResultStatus")
+            raise TypeError(
+                f"status must be a ToolResultStatus, got {type(self.status).__name__}"
+            )
+        if self.presentation is not None:
+            if not isinstance(self.presentation, ToolPresentationSnapshot):
+                raise TypeError("presentation must be a ToolPresentationSnapshot")
+            if (
+                self.presentation.call_id != self.call_id
+                or self.presentation.tool_name != self.tool_name
+            ):
+                raise ValueError("presentation identity must match tool event")
+            expected_status = (
+                ToolPresentationStatus.SUCCESS
+                if self.status is ToolResultStatus.SUCCESS
+                else ToolPresentationStatus.CANCELLED
+                if self.status is ToolResultStatus.CANCELLED
+                else ToolPresentationStatus.FAILED
+            )
+            if self.presentation.status is not expected_status:
+                raise ValueError("presentation status does not match tool result")
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +280,7 @@ EngineEvent = (
     RunStarted
     | ReasoningDelta
     | TextDelta
+    | ToolPrepared
     | ToolStarted
     | ToolFinished
     | PermissionRequested

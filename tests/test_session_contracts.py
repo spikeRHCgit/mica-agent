@@ -20,6 +20,11 @@ from mica_agent.session_contracts import (
     serialize_session_record,
 )
 from mica_agent.tool_contracts import ToolCall
+from mica_agent.tool_presentation import (
+    ToolPresentationKind,
+    ToolPresentationSnapshot,
+    ToolPresentationStatus,
+)
 
 UTC_NOW = datetime(2026, 8, 21, 3, 4, 5, 123456, tzinfo=UTC)
 
@@ -50,7 +55,7 @@ def test_session_meta_carries_validated_session_identity() -> None:
     )
 
     assert meta.session_id == "session-1"
-    assert meta.format_version == 2
+    assert meta.format_version == 3
     assert meta.workspace_id == "workspace-1"
     assert meta.workspace_path == r"C:\work\mica"
     assert meta.title == "Mica session"
@@ -74,7 +79,7 @@ def test_session_meta_rejects_non_integer_format_versions(version: object) -> No
         make_session_meta(format_version=version)
 
 
-@pytest.mark.parametrize("version", [0, 3, -1])
+@pytest.mark.parametrize("version", [0, 4, -1])
 def test_session_meta_rejects_unsupported_format_versions(version: int) -> None:
     with pytest.raises(ValueError, match="format_version"):
         make_session_meta(format_version=version)
@@ -152,6 +157,151 @@ def fixed_v1_turn_record() -> dict[str, object]:
         "assistant_message": {"role": "assistant", "content": "hi"},
         "completed_at": "2026-08-21T03:04:05.123456+00:00",
     }
+
+
+def test_v3_tool_turn_keeps_presentations_separate_from_context_messages() -> None:
+    call = ToolCall(
+        "call-1", "edit", {"path": "notes.md", "old_text": "old", "new_text": "new"}
+    )
+    presentation = ToolPresentationSnapshot(
+        "call-1",
+        "edit",
+        ToolPresentationKind.EDIT,
+        ToolPresentationStatus.SUCCESS,
+        {
+            "path": "notes.md",
+            "matched": True,
+            "lines": [
+                {"kind": "removed", "text": "old", "old_line": 1, "new_line": None},
+                {"kind": "added", "text": "new", "old_line": None, "new_line": 1},
+            ],
+        },
+    )
+    turn = make_turn_entry(
+        intermediate_messages=(
+            Message(MessageRole.ASSISTANT, "", (call,)),
+            Message(MessageRole.TOOL, '{"status":"success"}', tool_call_id="call-1"),
+        ),
+        tool_presentations=(presentation,),
+    )
+
+    wire = serialize_session_record(turn)
+    restored = deserialize_session_record(wire)
+
+    assert wire["format_version"] == 3
+    assert wire["tool_presentations"] == [
+        {
+            "call_id": "call-1",
+            "tool_name": "edit",
+            "kind": "edit",
+            "status": "success",
+            "payload": {
+                "path": "notes.md",
+                "matched": True,
+                "lines": [
+                    {"kind": "removed", "text": "old", "old_line": 1, "new_line": None},
+                    {"kind": "added", "text": "new", "old_line": None, "new_line": 1},
+                ],
+            },
+            "message": None,
+        }
+    ]
+    assert isinstance(restored, TurnEntry)
+    assert restored.tool_presentations == (presentation,)
+    assert restored.context_messages == turn.context_messages
+
+
+def _v3_tool_record() -> dict[str, object]:
+    call = ToolCall("call-1", "read", {"path": "notes.md"})
+    turn = make_turn_entry(
+        intermediate_messages=(
+            Message(MessageRole.ASSISTANT, "", (call,)),
+            Message(MessageRole.TOOL, '{"status":"success"}', tool_call_id="call-1"),
+        ),
+        tool_presentations=(
+            ToolPresentationSnapshot(
+                "call-1",
+                "read",
+                ToolPresentationKind.READ,
+                ToolPresentationStatus.SUCCESS,
+                {"path": "notes.md"},
+            ),
+        ),
+    )
+    return serialize_session_record(turn)
+
+
+def test_v3_reader_strictly_validates_snapshot_shape_and_terminal_status() -> None:
+    missing = _v3_tool_record()
+    del missing["tool_presentations"]
+    with pytest.raises(SessionFormatError):
+        deserialize_session_record(missing)
+
+    extra = _v3_tool_record()
+    assert isinstance(extra["tool_presentations"], list)
+    extra["tool_presentations"][0]["unexpected"] = "credential-like-marker"  # type: ignore[index]
+    with pytest.raises(SessionFormatError) as caught:
+        deserialize_session_record(extra)
+    assert "credential-like-marker" not in str(caught.value)
+
+    pending = _v3_tool_record()
+    assert isinstance(pending["tool_presentations"], list)
+    pending["tool_presentations"][0]["status"] = "pending"  # type: ignore[index]
+    with pytest.raises(SessionFormatError):
+        deserialize_session_record(pending)
+
+    bad_path = _v3_tool_record()
+    assert isinstance(bad_path["tool_presentations"], list)
+    payload = bad_path["tool_presentations"][0]["payload"]  # type: ignore[index]
+    assert isinstance(payload, dict)
+    payload["path"] = "C:/outside"
+    with pytest.raises(SessionFormatError):
+        deserialize_session_record(bad_path)
+
+
+def test_v3_reader_round_trips_failed_edit_without_fabricated_line_numbers() -> None:
+    call = ToolCall("call-edit", "edit", {"path": "notes.md"})
+    presentation = ToolPresentationSnapshot(
+        "call-edit",
+        "edit",
+        ToolPresentationKind.EDIT,
+        ToolPresentationStatus.FAILED,
+        {
+            "path": "notes.md",
+            "matched": False,
+            "lines": [
+                {"kind": "removed", "text": "old", "old_line": None, "new_line": None},
+                {"kind": "added", "text": "new", "old_line": None, "new_line": None},
+            ],
+        },
+    )
+    turn = make_turn_entry(
+        intermediate_messages=(
+            Message(MessageRole.ASSISTANT, "", (call,)),
+            Message(MessageRole.TOOL, "failed", tool_call_id="call-edit"),
+        ),
+        tool_presentations=(presentation,),
+    )
+
+    restored = deserialize_session_record(serialize_session_record(turn))
+
+    assert restored == turn
+
+
+def test_v3_reader_rejects_invalid_edit_line_numbers_and_kinds() -> None:
+    record = _v3_tool_record()
+    assert isinstance(record["tool_presentations"], list)
+    presentation = record["tool_presentations"][0]
+    assert isinstance(presentation, dict)
+    presentation["kind"] = "edit"
+    payload = {"path": "notes.md", "matched": True, "lines": []}
+    presentation["payload"] = payload
+    call = record["messages"][1] if isinstance(record["messages"], list) else None
+    assert call is not None
+    # The read ToolCall remains deliberately mismatched, so the identity check
+    # is also exercised without exposing the invalid payload.
+    with pytest.raises(SessionFormatError):
+        deserialize_session_record(record)
 
 
 def test_tool_turn_round_trips_complete_context_order() -> None:
@@ -307,7 +457,7 @@ def test_session_meta_serializes_to_an_explicit_canonical_record() -> None:
 
     assert record == {
         "record_type": "session_meta",
-        "format_version": 2,
+        "format_version": 3,
         "session_id": "session-1",
         "workspace_id": "workspace-1",
         "workspace_path": r"C:\work\mica",
@@ -324,13 +474,14 @@ def test_turn_entry_serializes_to_an_explicit_canonical_record() -> None:
 
     assert record == {
         "record_type": "turn",
-        "format_version": 2,
+        "format_version": 3,
         "turn_id": "turn-1",
         "run_id": "run-1",
         "messages": [
             {"role": "user", "content": "hello"},
             {"role": "assistant", "content": "hi"},
         ],
+        "tool_presentations": [],
         "completed_at": "2026-08-21T03:04:05.123456+00:00",
     }
     assert SessionRecordType.TURN.value == "turn"
@@ -361,7 +512,7 @@ def test_turn_record_round_trips_to_a_strong_type() -> None:
         serialize_session_record(make_turn_entry()),
     ],
 )
-@pytest.mark.parametrize("version", [0, 3, -1])
+@pytest.mark.parametrize("version", [0, 4, -1])
 def test_deserializer_rejects_unknown_versions(
     record: dict[str, object], version: int
 ) -> None:

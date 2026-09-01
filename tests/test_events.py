@@ -25,10 +25,16 @@ from mica_agent.events import (
     RunStatus,
     TextDelta,
     ToolFinished,
+    ToolPrepared,
     ToolStarted,
     UserInputRequested,
 )
 from mica_agent.tool_contracts import ToolResultStatus
+from mica_agent.tool_presentation import (
+    ToolPresentationKind,
+    ToolPresentationSnapshot,
+    ToolPresentationStatus,
+)
 
 
 def test_run_started_carries_run_id_and_opens_at_seq_zero() -> None:
@@ -418,3 +424,41 @@ def test_new_events_are_immutable() -> None:
 
     with pytest.raises(FrozenInstanceError):
         event.tool_name = "write"  # type: ignore[misc]
+
+
+def test_tool_prepared_and_finished_carry_presentation_contract() -> None:
+    pending = ToolPresentationSnapshot(
+        "call-1",
+        "write",
+        ToolPresentationKind.WRITE,
+        ToolPresentationStatus.PENDING,
+        {"path": "notes.md", "content": "text"},
+    )
+    prepared = ToolPrepared("run-1", 1, pending)
+    finished = ToolFinished(
+        "run-1",
+        2,
+        "call-1",
+        "write",
+        ToolResultStatus.SUCCESS,
+        ToolPresentationSnapshot(
+            "call-1",
+            "write",
+            ToolPresentationKind.WRITE,
+            ToolPresentationStatus.SUCCESS,
+            {"path": "notes.md", "content": "text"},
+        ),
+    )
+
+    assert prepared.presentation.status is ToolPresentationStatus.PENDING
+    assert prepared.call_id == "call-1"
+    assert prepared.tool_name == "write"
+    assert finished.presentation is not None
+    assert finished.presentation.status is ToolPresentationStatus.SUCCESS
+    assert ToolPrepared in get_args(EngineEvent)
+    assert (
+        ToolFinished(
+            "run-1", 2, "call-1", "write", ToolResultStatus.SUCCESS
+        ).presentation
+        is None
+    )

@@ -46,6 +46,9 @@ from mica_agent import (
     ToolFinished,
     ToolHandler,
     ToolNotFoundError,
+    ToolPresentationKind,
+    ToolPresentationSnapshot,
+    ToolPresentationStatus,
     ToolRegistry,
     ToolRegistryError,
     ToolRequest,
@@ -56,7 +59,9 @@ from mica_agent import (
     TurnEntry,
     UserInputRequested,
     UserInputResponse,
+    complete_tool_presentation,
     deserialize_session_record,
+    prepare_tool_presentation,
     serialize_session_record,
     to_mutable_json,
     validate_tool_arguments,
@@ -143,6 +148,30 @@ def test_top_level_exports_reasoning_contracts() -> None:
     assert ReasoningEffort is ReasoningEffortEnum
     assert mica_agent.ReasoningDelta is EngineReasoningDelta
     assert ReasoningDelta is EngineReasoningDelta
+
+
+def test_top_level_exports_tool_presentation_contracts() -> None:
+    from mica_agent.tool_presentation import (
+        ToolPresentationKind as PresentationKind,
+    )
+    from mica_agent.tool_presentation import (
+        ToolPresentationSnapshot as PresentationSnapshot,
+    )
+    from mica_agent.tool_presentation import (
+        ToolPresentationStatus as PresentationStatus,
+    )
+    from mica_agent.tool_presentation import (
+        complete_tool_presentation as complete_presentation,
+    )
+    from mica_agent.tool_presentation import (
+        prepare_tool_presentation as prepare_presentation,
+    )
+
+    assert ToolPresentationKind is PresentationKind
+    assert ToolPresentationSnapshot is PresentationSnapshot
+    assert ToolPresentationStatus is PresentationStatus
+    assert complete_tool_presentation is complete_presentation
+    assert prepare_tool_presentation is prepare_presentation
 
 
 def test_top_level_exports_models_and_events() -> None:
@@ -358,7 +387,7 @@ def test_p5_01_contract_modules_import_without_runtime_cycles() -> None:
 
 
 def test_top_level_exports_session_contracts() -> None:
-    assert CURRENT_SESSION_FORMAT_VERSION == ContractsFormatVersion == 2
+    assert CURRENT_SESSION_FORMAT_VERSION == ContractsFormatVersion == 3
     assert SessionMeta is ContractsSessionMeta
     assert TurnEntry is ContractsTurnEntry
     assert SessionRecord is ContractsSessionRecord

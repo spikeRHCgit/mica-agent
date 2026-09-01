@@ -24,6 +24,7 @@ from mica_agent.events import (
     RunStarted,
     TextDelta,
     ToolFinished,
+    ToolPrepared,
     ToolStarted,
     UserInputRequested,
 )
@@ -61,6 +62,12 @@ from mica_agent.tool_contracts import (
     ToolSpec,
 )
 from mica_agent.tool_executor import ToolExecutor
+from mica_agent.tool_presentation import (
+    ToolPresentationKind,
+    ToolPresentationStatus,
+    complete_tool_presentation,
+    prepare_tool_presentation,
+)
 from mica_agent.tool_registry import ToolRegistry
 
 
@@ -159,6 +166,68 @@ def _lookup_executor() -> tuple[ToolExecutor, ToolRegistry]:
     )
 
 
+def test_engine_emits_prepared_before_started_and_final_presentation() -> None:
+    call = ToolCall("call-1", "lookup", {"query": "mica"})
+    provider = _ScriptedProvider(
+        [[Finish(tool_calls=(call,))], [ProviderTextDelta("done"), Finish()]]
+    )
+    executor, _ = _lookup_executor()
+    engine = AgentEngine(
+        provider, tool_executor=executor, run_id_factory=lambda: "run-presentation"
+    )
+
+    events = _run_collect(
+        engine,
+        ProviderRequest("test-model", (Message(MessageRole.USER, "inspect"),)),
+    )
+    tool_events = [
+        event
+        for event in events
+        if isinstance(event, (ToolPrepared, ToolStarted, ToolFinished))
+    ]
+
+    assert [type(event) for event in tool_events] == [
+        ToolPrepared,
+        ToolStarted,
+        ToolFinished,
+    ]
+    prepared = tool_events[0]
+    finished = tool_events[-1]
+    assert isinstance(prepared, ToolPrepared)
+    assert prepared.presentation.kind is ToolPresentationKind.GENERIC
+    assert prepared.presentation.status is ToolPresentationStatus.PENDING
+    assert isinstance(finished, ToolFinished)
+    assert finished.presentation is not None
+    assert finished.presentation.status is ToolPresentationStatus.SUCCESS
+    assert finished.presentation.call_id == finished.call_id
+    assert finished.presentation.tool_name == finished.tool_name
+
+
+def test_completed_tool_presentations_sink_receives_only_final_snapshots() -> None:
+    call = ToolCall("call-1", "lookup", {"query": "mica"})
+    provider = _ScriptedProvider(
+        [[Finish(tool_calls=(call,))], [ProviderTextDelta("done"), Finish()]]
+    )
+    executor, _ = _lookup_executor()
+    engine = AgentEngine(
+        provider, tool_executor=executor, run_id_factory=lambda: "run-sink"
+    )
+    received: list[tuple[object, ...]] = []
+
+    # Observe the public completion sink at the same boundary as RunCompleted.
+    async def collect() -> None:
+        async for _ in engine.run(
+            ProviderRequest("test-model", (Message(MessageRole.USER, "inspect"),)),
+            completed_tool_presentations_sink=received.append,
+        ):
+            pass
+
+    asyncio.run(collect())
+    assert len(received) == 1
+    assert len(received[0]) == 1
+    assert received[0][0].status is ToolPresentationStatus.SUCCESS
+
+
 def test_completion_sink_receives_final_assistant_once_before_completion() -> None:
     engine = _engine([ProviderTextDelta("final answer"), Finish()])
     completed: list[tuple[Message, ...]] = []
@@ -199,6 +268,7 @@ def test_tool_messages_are_redacted_once_for_provider_and_completion_sink() -> N
             ToolResultStatus.SUCCESS,
             f"received {secret_key}",
             {"token": bearer},
+            {"presentation_only": "presentation-only-marker"},
         )
 
     registry.register(spec, handler)
@@ -237,6 +307,7 @@ def test_tool_messages_are_redacted_once_for_provider_and_completion_sink() -> N
     observed = repr((provider.requests[1], completed))
     assert secret_key not in observed
     assert bearer not in observed
+    assert "presentation-only-marker" not in observed
     assert "[REDACTED]" in observed
     assert call.arguments["api_key"] == secret_key
 
@@ -675,10 +746,33 @@ def test_engine_discards_late_interaction_response_after_cancelled_run() -> None
 
     assert events == [
         RunStarted("run-tool"),
-        ToolStarted("run-tool", 1, "call-1", "lookup"),
-        ToolFinished("run-tool", 2, "call-1", "lookup", ToolResultStatus.SUCCESS),
-        TextDelta("run-tool", "final answer", 3),
-        RunCompleted("run-tool", 4),
+        ToolPrepared(
+            "run-tool",
+            1,
+            prepare_tool_presentation(
+                ToolRequest("call-1", "lookup", {"query": "mica"})
+            ),
+        ),
+        ToolStarted("run-tool", 2, "call-1", "lookup"),
+        ToolFinished(
+            "run-tool",
+            3,
+            "call-1",
+            "lookup",
+            ToolResultStatus.SUCCESS,
+            complete_tool_presentation(
+                ToolRequest("call-1", "lookup", {"query": "mica"}),
+                ToolResult(
+                    "call-1",
+                    "lookup",
+                    ToolResultStatus.SUCCESS,
+                    "lookup complete",
+                    {"value": "found"},
+                ),
+            ),
+        ),
+        TextDelta("run-tool", "final answer", 4),
+        RunCompleted("run-tool", 5),
     ]
     assert len(provider.requests) == 2
     assert provider.requests[1].messages == (

@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import aclosing
 
 from .cancellation import CancellationRequested, CancellationToken
@@ -25,6 +25,7 @@ from .events import (
     RunStarted,
     TextDelta,
     ToolFinished,
+    ToolPrepared,
     ToolStarted,
     UserInputRequested,
 )
@@ -48,9 +49,16 @@ from .providers import (
 from .providers import TextDelta as ProviderTextDelta
 from .tool_contracts import ToolRequest, ToolResult, ToolResultStatus, to_mutable_json
 from .tool_executor import ToolExecutor
+from .tool_presentation import (
+    ToolPresentationSnapshot,
+    complete_tool_presentation,
+    prepare_tool_presentation,
+)
+from .workspace import WorkspaceIdentity
 
 RunIdFactory = Callable[[], str]
 CompletedMessagesSink = Callable[[tuple[Message, ...]], None]
+CompletedToolPresentationsSink = Callable[[tuple[ToolPresentationSnapshot, ...]], None]
 DEFAULT_MAX_MODEL_STEPS = 8
 DEFAULT_MAX_TOOL_CALLS = 32
 _SIDE_EFFECT_TOOL_NAMES = frozenset({"write", "edit", "bash"})
@@ -85,6 +93,7 @@ class AgentEngine:
         *,
         run_id_factory: RunIdFactory | None = None,
         tool_executor: ToolExecutor | None = None,
+        presentation_workspace: WorkspaceIdentity | None = None,
         max_model_steps: int = DEFAULT_MAX_MODEL_STEPS,
         max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS,
     ) -> None:
@@ -98,9 +107,16 @@ class AgentEngine:
             raise ValueError("max_tool_calls must be a positive integer")
         if tool_executor is not None and not isinstance(tool_executor, ToolExecutor):
             raise TypeError("tool_executor must be a ToolExecutor or None")
+        if presentation_workspace is not None and not isinstance(
+            presentation_workspace, WorkspaceIdentity
+        ):
+            raise TypeError(
+                "presentation_workspace must be a WorkspaceIdentity or None"
+            )
         self._provider = provider
         self._run_id_factory = run_id_factory or _default_run_id
         self._tool_executor = tool_executor
+        self._presentation_workspace = presentation_workspace
         self._interaction_broker = (
             tool_executor.interaction_broker if tool_executor is not None else None
         )
@@ -113,10 +129,22 @@ class AgentEngine:
         *,
         cancellation: CancellationToken | None = None,
         completed_messages_sink: CompletedMessagesSink | None = None,
+        completed_tool_presentations_sink: CompletedToolPresentationsSink | None = None,
     ) -> AsyncIterator[EngineEvent]:
         run_id = self._run_id_factory()
         seq = 0
+        if completed_messages_sink is not None and not callable(
+            completed_messages_sink
+        ):
+            raise TypeError("completed_messages_sink must be callable or None")
+        if completed_tool_presentations_sink is not None and not callable(
+            completed_tool_presentations_sink
+        ):
+            raise TypeError(
+                "completed_tool_presentations_sink must be callable or None"
+            )
         token = cancellation or CancellationToken()
+        completed_tool_presentations: list[ToolPresentationSnapshot] = []
         yield RunStarted(run_id=run_id)
         seq += 1
         messages = request.messages
@@ -230,6 +258,22 @@ class AgentEngine:
                                 ),
                             )
                             return
+                    if completed_tool_presentations_sink is not None:
+                        try:
+                            completed_tool_presentations_sink(
+                                tuple(completed_tool_presentations)
+                            )
+                        except Exception:  # noqa: BLE001 - safe completion boundary
+                            yield RunFailed(
+                                run_id=run_id,
+                                seq=seq,
+                                category=ErrorCategory.UNKNOWN,
+                                message=self._failure_message(
+                                    "completed tool presentation handling failed",
+                                    side_effect_tool_started,
+                                ),
+                            )
+                            return
                     yield RunCompleted(run_id=run_id, seq=seq)
                     return
                 if self._tool_executor is None:
@@ -265,7 +309,16 @@ class AgentEngine:
                 completed_messages.append(assistant_message)
                 for call in finish.tool_calls:
                     tool_request = ToolRequest(call.call_id, call.name, call.arguments)
+                    yield ToolPrepared(
+                        run_id=run_id,
+                        seq=seq,
+                        presentation=prepare_tool_presentation(
+                            tool_request, workspace=self._presentation_workspace
+                        ),
+                    )
+                    seq += 1
                     result: ToolResult | None = None
+                    final_presentation: ToolPresentationSnapshot | None = None
                     async with aclosing(
                         self._tool_execution_signals(tool_request, token)
                     ) as tool_signals:
@@ -305,12 +358,24 @@ class AgentEngine:
                             elif signal.kind == "finished":
                                 finished = signal.value
                                 assert isinstance(finished, ToolResult)
+                                final_presentation = complete_tool_presentation(
+                                    tool_request,
+                                    finished,
+                                    detail=(
+                                        finished.presentation
+                                        if isinstance(finished.presentation, Mapping)
+                                        else None
+                                    ),
+                                    workspace=self._presentation_workspace,
+                                )
+                                completed_tool_presentations.append(final_presentation)
                                 yield ToolFinished(
                                     run_id=run_id,
                                     seq=seq,
                                     call_id=finished.call_id,
                                     tool_name=finished.tool_name,
                                     status=finished.status,
+                                    presentation=final_presentation,
                                 )
                                 seq += 1
                             elif signal.kind == "result":

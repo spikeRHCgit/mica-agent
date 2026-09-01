@@ -9,7 +9,14 @@ from functools import partial
 from pathlib import Path
 
 from .cancellation import CancellationRequested, CancellationToken
-from .tool_contracts import ToolRequest, ToolResult, ToolResultStatus, ToolSpec
+from .tool_contracts import (
+    JsonObject,
+    ToolRequest,
+    ToolResult,
+    ToolResultStatus,
+    ToolSpec,
+)
+from .tool_presentation import build_edit_presentation_detail
 from .tool_registry import DuplicateToolError, ToolRegistry
 from .workspace import WorkspaceIdentity
 from .workspace_paths import WorkspacePathError, WorkspacePathResolver
@@ -64,9 +71,18 @@ def _result(
     request: ToolRequest,
     status: ToolResultStatus,
     message: str,
-    data: str | None = None,
+    data: object = None,
+    *,
+    presentation: JsonObject | None = None,
 ) -> ToolResult:
-    return ToolResult(request.call_id, request.name, status, message, data)
+    return ToolResult(
+        request.call_id,
+        request.name,
+        status,
+        message,
+        data,
+        presentation,
+    )
 
 
 def _is_regular_file(path: Path) -> bool:
@@ -236,6 +252,7 @@ async def _edit_handler(
     cancellation: CancellationToken,
     resolver: WorkspacePathResolver,
 ) -> ToolResult:
+    presentation: dict[str, object] | None = None
     try:
         cancellation.raise_if_cancelled()
         arguments = _edit_arguments(request)
@@ -255,26 +272,53 @@ async def _edit_handler(
             )
         text = _read_bounded_utf8(target)
         if text.count(old_text) != 1:
+            presentation = build_edit_presentation_detail(
+                text,
+                text,
+                matched=False,
+                old_text=old_text,
+                new_text=new_text,
+            )
             return _result(
-                request, ToolResultStatus.EXECUTION_FAILED, "file operation failed"
+                request,
+                ToolResultStatus.EXECUTION_FAILED,
+                "file operation failed",
+                presentation=presentation,
             )
         replaced = text.replace(old_text, new_text, 1)
+        presentation = build_edit_presentation_detail(text, replaced, matched=True)
         encoded = replaced.encode("utf-8", errors="strict")
         if len(encoded) > MAX_FILE_BYTES:
             return _result(
                 request, ToolResultStatus.EXECUTION_FAILED, "file operation failed"
             )
         _atomic_write(target, encoded, cancellation)
-        return _result(request, ToolResultStatus.SUCCESS, "file edited")
+        return _result(
+            request,
+            ToolResultStatus.SUCCESS,
+            "file edited",
+            presentation=presentation,
+        )
     except CancellationRequested:
-        return _result(request, ToolResultStatus.CANCELLED, "operation cancelled")
+        return _result(
+            request,
+            ToolResultStatus.CANCELLED,
+            "operation cancelled",
+            presentation=presentation,
+        )
     except WorkspacePathError:
         return _result(
-            request, ToolResultStatus.PERMISSION_DENIED, "file access denied"
+            request,
+            ToolResultStatus.PERMISSION_DENIED,
+            "file access denied",
+            presentation=presentation,
         )
     except (_FileTooLargeError, OSError, UnicodeError):
         return _result(
-            request, ToolResultStatus.EXECUTION_FAILED, "file operation failed"
+            request,
+            ToolResultStatus.EXECUTION_FAILED,
+            "file operation failed",
+            presentation=presentation,
         )
 
 

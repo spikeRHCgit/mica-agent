@@ -27,6 +27,7 @@ from .events import (
     RunStatus,
     TextDelta,
     ToolFinished,
+    ToolPrepared,
     ToolStarted,
     UserInputRequested,
 )
@@ -82,6 +83,13 @@ from .tool_contracts import (
     ToolResultStatus,
     ToolSpec,
     to_mutable_json,
+)
+from .tool_presentation import (
+    ToolPresentationKind,
+    ToolPresentationSnapshot,
+    ToolPresentationStatus,
+    complete_tool_presentation,
+    prepare_tool_presentation,
 )
 from .workspace import (
     WorkspaceIdentity,
@@ -160,6 +168,10 @@ __all__ = [
     "ToolFinished",
     "ToolHandler",
     "ToolNotFoundError",
+    "ToolPrepared",
+    "ToolPresentationKind",
+    "ToolPresentationSnapshot",
+    "ToolPresentationStatus",
     "ToolRegistry",
     "ToolRegistryError",
     "ToolRequest",
@@ -176,8 +188,10 @@ __all__ = [
     "WorkspacePathError",
     "WorkspacePathResolver",
     "WorkspaceResolutionError",
+    "complete_tool_presentation",
     "default_data_root",
     "deserialize_session_record",
+    "prepare_tool_presentation",
     "register_file_tools",
     "register_runtime_tools",
     "resolve_workspace",

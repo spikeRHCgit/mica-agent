@@ -56,6 +56,10 @@ from mica_agent.tool_contracts import (
     ToolSpec,
 )
 from mica_agent.tool_executor import ToolExecutor
+from mica_agent.tool_presentation import (
+    ToolPresentationKind,
+    ToolPresentationStatus,
+)
 from mica_agent.tool_registry import ToolRegistry
 from mica_agent.workspace import resolve_workspace
 
@@ -409,6 +413,14 @@ def test_tool_run_commits_one_complete_turn_and_restores_full_history() -> None:
         MessageRole.SYSTEM,
     ]
     assert len(service.load_session(session_id).turns) == 1
+    stored = service.load_session(session_id)
+    assert stored.meta.format_version == 3
+    assert len(stored.turns[0].tool_presentations) == 1
+    presentation = stored.turns[0].tool_presentations[0]
+    assert presentation.kind is ToolPresentationKind.READ
+    assert presentation.status is ToolPresentationStatus.SUCCESS
+    assert presentation.payload == {"path": "notes.txt"}
+
     assert app.history == (
         Message(MessageRole.USER, "inspect"),
         Message(MessageRole.ASSISTANT, "", (call,)),

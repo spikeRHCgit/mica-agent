@@ -11,7 +11,11 @@ import pytest
 from mica_agent.cancellation import CancellationToken
 from mica_agent.file_tools import MAX_FILE_BYTES, register_file_tools
 from mica_agent.schema_validation import validate_tool_schema
-from mica_agent.tool_contracts import ToolRequest, ToolResultStatus
+from mica_agent.tool_contracts import (
+    ToolRequest,
+    ToolResultStatus,
+    to_mutable_json,
+)
 from mica_agent.tool_registry import ToolRegistry
 from mica_agent.workspace import resolve_workspace
 
@@ -287,6 +291,15 @@ def test_registered_edit_replaces_one_unique_match_without_changing_crlf(
 
     assert result.status is ToolResultStatus.SUCCESS
     assert target.read_bytes() == "first\r\ndone\r\n你好\r\n".encode()
+    assert to_mutable_json(result.presentation) == {
+        "matched": True,
+        "lines": [
+            {"kind": "context", "text": "first", "old_line": 1, "new_line": 1},
+            {"kind": "removed", "text": "TARGET", "old_line": 2, "new_line": None},
+            {"kind": "added", "text": "done", "old_line": None, "new_line": 2},
+            {"kind": "context", "text": "你好", "old_line": 3, "new_line": 3},
+        ],
+    }
 
 
 def test_file_tools_deny_sensitive_paths_but_allow_explicit_env_example(
@@ -342,6 +355,7 @@ def test_registered_write_replace_failure_preserves_bytes_cleans_temp_and_recove
     )
 
     assert failed.status is ToolResultStatus.EXECUTION_FAILED
+    assert failed.presentation is None
     assert target.read_bytes() == b"original"
     assert not list(workspace.glob(".notes.txt.*.tmp"))
 
@@ -399,6 +413,13 @@ def test_read_rejects_invalid_utf8_and_edit_requires_exactly_one_match(
     assert invalid.status is ToolResultStatus.EXECUTION_FAILED
     assert multiple.status is ToolResultStatus.EXECUTION_FAILED
     assert missing.status is ToolResultStatus.EXECUTION_FAILED
+    assert to_mutable_json(multiple.presentation) == {
+        "matched": False,
+        "lines": [
+            {"kind": "removed", "text": "same", "old_line": None, "new_line": None},
+            {"kind": "added", "text": "new", "old_line": None, "new_line": None},
+        ],
+    }
     assert target.read_text(encoding="utf-8") == "same same"
 
 
@@ -505,6 +526,23 @@ def test_edit_replace_failure_preserves_original_and_recovers(
     )
 
     assert failed.status is ToolResultStatus.EXECUTION_FAILED
+    assert to_mutable_json(failed.presentation) == {
+        "matched": True,
+        "lines": [
+            {
+                "kind": "removed",
+                "text": "before target after",
+                "old_line": 1,
+                "new_line": None,
+            },
+            {
+                "kind": "added",
+                "text": "before changed after",
+                "old_line": None,
+                "new_line": 1,
+            },
+        ],
+    }
     assert target.read_bytes() == b"before target after"
     assert not list(workspace.glob(".notes.txt.*.tmp"))
 

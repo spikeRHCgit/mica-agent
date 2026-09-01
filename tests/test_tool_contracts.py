@@ -89,6 +89,69 @@ def test_json_objects_are_deep_immutable_snapshots() -> None:
         nested["lines"] = ()  # type: ignore[index]
 
 
+def test_tool_result_presentation_is_a_deeply_immutable_json_object() -> None:
+    presentation = {
+        "matched": True,
+        "lines": [{"kind": "context", "text": "presentation-secret"}],
+    }
+    result = ToolResult(
+        "call-1",
+        "edit",
+        ToolResultStatus.SUCCESS,
+        "done",
+        {"model": "visible"},
+        presentation,
+    )
+    presentation["matched"] = False
+    presentation["lines"].append({"kind": "added"})  # type: ignore[union-attr]
+
+    assert result.presentation == {
+        "matched": True,
+        "lines": ({"kind": "context", "text": "presentation-secret"},),
+    }
+    assert isinstance(result.presentation, MappingProxyType)
+    with pytest.raises(TypeError):
+        result.presentation["matched"] = False  # type: ignore[index]
+    assert "presentation-secret" not in repr(result)
+    assert "presentation-secret" not in repr(result.data)
+    legacy = ToolResult(
+        "call-2",
+        "read",
+        ToolResultStatus.SUCCESS,
+        "done",
+        {"value": 1},
+    )
+    assert legacy.data == {"value": 1}
+    assert legacy.presentation is None
+
+
+def test_tool_result_presentation_rejects_unsafe_json_without_echoing_it() -> None:
+    recursive: dict[str, object] = {}
+    recursive["presentation-secret"] = recursive
+    invalid_values = (
+        object(),
+        [],
+        {"bad": {"set-value"}},
+        {"bad": b"presentation-secret"},
+        {1: "presentation-secret"},
+        {"bad": float("nan")},
+        {"bad": float("inf")},
+        recursive,
+    )
+
+    for invalid in invalid_values:
+        with pytest.raises((TypeError, ValueError)) as caught:
+            ToolResult(
+                "call-1",
+                "edit",
+                ToolResultStatus.SUCCESS,
+                "done",
+                presentation=invalid,  # type: ignore[arg-type]
+            )
+        assert "presentation-secret" not in str(caught.value)
+        assert "set-value" not in str(caught.value)
+
+
 def test_to_mutable_json_returns_independent_standard_json_values() -> None:
     call = ToolCall(
         "call-1",

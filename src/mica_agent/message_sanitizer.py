@@ -14,23 +14,128 @@ REDACTED = "[REDACTED]"
 _SENSITIVE_KEYS = frozenset(
     {
         "api_key",
+        "api-key",
         "apikey",
         "token",
         "access_token",
+        "access-token",
         "secret",
         "password",
         "authorization",
+        "client_secret",
+        "private_key",
     }
 )
 _SK_CREDENTIAL = re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{4,}")
 _BEARER_CREDENTIAL = re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
+_SENSITIVE_KEY = re.compile(
+    r"\b(api[_-]?key|apikey|token|access[_-]?token|secret|password|authorization|"
+    r"client[_-]?secret|private[_-]?key)\b",
+    re.IGNORECASE,
+)
+
+
+def _value_start(value: str, match: re.Match[str]) -> int | None:
+    key_start, key_end = match.span()
+    index = key_end
+    if (
+        key_start >= 2
+        and value[key_start - 2] == "\\"
+        and value[key_start - 1] in {'"', "'"}
+    ):
+        wrapper = value[key_start - 2 : key_start]
+        if value[key_end : key_end + 2] != wrapper:
+            return None
+        index += 2
+    elif key_start >= 1 and value[key_start - 1] in {'"', "'"}:
+        wrapper = value[key_start - 1]
+        if value[key_end : key_end + 1] != wrapper:
+            return None
+        index += 1
+    while index < len(value) and value[index].isspace():
+        index += 1
+    if index >= len(value) or value[index] not in {":", "="}:
+        return None
+    index += 1
+    while index < len(value) and value[index].isspace():
+        index += 1
+    return index
+
+
+def _quoted_value_end(value: str, start: int, delimiter: str) -> int:
+    quote = delimiter[-1]
+    index = start + len(delimiter)
+    while index < len(value):
+        if value[index] != quote:
+            index += 1
+            continue
+        backslashes = 0
+        before = index - 1
+        while before >= 0 and value[before] == "\\":
+            backslashes += 1
+            before -= 1
+        if (len(delimiter) == 1 and backslashes % 2 == 0) or (
+            len(delimiter) == 2 and backslashes == 1
+        ):
+            return index - 1 if len(delimiter) == 2 else index
+        index += 1
+    return len(value)
+
+
+def _credential_value_span(value: str, start: int) -> tuple[int, int] | None:
+    if start >= len(value):
+        return None
+    if value.startswith(REDACTED, start):
+        return start, start + len(REDACTED)
+    if value[start : start + 2] in {'\\"', "\\'"}:
+        delimiter = value[start : start + 2]
+        return start + 2, _quoted_value_end(value, start, delimiter)
+    if value[start] in {'"', "'"}:
+        return start + 1, _quoted_value_end(value, start, value[start])
+    end = start
+    while end < len(value) and value[end] not in "\r\n,;&|}]":
+        end += 1
+    value_end = end
+    while value_end > start and value[value_end - 1] in " \t\f\v":
+        value_end -= 1
+    return (start, value_end) if value_end > start else None
+
+
+def _redact_assignments(value: str) -> str:
+    parts: list[str] = []
+    cursor = 0
+    search_from = 0
+    while match := _SENSITIVE_KEY.search(value, search_from):
+        start = _value_start(value, match)
+        span = _credential_value_span(value, start) if start is not None else None
+        if span is None:
+            search_from = match.end()
+            continue
+        value_start, value_end = span
+        if value[value_start:value_end] == REDACTED:
+            search_from = value_end
+            continue
+        parts.extend((value[cursor:value_start], REDACTED))
+        cursor = value_end
+        search_from = value_end
+    if not parts:
+        return value
+    parts.append(value[cursor:])
+    return "".join(parts)
 
 
 def _redact_text(value: str) -> str:
     return _BEARER_CREDENTIAL.sub(
         REDACTED,
-        _SK_CREDENTIAL.sub(REDACTED, value),
+        _SK_CREDENTIAL.sub(REDACTED, _redact_assignments(value)),
     )
+
+
+def sanitize_presentation_text(value: str) -> str:
+    """清洗进入工具展示事件或会话的文本副本。"""
+    if not isinstance(value, str):
+        raise TypeError("value must be a str")
+    return _redact_text(value)
 
 
 def _redact_json(value: object) -> object:
@@ -91,4 +196,4 @@ def sanitize_tool_message(message: Message) -> Message:
     raise ValueError("message must be tool-related")
 
 
-__all__ = ["REDACTED", "sanitize_tool_message"]
+__all__ = ["REDACTED", "sanitize_presentation_text", "sanitize_tool_message"]

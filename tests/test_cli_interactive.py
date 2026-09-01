@@ -411,6 +411,13 @@ def test_ctrl_c_during_active_run_cancels_stream_and_exits() -> None:
     service, context_builder = make_session_dependencies(provider)
 
     async def main() -> int:
+        partial_written = asyncio.Event()
+
+        def write_out(text: str) -> None:
+            out(text)
+            if text == "partial":
+                partial_written.set()
+
         task = asyncio.create_task(
             run_interactive(
                 "https://api.example.test/v1",
@@ -418,13 +425,18 @@ def test_ctrl_c_during_active_run_cancels_stream_and_exits() -> None:
                 "test-model",
                 provider_factory=lambda url, key: provider,
                 read_line=InputScript("question"),
-                write_out=out,
+                write_out=write_out,
                 write_err=err,
                 session_service=service,
                 context_builder=context_builder,
             )
         )
-        await asyncio.sleep(0.05)  # 等待 Provider 产出部分文本并挂起
+        try:
+            await asyncio.wait_for(partial_written.wait(), timeout=1.0)
+        except TimeoutError:
+            task.cancel()
+            await task
+            raise
         task.cancel()
         return await task  # CLI 必须吞掉取消、完成清理并正常返回
 

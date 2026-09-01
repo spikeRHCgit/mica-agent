@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
 from typing import TypeAlias
@@ -195,6 +195,9 @@ class ToolResult:
     status: ToolResultStatus
     message: str
     data: JsonValue | None = None
+    # Presentation detail is an internal non-model handoff. Engine never
+    # serializes it into the TOOL message.
+    presentation: JsonObject | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         _validate_non_blank_text(self.call_id, "call_id")
@@ -204,3 +207,9 @@ class ToolResult:
         _validate_non_blank_text(self.message, "message")
         if self.data is not None:
             object.__setattr__(self, "data", _freeze_json(self.data, "data"))
+        if self.presentation is not None:
+            object.__setattr__(
+                self,
+                "presentation",
+                _freeze_json_object(self.presentation, "presentation"),
+            )

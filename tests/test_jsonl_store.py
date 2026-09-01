@@ -94,13 +94,73 @@ def write_v1_fixture(
     return payload
 
 
+def test_fixed_v2_tool_jsonl_loads_without_reexecuting_tools(tmp_path: Path) -> None:
+    store, identity = make_store(tmp_path)
+    session_id = "legacy-v2-tool"
+    meta = {
+        "record_type": "session_meta",
+        "format_version": 2,
+        "session_id": session_id,
+        "workspace_id": identity.workspace_id,
+        "workspace_path": str(identity.workspace_path),
+        "title": "legacy",
+        "created_at": "2026-08-21T03:04:05.000000+00:00",
+        "updated_at": "2026-08-21T03:04:05.000000+00:00",
+    }
+    turn = {
+        "record_type": "turn",
+        "format_version": 2,
+        "turn_id": "legacy-turn",
+        "run_id": "legacy-run",
+        "messages": [
+            {"role": "user", "content": "inspect"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "call_id": "call-read",
+                        "name": "read",
+                        "arguments": {"path": "notes.txt", "token": "sk-old"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "content": '{"status":"success","data":"old"}',
+                "tool_call_id": "call-read",
+            },
+            {"role": "assistant", "content": "done"},
+        ],
+        "completed_at": "2026-08-21T03:04:05.000000+00:00",
+    }
+    path = store.path_for_session(session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        b"".join(
+            json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode()
+            + b"\n"
+            for record in (meta, turn)
+        )
+    )
+
+    loaded = store.load(session_id)
+
+    assert loaded.meta.format_version == 2
+    assert len(loaded.turns) == 1
+    assert loaded.turns[0].tool_presentations == ()
+    assert loaded.turns[0].intermediate_messages[0].tool_calls[0].arguments[
+        "token"
+    ] == ("[REDACTED]")
+
+
 def test_fixed_v1_jsonl_loads_through_public_store(tmp_path: Path) -> None:
     store, identity = make_store(tmp_path)
     write_v1_fixture(store, identity, "legacy-session")
 
     loaded = store.load("legacy-session")
 
-    assert CURRENT_SESSION_FORMAT_VERSION == 2
+    assert CURRENT_SESSION_FORMAT_VERSION == 3
     assert loaded.meta.format_version == 1
     assert loaded.turns == (
         TurnEntry(
@@ -127,7 +187,7 @@ def test_session_filename_is_hash_only_and_path_safe() -> None:
     assert "/" not in filename and "\\" not in filename and ".." not in filename
 
 
-def test_append_turn_upgrades_v1_and_business_change_in_one_v2_snapshot(
+def test_append_turn_upgrades_v1_and_business_change_in_one_v3_snapshot(
     tmp_path: Path,
 ) -> None:
     store, identity = make_store(tmp_path)
@@ -139,9 +199,9 @@ def test_append_turn_upgrades_v1_and_business_change_in_one_v2_snapshot(
 
     raw = store.path_for_session("legacy-append").read_bytes()
     records = [json.loads(line) for line in raw.splitlines()]
-    assert upgraded.meta.format_version == 2
+    assert upgraded.meta.format_version == 3
     assert len(upgraded.turns) == 2
-    assert {record["format_version"] for record in records} == {2}
+    assert {record["format_version"] for record in records} == {3}
     assert all("messages" in record for record in records[1:])
     assert all("user_message" not in record for record in records[1:])
 
@@ -170,15 +230,15 @@ def test_v1_upgrade_replace_failure_preserves_bytes_and_allows_retry(
     upgraded = store.append_turn(
         "legacy-failure", make_turn(2, NOW + timedelta(seconds=1))
     )
-    assert upgraded.meta.format_version == 2
+    assert upgraded.meta.format_version == 3
     assert {
         json.loads(line)["format_version"] for line in path.read_bytes().splitlines()
-    } == {2}
+    } == {3}
 
 
-def test_v2_plain_text_turn_has_canonical_messages_wire_bytes(tmp_path: Path) -> None:
+def test_v3_plain_text_turn_has_canonical_messages_wire_bytes(tmp_path: Path) -> None:
     store, identity = make_store(tmp_path)
-    meta = make_meta(identity, session_id="v2-wire")
+    meta = make_meta(identity, session_id="v3-wire")
     turn = TurnEntry(
         "turn-v2",
         "run-v2",
@@ -189,21 +249,22 @@ def test_v2_plain_text_turn_has_canonical_messages_wire_bytes(tmp_path: Path) ->
 
     store.create(meta, (turn,))
 
-    raw = store.path_for_session("v2-wire").read_bytes()
+    raw = store.path_for_session("v3-wire").read_bytes()
     expected_meta = (
         '{"created_at":"2026-08-21T03:04:05.000000+00:00",'
-        '"format_version":2,"record_type":"session_meta",'
-        '"session_id":"v2-wire","title":"title",'
+        '"format_version":3,"record_type":"session_meta",'
+        '"session_id":"v3-wire","title":"title",'
         '"updated_at":"2026-08-21T03:04:05.000000+00:00",'
         f'"workspace_id":{json.dumps(identity.workspace_id)},'
         f'"workspace_path":{json.dumps(str(identity.workspace_path))}}}\n'
     ).encode()
     expected_turn = (
         b'{"completed_at":"2026-08-21T03:04:05.000000+00:00",'
-        b'"format_version":2,"messages":['
+        b'"format_version":3,"messages":['
         b'{"content":"question","role":"user"},'
         b'{"content":"answer","role":"assistant"}],'
-        b'"record_type":"turn","run_id":"run-v2","turn_id":"turn-v2"}\n'
+        b'"record_type":"turn","run_id":"run-v2","tool_presentations":[],'
+        b'"turn_id":"turn-v2"}\n'
     )
     assert raw == expected_meta + expected_turn
 

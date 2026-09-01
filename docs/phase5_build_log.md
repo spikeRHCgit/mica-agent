@@ -369,3 +369,48 @@ P5-11 不实现 openai-responses、models.json 或 Phase 7 配置系统，不实
 折叠、Ctrl+O、thinking 面板、动画或 Textual TUI；也不实现会话 v3、工具快照、Bash 动态输出、
 结构化 ask 或后续阶段能力。当前适配器只识别明确的 `reasoning_content` 字段，其他供应商字段
 不会自动探测；非空自定义映射代表调用方已声明允许档位，模型能力限制尚未由配置系统执行。
+
+# P5-12 工具呈现与历史快照
+
+## 目标与公共契约
+
+新增 `ToolPresentationKind`、`ToolPresentationStatus` 和 frozen/slots 的
+`ToolPresentationSnapshot`。快照在构造时深层冻结 JSON payload，统一清洗常见 API key、token、
+secret、password、Bearer 和 `sk-` 凭据；未知工具只产生固定摘要，不保存未知参数或完整结果。
+Engine 在每个工具调用执行前按真实顺序产生 `ToolPrepared`，结束时在兼容的 `ToolFinished` 上附加
+终态快照。`ToolPrepared` 和 `ToolFinished.presentation` 都只包含前端安全展示数据，不改变
+`ToolCall.arguments`、`ToolResult.data` 或模型上下文。文件工具在 `ToolResult.presentation` 中传递的
+内部展示明细也限制为 JSON object，并在构造时递归复制、冻结；它不进入 repr、标准 TOOL 消息或
+ProviderRequest。
+
+## 五个内置工具与安全结果
+
+`read` 只展示规范化工作区相对路径；`write` 在原文本中只替换敏感值，完整保留其余缩进、空格、
+换行、Markdown 和 Unicode，不解析后重序列化 JSON。凭据清洗覆盖带空格的单双引号值、合法转义
+引号、Bash 内嵌 JSON，以及未加引号但包含空格的值；未引号值持续到换行或明确的命令/结构分隔符，
+并保留分隔符及后续普通内容。普通引号文本同样保持不变。`edit` 使用真实文件 handler 生成最小
+逐行差异、最多三行上下文和真实行号；equal 区间分别按 old/new range 计算行号，插入、删除或
+不同长度替换后仍能反映两侧位置。失败/多重匹配时只保留无行号尝试差异，并以固定文案说明文件
+未改变；`bash` 展示脱敏命令、受限输出和退出码；`ask` 展示问题与文本回答。绝对、越界、设备名、
+重解析点和敏感路径不会原样进入展示快照。实时 Bash 增量和结构化 ask 仍不在本任务。
+
+## 会话 v3 与提交边界
+
+`TurnEntry` 增加独立的 `tool_presentations` 有序元组；v3 turn wire 明确保存
+`messages`、`tool_presentations` 和 `completed_at`，展示快照不混入模型消息。JSONL reader 严格读取
+v1/v2，writer 只通过锁内 copy-on-write 写 v3；首次 rename、branch、rewind、clear 或 append
+会原子升级旧版本，替换失败保持原字节。v1/v2 没有旧展示数据时不重跑工具、不读取工作区补造卡片。
+MicaApp 仅在 `RunCompleted` 且消息与终态快照均完整时提交整轮；失败、取消、等待中断、消费者
+提前关闭或存储失败均不写半轮。
+
+## 验证与边界
+
+新增工具展示、事件、真实文件 handler、Engine 多工具顺序、App 提交/恢复和 v1/v2/v3 JSONL
+回归测试；返工探针先分别复现 JSON 格式丢失、quoted credential 后缀残留、未引号空格值残留、
+ToolResult 展示明细可变以及 edit 位移后上下文行号错误，再以 `13 passed` 转为 GREEN。未实现
+Textual TUI、颜色/折叠、动态 Bash、结构化 ask、sidecar 会话或配置系统。
+
+P5-12 相关目标测试使用 `-W error` 为 `420 passed, 1 skipped`，全量测试为 `958 passed,
+2 skipped`，安装态分发测试为 `15 passed`；Ruff 检查、格式检查、`uv build --offline`、
+`git diff --check` 和 `git diff --cached --check` 均通过。当前保留 Windows 环境下普通 symlink
+不可用的既有跳过项；本任务没有执行 Git 写操作、远程操作或历史改写。

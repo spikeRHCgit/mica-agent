@@ -97,17 +97,17 @@ def write_v1_session(store: JsonlSessionStore, session_id: str) -> bytes:
 
 
 def test_v1_mutations_upgrade_and_branch_keeps_source_unchanged(tmp_path: Path) -> None:
-    service, store, _ = make_service(tmp_path, session_ids=["branch-v2"])
+    service, store, _ = make_service(tmp_path, session_ids=["branch-v3"])
     for session_id in ("rename-v1", "rewind-v1", "clear-v1", "source-v1"):
         write_v1_session(store, session_id)
 
-    assert service.rename_session("rename-v1", "renamed").meta.format_version == 2
-    assert service.rewind_session("rewind-v1", "turn-1").meta.format_version == 2
-    assert service.clear_session("clear-v1").meta.format_version == 2
+    assert service.rename_session("rename-v1", "renamed").meta.format_version == 3
+    assert service.rewind_session("rewind-v1", "turn-1").meta.format_version == 3
+    assert service.clear_session("clear-v1").meta.format_version == 3
 
     source_bytes = store.path_for_session("source-v1").read_bytes()
     branch = service.branch_session("source-v1")
-    assert branch.meta.format_version == 2
+    assert branch.meta.format_version == 3
     assert branch.turns[0].completed_at == NOW
     assert store.path_for_session("source-v1").read_bytes() == source_bytes
     assert store.load("source-v1").meta.format_version == 1

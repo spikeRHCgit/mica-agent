@@ -8,14 +8,20 @@ from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import TypeAlias
 
-from .message_sanitizer import sanitize_tool_message
+from .message_sanitizer import sanitize_presentation_text, sanitize_tool_message
 from .models import Message, MessageRole
 from .tool_contracts import ToolCall, to_mutable_json
+from .tool_presentation import (
+    ToolPresentationKind,
+    ToolPresentationSnapshot,
+    ToolPresentationStatus,
+    _safe_relative_path,
+)
 
-CURRENT_SESSION_FORMAT_VERSION = 2
+CURRENT_SESSION_FORMAT_VERSION = 3
 """当前会话 JSONL 写入格式版本。"""
 
-_SUPPORTED_SESSION_FORMAT_VERSIONS = frozenset({1, CURRENT_SESSION_FORMAT_VERSION})
+_SUPPORTED_SESSION_FORMAT_VERSIONS = frozenset({1, 2, CURRENT_SESSION_FORMAT_VERSION})
 
 
 class SessionError(Exception):
@@ -91,6 +97,7 @@ class TurnEntry:
     assistant_message: Message
     completed_at: datetime
     intermediate_messages: tuple[Message, ...] = ()
+    tool_presentations: tuple[ToolPresentationSnapshot, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_non_blank_text(self.turn_id, "turn_id")
@@ -112,6 +119,16 @@ class TurnEntry:
         ):
             raise TypeError("intermediate_messages must contain only Message values")
         self._validate_intermediate_messages()
+        if not isinstance(self.tool_presentations, tuple):
+            raise TypeError("tool_presentations must be a tuple")
+        if not all(
+            isinstance(presentation, ToolPresentationSnapshot)
+            for presentation in self.tool_presentations
+        ):
+            raise TypeError(
+                "tool_presentations must contain only ToolPresentationSnapshot values"
+            )
+        self._validate_tool_presentations()
         object.__setattr__(
             self,
             "intermediate_messages",
@@ -145,6 +162,42 @@ class TurnEntry:
                         "tool result order must match assistant tool_calls"
                     )
                 index += 1
+
+    def _validate_tool_presentations(self) -> None:
+        if not self.tool_presentations:
+            return
+        calls = tuple(
+            call
+            for message in self.intermediate_messages
+            if message.role is MessageRole.ASSISTANT
+            for call in message.tool_calls
+        )
+        if len(self.tool_presentations) != len(calls):
+            raise ValueError("tool presentations must match tool calls")
+        seen: set[str] = set()
+        for call, presentation in zip(calls, self.tool_presentations, strict=True):
+            if presentation.call_id in seen:
+                raise ValueError("duplicate tool presentation call_id")
+            if (
+                presentation.call_id != call.call_id
+                or presentation.tool_name != call.name
+            ):
+                raise ValueError("tool presentation identity must match tool call")
+            expected_kind = {
+                "read": ToolPresentationKind.READ,
+                "write": ToolPresentationKind.WRITE,
+                "edit": ToolPresentationKind.EDIT,
+                "bash": ToolPresentationKind.BASH,
+                "ask": ToolPresentationKind.ASK,
+            }.get(call.name, ToolPresentationKind.GENERIC)
+            if presentation.kind is not expected_kind:
+                raise ValueError("tool presentation kind must match tool call")
+            if presentation.status not in {
+                ToolPresentationStatus.SUCCESS,
+                ToolPresentationStatus.FAILED,
+            }:
+                raise ValueError("historical tool presentation must be terminal")
+            seen.add(presentation.call_id)
 
     @property
     def context_messages(self) -> tuple[Message, ...]:
@@ -303,6 +356,184 @@ def _parse_v2_message(value: object) -> Message:
     )
 
 
+def _serialize_tool_presentation(
+    presentation: ToolPresentationSnapshot,
+) -> dict[str, object]:
+    return {
+        "call_id": presentation.call_id,
+        "tool_name": presentation.tool_name,
+        "kind": presentation.kind.value,
+        "status": presentation.status.value,
+        "payload": to_mutable_json(presentation.payload),
+        "message": presentation.message,
+    }
+
+
+def _require_safe_presentation_text(
+    value: object, field_name: str, *, allow_blank: bool = True
+) -> str:
+    text = _require_record_text({field_name: value}, field_name)
+    if not allow_blank and not text.strip():
+        raise SessionFormatError(f"{field_name} must be non-empty and non-blank")
+    if sanitize_presentation_text(text) != text:
+        raise SessionFormatError(f"{field_name} contains unsafe text")
+    return text
+
+
+def _parse_presentation_line(
+    value: object, *, status: ToolPresentationStatus
+) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        raise SessionFormatError("presentation line must be a JSON object")
+    _require_exact_fields(
+        value,
+        frozenset({"kind", "text", "old_line", "new_line"}),
+        "presentation line",
+    )
+    kind = _require_record_text(value, "kind")
+    if kind not in {"context", "removed", "added"}:
+        raise SessionFormatError("presentation line kind is invalid")
+    text = _require_safe_presentation_text(value["text"], "text")
+    old_line = value["old_line"]
+    new_line = value["new_line"]
+    for line_number, field_name in ((old_line, "old_line"), (new_line, "new_line")):
+        if line_number is not None and (
+            isinstance(line_number, bool)
+            or not isinstance(line_number, int)
+            or line_number <= 0
+        ):
+            raise SessionFormatError(f"{field_name} must be a positive integer or null")
+    if kind == "context" and (old_line is None or new_line is None):
+        raise SessionFormatError("context line numbers are required")
+    if kind == "removed" and new_line is not None:
+        raise SessionFormatError("removed line numbers are invalid")
+    if (
+        kind == "removed"
+        and old_line is None
+        and status is ToolPresentationStatus.SUCCESS
+    ):
+        raise SessionFormatError("removed line number is required")
+    if kind == "added" and old_line is not None:
+        raise SessionFormatError("added line numbers are invalid")
+    if (
+        kind == "added"
+        and new_line is None
+        and status is ToolPresentationStatus.SUCCESS
+    ):
+        raise SessionFormatError("added line number is required")
+    return {
+        "kind": kind,
+        "text": text,
+        "old_line": old_line,
+        "new_line": new_line,
+    }
+
+
+def _parse_tool_presentation(value: object) -> ToolPresentationSnapshot:
+    if not isinstance(value, Mapping):
+        raise SessionFormatError("tool presentation must be a JSON object")
+    _require_exact_fields(
+        value,
+        frozenset({"call_id", "tool_name", "kind", "status", "payload", "message"}),
+        "tool presentation",
+    )
+    call_id = _require_non_blank_record_text(value, "call_id")
+    tool_name = _require_non_blank_record_text(value, "tool_name")
+    kind_value = _require_record_text(value, "kind")
+    status_value = _require_record_text(value, "status")
+    try:
+        kind = ToolPresentationKind(kind_value)
+        status = ToolPresentationStatus(status_value)
+    except ValueError:
+        raise SessionFormatError(
+            "tool presentation kind or status is invalid"
+        ) from None
+    payload_value = value["payload"]
+    if not isinstance(payload_value, Mapping):
+        raise SessionFormatError("tool presentation payload must be an object")
+    if not all(isinstance(key, str) for key in payload_value):
+        raise SessionFormatError("tool presentation payload keys must be strings")
+    message_value = value["message"]
+    if message_value is not None:
+        message_value = _require_safe_presentation_text(
+            message_value, "message", allow_blank=False
+        )
+    expected: frozenset[str]
+    if kind is ToolPresentationKind.READ:
+        expected = frozenset({"path"})
+    elif kind is ToolPresentationKind.WRITE:
+        expected = frozenset({"path", "content"})
+    elif kind is ToolPresentationKind.EDIT:
+        expected = frozenset({"path", "matched", "lines"})
+    elif kind is ToolPresentationKind.BASH:
+        expected = frozenset({"command", "output", "exit_code"})
+    elif kind is ToolPresentationKind.ASK:
+        expected = frozenset({"question", "answer"})
+    else:
+        expected = frozenset()
+    _require_exact_fields(payload_value, expected, "tool presentation payload")
+    payload: dict[str, object] = {}
+    if kind in {
+        ToolPresentationKind.READ,
+        ToolPresentationKind.WRITE,
+        ToolPresentationKind.EDIT,
+    }:
+        path = payload_value["path"]
+        if path != "" and _safe_relative_path(path) is None:
+            raise SessionFormatError("tool presentation path is invalid")
+        payload["path"] = path
+    if kind is ToolPresentationKind.WRITE:
+        payload["content"] = _require_safe_presentation_text(
+            payload_value["content"], "content"
+        )
+    elif kind is ToolPresentationKind.EDIT:
+        matched = payload_value["matched"]
+        if not isinstance(matched, bool):
+            raise SessionFormatError("presentation matched must be a boolean")
+        lines_value = payload_value["lines"]
+        if not isinstance(lines_value, list):
+            raise SessionFormatError("presentation lines must be an array")
+        payload["matched"] = matched
+        payload["lines"] = [
+            _parse_presentation_line(line, status=status) for line in lines_value
+        ]
+    elif kind is ToolPresentationKind.BASH:
+        payload["command"] = _require_safe_presentation_text(
+            payload_value["command"], "command"
+        )
+        payload["output"] = _require_safe_presentation_text(
+            payload_value["output"], "output"
+        )
+        exit_code = payload_value["exit_code"]
+        if exit_code is not None and (
+            isinstance(exit_code, bool)
+            or not isinstance(exit_code, int)
+            or exit_code < 0
+        ):
+            raise SessionFormatError(
+                "presentation exit_code must be a non-negative integer or null"
+            )
+        payload["exit_code"] = exit_code
+    elif kind is ToolPresentationKind.ASK:
+        payload["question"] = _require_safe_presentation_text(
+            payload_value["question"], "question"
+        )
+        payload["answer"] = _require_safe_presentation_text(
+            payload_value["answer"], "answer"
+        )
+    try:
+        return ToolPresentationSnapshot(
+            call_id=call_id,
+            tool_name=tool_name,
+            kind=kind,
+            status=status,
+            payload=payload,
+            message=message_value,
+        )
+    except (TypeError, ValueError):
+        raise SessionFormatError("tool presentation is invalid") from None
+
+
 def serialize_session_record(record: SessionRecord) -> dict[str, object]:
     """把一个强类型会话对象转换为标准 JSON 可表示的单条记录。"""
     if isinstance(record, SessionMeta):
@@ -324,6 +555,10 @@ def serialize_session_record(record: SessionRecord) -> dict[str, object]:
             "run_id": record.run_id,
             "messages": [
                 _serialize_v2_message(message) for message in record.context_messages
+            ],
+            "tool_presentations": [
+                _serialize_tool_presentation(presentation)
+                for presentation in record.tool_presentations
             ],
             "completed_at": _format_utc_datetime(record.completed_at),
         }
@@ -393,6 +628,42 @@ def deserialize_session_record(record: object) -> SessionRecord:
                 )
             except (TypeError, ValueError) as exc:
                 raise SessionFormatError(str(exc)) from None
+        if version == 2:
+            expected = frozenset(
+                {
+                    "record_type",
+                    "format_version",
+                    "turn_id",
+                    "run_id",
+                    "messages",
+                    "completed_at",
+                }
+            )
+            _require_exact_fields(record, expected, "turn")
+            messages_value = record["messages"]
+            if not isinstance(messages_value, list):
+                raise SessionFormatError("messages must be an array")
+            turn_id = _require_non_blank_record_text(record, "turn_id")
+            run_id = _require_non_blank_record_text(record, "run_id")
+            try:
+                messages = tuple(_parse_v2_message(value) for value in messages_value)
+                if len(messages) < 2:
+                    raise ValueError(
+                        "turn messages must contain user and final assistant"
+                    )
+                return TurnEntry(
+                    turn_id=turn_id,
+                    run_id=run_id,
+                    user_message=messages[0],
+                    assistant_message=messages[-1],
+                    completed_at=_parse_utc_datetime(record, "completed_at"),
+                    intermediate_messages=messages[1:-1],
+                )
+            except SessionFormatError:
+                raise
+            except (TypeError, ValueError):
+                raise SessionFormatError("turn messages are invalid") from None
+
         expected = frozenset(
             {
                 "record_type",
@@ -400,19 +671,36 @@ def deserialize_session_record(record: object) -> SessionRecord:
                 "turn_id",
                 "run_id",
                 "messages",
+                "tool_presentations",
                 "completed_at",
             }
         )
         _require_exact_fields(record, expected, "turn")
         messages_value = record["messages"]
+        presentations_value = record["tool_presentations"]
         if not isinstance(messages_value, list):
             raise SessionFormatError("messages must be an array")
+        if not isinstance(presentations_value, list):
+            raise SessionFormatError("tool_presentations must be an array")
         turn_id = _require_non_blank_record_text(record, "turn_id")
         run_id = _require_non_blank_record_text(record, "run_id")
         try:
             messages = tuple(_parse_v2_message(value) for value in messages_value)
+            presentations = tuple(
+                _parse_tool_presentation(value) for value in presentations_value
+            )
             if len(messages) < 2:
                 raise ValueError("turn messages must contain user and final assistant")
+            has_tool_calls = any(
+                message.role is MessageRole.ASSISTANT and message.tool_calls
+                for message in messages
+            )
+            # A v1/v2 turn rewritten during an atomic upgrade has no historical
+            # presentation data.  The wire cannot distinguish that case from a
+            # newly authored empty list, so preserve the explicit compatibility
+            # exception while rejecting every non-empty mismatch below.
+            if not has_tool_calls and presentations:
+                raise ValueError("plain turns cannot contain tool presentations")
             return TurnEntry(
                 turn_id=turn_id,
                 run_id=run_id,
@@ -420,9 +708,12 @@ def deserialize_session_record(record: object) -> SessionRecord:
                 assistant_message=messages[-1],
                 completed_at=_parse_utc_datetime(record, "completed_at"),
                 intermediate_messages=messages[1:-1],
+                tool_presentations=presentations,
             )
         except SessionFormatError:
             raise
         except (TypeError, ValueError):
-            raise SessionFormatError("turn messages are invalid") from None
+            raise SessionFormatError(
+                "turn messages or tool presentations are invalid"
+            ) from None
     raise SessionFormatError("unknown session record type")
