@@ -3,22 +3,46 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
+import inspect
 import math
 import os
 import shutil
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from functools import partial
 from pathlib import Path
 from typing import Protocol
 
 from .cancellation import CancellationRequested, CancellationToken
 from .interactions import UserInputResponse
+from .message_sanitizer import sanitize_presentation_text
 from .tool_contracts import ToolRequest, ToolResult, ToolResultStatus, ToolSpec
 from .tool_registry import DuplicateToolError, ToolRegistry
 from .workspace import WorkspaceIdentity
 
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 30.0
 MAX_COMMAND_OUTPUT_BYTES = 262_144
+
+ToolOutputReporter = Callable[[str, str, str], None]
+
+
+class _OutputReportingError(Exception):
+    """工具输出展示回调失败，不暴露回调内部异常。"""
+
+
+class _OutputReporterGate:
+    __slots__ = ("_enabled", "_reporter")
+
+    def __init__(self, reporter: ToolOutputReporter) -> None:
+        self._enabled = True
+        self._reporter = reporter
+
+    def close(self) -> None:
+        self._enabled = False
+
+    def __call__(self, call_id: str, tool_name: str, text: str) -> None:
+        if self._enabled:
+            _invoke_output_reporter(self._reporter, call_id, tool_name, text)
 
 
 class UserInputRequester(Protocol):
@@ -191,17 +215,83 @@ async def _stop_process_tree(process: asyncio.subprocess.Process | None) -> None
         pass
 
 
+def _invoke_output_reporter(
+    reporter: ToolOutputReporter,
+    call_id: str,
+    tool_name: str,
+    text: str,
+) -> None:
+    try:
+        result = reporter(call_id, tool_name, text)
+        if inspect.isawaitable(result):
+            close = getattr(result, "close", None)
+            if callable(close):
+                close()
+            elif isinstance(result, asyncio.Future):
+                result.cancel()
+            raise _OutputReportingError
+    except _OutputReportingError:
+        raise
+    except Exception:  # noqa: BLE001 - output reporting is a tool boundary.
+        raise _OutputReportingError from None
+
+
+def _is_async_output_reporter(reporter: object) -> bool:
+    call = reporter.__call__ if callable(reporter) else None  # type: ignore[attr-defined]
+    return any(
+        inspect.iscoroutinefunction(candidate) or inspect.isasyncgenfunction(candidate)
+        for candidate in (reporter, call)
+    )
+
+
+def _report_output_record(
+    reporter: ToolOutputReporter,
+    call_id: str,
+    tool_name: str,
+    record: str,
+) -> None:
+    try:
+        safe_text = sanitize_presentation_text(record)
+        if safe_text:
+            _invoke_output_reporter(reporter, call_id, tool_name, safe_text)
+    except Exception:  # noqa: BLE001 - output reporting is a tool boundary.
+        raise _OutputReportingError from None
+
+
 async def _read_limited(
-    stream: asyncio.StreamReader, limit: int
-) -> tuple[bytes | None, bool]:
-    output = bytearray()
+    stream: asyncio.StreamReader,
+    limit: int,
+    *,
+    reporter: ToolOutputReporter | None = None,
+    call_id: str = "",
+    tool_name: str = "bash",
+) -> tuple[str | None, bool]:
+    output: list[str] = []
+    record_buffer = ""
+    byte_count = 0
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     while True:
-        chunk = await stream.read(min(65_536, limit + 1 - len(output)))
+        chunk = await stream.read(min(65_536, limit + 1 - byte_count))
         if not chunk:
-            return bytes(output), False
-        output.extend(chunk)
-        if len(output) > limit:
+            text = decoder.decode(b"", final=True)
+            output.append(text)
+            if reporter is not None:
+                record_buffer += text
+                if record_buffer:
+                    _report_output_record(reporter, call_id, tool_name, record_buffer)
+            return "".join(output), False
+        byte_count += len(chunk)
+        if byte_count > limit:
             return None, True
+        text = decoder.decode(chunk, final=False)
+        output.append(text)
+        if reporter is None:
+            continue
+        record_buffer += text
+        while (newline := record_buffer.find("\n")) >= 0:
+            record = record_buffer[: newline + 1]
+            record_buffer = record_buffer[newline + 1 :]
+            _report_output_record(reporter, call_id, tool_name, record)
 
 
 async def _bash_handler(
@@ -210,13 +300,19 @@ async def _bash_handler(
     workspace: WorkspaceIdentity,
     executable: Path | None,
     timeout: float,
+    output_reporter: ToolOutputReporter | None = None,
 ) -> ToolResult:
     process: asyncio.subprocess.Process | None = None
-    output_task: asyncio.Task[tuple[bytes | None, bool]] | None = None
+    output_task: asyncio.Task[tuple[str | None, bool]] | None = None
     cancellation_task: asyncio.Task[None] | None = None
     wait_task: asyncio.Task[int] | None = None
+    reporter_gate = (
+        _OutputReporterGate(output_reporter) if output_reporter is not None else None
+    )
 
     async def cleanup() -> None:
+        if reporter_gate is not None:
+            reporter_gate.close()
         await _stop_process_tree(process)
         if output_task is not None and not output_task.done():
             try:
@@ -282,7 +378,13 @@ async def _bash_handler(
             )
         assert process.stdout is not None
         output_task = asyncio.create_task(
-            _read_limited(process.stdout, MAX_COMMAND_OUTPUT_BYTES)
+            _read_limited(
+                process.stdout,
+                MAX_COMMAND_OUTPUT_BYTES,
+                reporter=reporter_gate,
+                call_id=request.call_id,
+                tool_name="bash",
+            )
         )
         cancellation_task = asyncio.create_task(cancellation.wait())
         wait_task = asyncio.create_task(process.wait())
@@ -331,7 +433,7 @@ async def _bash_handler(
             )
         cancellation_task.cancel()
         await asyncio.gather(cancellation_task, return_exceptions=True)
-        text = output.decode("utf-8", errors="replace")
+        text = output
         if process.returncode == 0:
             return _result(
                 request,
@@ -344,6 +446,13 @@ async def _bash_handler(
             ToolResultStatus.EXECUTION_FAILED,
             "command exited with non-zero status",
             {"exit_code": process.returncode, "output": text},
+        )
+    except _OutputReportingError:
+        await cleanup()
+        return _result(
+            request,
+            ToolResultStatus.EXECUTION_FAILED,
+            "command output reporting failed",
         )
     except CancellationRequested:
         return _result(request, ToolResultStatus.CANCELLED, "operation cancelled")
@@ -423,6 +532,7 @@ def register_runtime_tools(
     *,
     bash_executable: str | Path | None = None,
     command_timeout_seconds: float = DEFAULT_COMMAND_TIMEOUT_SECONDS,
+    output_reporter: ToolOutputReporter | None = None,
 ) -> None:
     """显式且原子地注册 bash 与 ask，不执行外部行为。"""
     if not isinstance(registry, ToolRegistry):
@@ -431,6 +541,11 @@ def register_runtime_tools(
         raise TypeError("workspace must be a WorkspaceIdentity")
     if not callable(user_input_requester):
         raise TypeError("user_input_requester must be callable")
+    if output_reporter is not None:
+        if not callable(output_reporter):
+            raise TypeError("output_reporter must be callable or None")
+        if _is_async_output_reporter(output_reporter):
+            raise TypeError("output_reporter must be a synchronous callable")
     if (
         isinstance(command_timeout_seconds, bool)
         or not isinstance(command_timeout_seconds, (int, float))
@@ -456,6 +571,7 @@ def register_runtime_tools(
             workspace=workspace,
             executable=executable,
             timeout=float(command_timeout_seconds),
+            output_reporter=output_reporter,
         ),
     )
     registry.register(_ASK_SPEC, partial(_ask_handler, requester=user_input_requester))
@@ -464,6 +580,7 @@ def register_runtime_tools(
 __all__ = [
     "DEFAULT_COMMAND_TIMEOUT_SECONDS",
     "MAX_COMMAND_OUTPUT_BYTES",
+    "ToolOutputReporter",
     "UserInputRequester",
     "register_runtime_tools",
 ]

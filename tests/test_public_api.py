@@ -264,6 +264,7 @@ pathlib.Path.is_file = blocked
 pathlib.Path.home = blocked
 import mica_agent
 assert 'mica_agent.runtime_tools' not in sys.modules
+assert 'ToolOutputReporter' in mica_agent.__all__
 assert 'mica_agent.app' not in sys.modules
 assert 'mica_agent.engine' not in sys.modules
 assert 'mica_agent.cli' not in sys.modules
@@ -304,6 +305,14 @@ def test_top_level_exports_p5_04_runtime_tools() -> None:
     assert mica_agent.MAX_COMMAND_OUTPUT_BYTES == MAX_COMMAND_OUTPUT_BYTES
     assert mica_agent.UserInputRequester is UserInputRequester
     assert mica_agent.register_runtime_tools is register_runtime_tools
+
+
+def test_top_level_exports_tool_output_reporter() -> None:
+    from mica_agent import ToolOutputReporter as TopLevelToolOutputReporter
+    from mica_agent.runtime_tools import ToolOutputReporter
+
+    assert TopLevelToolOutputReporter is ToolOutputReporter
+    assert "ToolOutputReporter" in mica_agent.__all__
 
 
 def test_top_level_exports_p5_02_contracts() -> None:

@@ -14,6 +14,8 @@ from mica_agent.cancellation import CancellationToken
 from mica_agent.interactions import UserInputResponse
 from mica_agent.runtime_tools import (
     DEFAULT_COMMAND_TIMEOUT_SECONDS,
+    MAX_COMMAND_OUTPUT_BYTES,
+    _read_limited,
     register_runtime_tools,
 )
 from mica_agent.schema_validation import validate_tool_schema
@@ -1060,3 +1062,856 @@ def test_register_runtime_tools_exposes_valid_bash_and_ask_specs(
         "required": ("command",),
         "additionalProperties": False,
     }
+
+
+def test_register_runtime_tools_accepts_output_reporter(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ToolRegistry()
+    reported: list[tuple[str, str, str]] = []
+
+    def reporter(call_id: str, tool_name: str, safe_text: str) -> None:
+        reported.append((call_id, tool_name, safe_text))
+
+    register_runtime_tools(
+        registry,
+        resolve_workspace(workspace),
+        _answer,
+        output_reporter=reporter,
+    )
+    request = ToolRequest("bash-reporter", "bash", {"command": "printf 'one\ntwo\n'"})
+    original_arguments = request.arguments
+    result = asyncio.run(registry.resolve("bash").handler(request, CancellationToken()))
+
+    assert result.status is ToolResultStatus.SUCCESS
+    assert request.arguments == original_arguments
+    assert result.data == {"exit_code": 0, "output": "one\ntwo\n"}
+    assert reported == [
+        ("bash-reporter", "bash", "one\n"),
+        ("bash-reporter", "bash", "two\n"),
+    ]
+
+
+def test_register_runtime_tools_rejects_async_output_reporter(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ToolRegistry()
+
+    async def reporter(_call_id: str, _tool_name: str, _text: str) -> None:
+        return None
+
+    with pytest.raises(TypeError, match="synchronous callable"):
+        register_runtime_tools(
+            registry,
+            resolve_workspace(workspace),
+            _answer,
+            output_reporter=reporter,
+        )
+
+    assert registry.specs() == ()
+
+
+def test_register_runtime_tools_rejects_non_callable_output_reporter(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ToolRegistry()
+
+    with pytest.raises(TypeError, match="output_reporter"):
+        register_runtime_tools(
+            registry,
+            resolve_workspace(workspace),
+            _answer,
+            output_reporter=object(),  # type: ignore[arg-type]
+        )
+
+    assert registry.specs() == ()
+
+    with pytest.raises(ValueError, match="command_timeout_seconds"):
+        register_runtime_tools(
+            registry,
+            resolve_workspace(workspace),
+            _answer,
+            command_timeout_seconds=0,
+            output_reporter=lambda _call_id, _tool_name, _text: None,
+        )
+    assert registry.specs() == ()
+
+
+class _ChunkedStream:
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = iter(chunks)
+
+    async def read(self, size: int) -> bytes:
+        assert size > 0
+        return next(self._chunks, b"")
+
+
+def _tail_wait_command() -> str:
+    return (
+        "printf 'complete line\\nunterminated tail'; "
+        ": > waiting.marker; "
+        "while [ ! -f release.marker ]; do sleep 0.01; done; "
+        ": > after.marker"
+    )
+
+
+async def _wait_for_marker(path: Path) -> None:
+    while not path.exists():
+        await asyncio.sleep(0)
+
+
+def test_limited_reader_uses_incremental_utf8_and_complete_records() -> None:
+    chunks = [b"alpha \xe4", b"\xbd\xa0\r", b"\npartial \xff", b"\n"]
+    reported: list[tuple[str, str, str]] = []
+
+    def reporter(call_id: str, tool_name: str, safe_text: str) -> None:
+        reported.append((call_id, tool_name, safe_text))
+
+    output, exceeded = asyncio.run(
+        _read_limited(
+            _ChunkedStream(chunks),
+            100,
+            reporter=reporter,
+            call_id="call-1",
+            tool_name="bash",
+        )
+    )
+
+    assert not exceeded
+    assert output == "alpha 你\r\npartial �\n"
+    assert reported == [
+        ("call-1", "bash", "alpha 你\r\n"),
+        ("call-1", "bash", "partial �\n"),
+    ]
+
+
+def test_limited_reader_reports_eof_partial_record_without_empty_records() -> None:
+    reported: list[str] = []
+
+    output, exceeded = asyncio.run(
+        _read_limited(
+            _ChunkedStream([b"one\r", b"\n\npartial"]),
+            100,
+            reporter=lambda _call_id, _tool_name, text: reported.append(text),
+            call_id="call-1",
+        )
+    )
+
+    assert not exceeded
+    assert output == "one\r\n\npartial"
+    assert reported == ["one\r\n", "\n", "partial"]
+
+
+def test_limited_reader_without_reporter_keeps_complete_decoded_output() -> None:
+    output, exceeded = asyncio.run(
+        _read_limited(_ChunkedStream([b"plain \xe4", b"\xbd\xa0\npartial"]), 100)
+    )
+
+    assert not exceeded
+    assert output == "plain 你\npartial"
+
+
+def test_limited_reader_counts_raw_bytes_around_utf8_limit() -> None:
+    exact_payload = b"a" * (MAX_COMMAND_OUTPUT_BYTES - 3) + "你".encode()
+    output, exceeded = asyncio.run(
+        _read_limited(_ChunkedStream([exact_payload]), MAX_COMMAND_OUTPUT_BYTES)
+    )
+
+    assert not exceeded
+    assert output is not None
+    assert output.endswith("你")
+    assert len(output.encode("utf-8")) == MAX_COMMAND_OUTPUT_BYTES
+
+    over_payload = exact_payload + b"x"
+    output, exceeded = asyncio.run(
+        _read_limited(_ChunkedStream([over_payload]), MAX_COMMAND_OUTPUT_BYTES)
+    )
+
+    assert exceeded
+    assert output is None
+
+
+def test_limited_reader_sanitizes_each_complete_record_after_chunk_assembly() -> None:
+    payload = (
+        "plain 中文  继续\n"
+        "TOKEN=token-sensitive-marker with spaces\n"
+        "api_key='single-sensitive-marker'\n"
+        'authorization="double-sensitive-marker"\n'
+        'client_secret=\\"escaped-sensitive-marker\\"\n'
+        "Authorization: Bearer bearer-sensitive-marker\n"
+        "sk-sk-sensitive-marker\n"
+        "normal  text\n"
+    )
+    sensitive_values = [
+        "token-sensitive-marker",
+        "single-sensitive-marker",
+        "double-sensitive-marker",
+        "escaped-sensitive-marker",
+        "bearer-sensitive-marker",
+        "sk-sensitive-marker",
+    ]
+    reported: list[tuple[str, str, str]] = []
+
+    output, exceeded = asyncio.run(
+        _read_limited(
+            _ChunkedStream(
+                [
+                    payload.encode("utf-8")[index : index + 3]
+                    for index in range(0, len(payload.encode("utf-8")), 3)
+                ]
+            ),
+            1000,
+            reporter=lambda call_id, tool_name, text: reported.append(
+                (call_id, tool_name, text)
+            ),
+            call_id="call-credentials",
+            tool_name="bash",
+        )
+    )
+
+    assert not exceeded
+    assert output == payload
+    report_text = "".join(text for _call_id, _tool_name, text in reported)
+    assert all(value not in report_text for value in sensitive_values)
+    assert all(value not in repr(reported) for value in sensitive_values)
+    assert any("plain 中文  继续\n" == text for _call_id, _name, text in reported)
+    assert any("normal  text\n" == text for _call_id, _name, text in reported)
+    assert all(call_id == "call-credentials" for call_id, _name, _text in reported)
+    assert all(tool_name == "bash" for _call_id, tool_name, _text in reported)
+    assert all(text for _call_id, _tool_name, text in reported)
+
+
+def test_bash_reported_output_is_preserved_before_token_cancellation(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ToolRegistry()
+    reported: list[str] = []
+    first_record = asyncio.Event()
+
+    def reporter(_call_id: str, _tool_name: str, text: str) -> None:
+        reported.append(text)
+        first_record.set()
+
+    register_runtime_tools(
+        registry,
+        resolve_workspace(workspace),
+        _answer,
+        output_reporter=reporter,
+    )
+
+    async def scenario() -> object:
+        cancellation = CancellationToken()
+        task = asyncio.create_task(
+            registry.resolve("bash").handler(
+                ToolRequest(
+                    "bash-report-cancel",
+                    "bash",
+                    {"command": "printf 'before cancel\\n'; sleep 5"},
+                ),
+                cancellation,
+            )
+        )
+        await asyncio.wait_for(first_record.wait(), timeout=3)
+        cancellation.cancel()
+        return await asyncio.wait_for(task, timeout=3)
+
+    result = asyncio.run(scenario())
+
+    assert result.status is ToolResultStatus.CANCELLED
+    assert result.message == "operation cancelled"
+    assert reported == ["before cancel\n"]
+
+
+def test_bash_reported_output_is_preserved_before_timeout(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ToolRegistry()
+    reported: list[str] = []
+    first_record = asyncio.Event()
+
+    def reporter(_call_id: str, _tool_name: str, text: str) -> None:
+        reported.append(text)
+        first_record.set()
+
+    register_runtime_tools(
+        registry,
+        resolve_workspace(workspace),
+        _answer,
+        command_timeout_seconds=0.2,
+        output_reporter=reporter,
+    )
+
+    async def scenario() -> object:
+        task = asyncio.create_task(
+            registry.resolve("bash").handler(
+                ToolRequest(
+                    "bash-report-timeout",
+                    "bash",
+                    {"command": "printf 'before timeout\\n'; sleep 5"},
+                ),
+                CancellationToken(),
+            )
+        )
+        await asyncio.wait_for(first_record.wait(), timeout=3)
+        return await asyncio.wait_for(task, timeout=3)
+
+    result = asyncio.run(scenario())
+
+    assert result.status is ToolResultStatus.EXECUTION_FAILED
+    assert result.message == "command timed out"
+    assert reported == ["before timeout\n"]
+
+
+def test_bash_external_task_cancellation_re_raises_after_reporting(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ToolRegistry()
+    reported: list[str] = []
+    first_record = asyncio.Event()
+
+    def reporter(_call_id: str, _tool_name: str, text: str) -> None:
+        reported.append(text)
+        first_record.set()
+
+    register_runtime_tools(
+        registry,
+        resolve_workspace(workspace),
+        _answer,
+        output_reporter=reporter,
+    )
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            registry.resolve("bash").handler(
+                ToolRequest(
+                    "bash-report-task-cancel",
+                    "bash",
+                    {"command": "printf 'before task cancel\\n'; sleep 5"},
+                ),
+                CancellationToken(),
+            )
+        )
+        await asyncio.wait_for(first_record.wait(), timeout=3)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=3)
+
+    asyncio.run(scenario())
+    assert reported == ["before task cancel\n"]
+
+
+def test_bash_token_cancellation_closes_unterminated_report(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    release = workspace / "release.marker"
+    after = workspace / "after.marker"
+    waiting = workspace / "waiting.marker"
+    registry = ToolRegistry()
+    reported: list[str] = []
+    first_record = asyncio.Event()
+
+    def reporter(_call_id: str, _tool_name: str, text: str) -> None:
+        reported.append(text)
+        first_record.set()
+
+    register_runtime_tools(
+        registry,
+        resolve_workspace(workspace),
+        _answer,
+        output_reporter=reporter,
+    )
+
+    async def scenario() -> object:
+        cancellation = CancellationToken()
+        task = asyncio.create_task(
+            registry.resolve("bash").handler(
+                ToolRequest(
+                    "bash-tail-cancel",
+                    "bash",
+                    {"command": _tail_wait_command()},
+                ),
+                cancellation,
+            )
+        )
+        await asyncio.wait_for(first_record.wait(), timeout=3)
+        await asyncio.wait_for(_wait_for_marker(waiting), timeout=3)
+        assert reported == ["complete line\n"]
+        cancellation.cancel()
+        result = await asyncio.wait_for(task, timeout=3)
+        assert reported == ["complete line\n"]
+        release.write_text("release", encoding="utf-8")
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(_wait_for_marker(after), timeout=0.3)
+        current = asyncio.current_task()
+        assert current is not None
+        assert {live for live in asyncio.all_tasks() if live is not current} == set()
+        return result
+
+    result = asyncio.run(scenario())
+
+    assert result.status is ToolResultStatus.CANCELLED
+    assert result.message == "operation cancelled"
+    assert result.data is None
+    assert reported == ["complete line\n"]
+
+
+def test_bash_external_cancellation_closes_unterminated_report_and_reraises(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    release = workspace / "release.marker"
+    after = workspace / "after.marker"
+    waiting = workspace / "waiting.marker"
+    registry = ToolRegistry()
+    reported: list[str] = []
+    first_record = asyncio.Event()
+
+    def reporter(_call_id: str, _tool_name: str, text: str) -> None:
+        reported.append(text)
+        first_record.set()
+
+    register_runtime_tools(
+        registry,
+        resolve_workspace(workspace),
+        _answer,
+        output_reporter=reporter,
+    )
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            registry.resolve("bash").handler(
+                ToolRequest(
+                    "bash-tail-task-cancel",
+                    "bash",
+                    {"command": _tail_wait_command()},
+                ),
+                CancellationToken(),
+            )
+        )
+        await asyncio.wait_for(first_record.wait(), timeout=3)
+        await asyncio.wait_for(_wait_for_marker(waiting), timeout=3)
+        assert reported == ["complete line\n"]
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=3)
+        assert reported == ["complete line\n"]
+        release.write_text("release", encoding="utf-8")
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(_wait_for_marker(after), timeout=0.3)
+        current = asyncio.current_task()
+        assert current is not None
+        assert {live for live in asyncio.all_tasks() if live is not current} == set()
+
+    asyncio.run(scenario())
+    assert reported == ["complete line\n"]
+
+
+def test_bash_timeout_closes_unterminated_report_and_reaps_process_tree(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    release = workspace / "release.marker"
+    after = workspace / "after.marker"
+    waiting = workspace / "waiting.marker"
+    registry = ToolRegistry()
+    reported: list[str] = []
+    first_record = asyncio.Event()
+
+    def reporter(_call_id: str, _tool_name: str, text: str) -> None:
+        reported.append(text)
+        first_record.set()
+
+    register_runtime_tools(
+        registry,
+        resolve_workspace(workspace),
+        _answer,
+        command_timeout_seconds=1.0,
+        output_reporter=reporter,
+    )
+
+    async def scenario() -> object:
+        task = asyncio.create_task(
+            registry.resolve("bash").handler(
+                ToolRequest(
+                    "bash-tail-timeout",
+                    "bash",
+                    {"command": _tail_wait_command()},
+                ),
+                CancellationToken(),
+            )
+        )
+        await asyncio.wait_for(first_record.wait(), timeout=3)
+        await asyncio.wait_for(_wait_for_marker(waiting), timeout=3)
+        assert reported == ["complete line\n"]
+        result = await asyncio.wait_for(task, timeout=3)
+        assert reported == ["complete line\n"]
+        release.write_text("release", encoding="utf-8")
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(_wait_for_marker(after), timeout=0.3)
+        current = asyncio.current_task()
+        assert current is not None
+        assert {live for live in asyncio.all_tasks() if live is not current} == set()
+        return result
+
+    result = asyncio.run(scenario())
+
+    assert result.status is ToolResultStatus.EXECUTION_FAILED
+    assert result.message == "command timed out"
+    assert result.data is None
+    assert reported == ["complete line\n"]
+
+
+def test_bash_output_limit_stops_new_reports_after_excess_byte(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ToolRegistry()
+    reported: list[str] = []
+    register_runtime_tools(
+        registry,
+        resolve_workspace(workspace),
+        _answer,
+        output_reporter=lambda _call_id, _tool_name, text: reported.append(text),
+    )
+
+    result = asyncio.run(
+        registry.resolve("bash").handler(
+            ToolRequest(
+                "bash-report-limit",
+                "bash",
+                {"command": "printf 'before limit\\n'; head -c 262145 /dev/zero"},
+            ),
+            CancellationToken(),
+        )
+    )
+
+    assert result.status is ToolResultStatus.EXECUTION_FAILED
+    assert result.message == "command output exceeded limit"
+    assert result.data is None
+    assert reported == ["before limit\n"]
+
+
+def test_ask_never_calls_bash_output_reporter_on_success_failure_or_cancel(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ToolRegistry()
+    reported: list[str] = []
+    requester_started = asyncio.Event()
+
+    async def requester(
+        interaction_id: str, question: str, cancellation: CancellationToken
+    ) -> UserInputResponse:
+        if interaction_id == "ask-success":
+            return UserInputResponse(interaction_id, "answer")
+        requester_started.set()
+        await asyncio.Future()
+        raise AssertionError("requester should have been cancelled")
+
+    register_runtime_tools(
+        registry,
+        resolve_workspace(workspace),
+        requester,
+        output_reporter=lambda _call_id, _tool_name, text: reported.append(text),
+    )
+
+    async def scenario() -> tuple[object, object, object]:
+        handler = registry.resolve("ask").handler
+        success = await handler(
+            ToolRequest("ask-success", "ask", {"question": "Question?"}),
+            CancellationToken(),
+        )
+        failure = await handler(
+            ToolRequest("ask-failure", "ask", {"question": "Question?", "extra": 1}),
+            CancellationToken(),
+        )
+        cancellation = CancellationToken()
+        task = asyncio.create_task(
+            handler(
+                ToolRequest("ask-cancel", "ask", {"question": "Wait?"}),
+                cancellation,
+            )
+        )
+        await asyncio.wait_for(requester_started.wait(), timeout=1)
+        cancellation.cancel()
+        cancelled = await asyncio.wait_for(task, timeout=1)
+        return success, failure, cancelled
+
+    success, failure, cancelled = asyncio.run(scenario())
+
+    assert success.status is ToolResultStatus.SUCCESS
+    assert success.data == "answer"
+    assert failure.status is ToolResultStatus.INVALID_ARGUMENTS
+    assert cancelled.status is ToolResultStatus.CANCELLED
+    assert reported == []
+
+
+def test_bash_reports_complete_output_while_process_is_running(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    release = workspace / "release.marker"
+    registry = ToolRegistry()
+    reported: list[tuple[str, str, str]] = []
+    first_record = asyncio.Event()
+
+    def reporter(call_id: str, tool_name: str, safe_text: str) -> None:
+        reported.append((call_id, tool_name, safe_text))
+        if safe_text == "first record\n":
+            first_record.set()
+
+    register_runtime_tools(
+        registry,
+        resolve_workspace(workspace),
+        _answer,
+        output_reporter=reporter,
+    )
+
+    async def scenario() -> object:
+        task = asyncio.create_task(
+            registry.resolve("bash").handler(
+                ToolRequest(
+                    "bash-streaming",
+                    "bash",
+                    {
+                        "command": "printf 'first record\\n'; "
+                        'while [ ! -f "$PWD/release.marker" ]; do '
+                        "sleep 0.01; "
+                        "done; printf 'second record\\n'"
+                    },
+                ),
+                CancellationToken(),
+            )
+        )
+        await asyncio.wait_for(first_record.wait(), timeout=3)
+        assert not task.done()
+        release.write_text("release", encoding="utf-8")
+        return await asyncio.wait_for(task, timeout=3)
+
+    result = asyncio.run(scenario())
+
+    assert result.status is ToolResultStatus.SUCCESS
+    assert result.data == {
+        "exit_code": 0,
+        "output": "first record\nsecond record\n",
+    }
+    assert reported == [
+        ("bash-streaming", "bash", "first record\n"),
+        ("bash-streaming", "bash", "second record\n"),
+    ]
+
+
+def test_bash_reporter_follows_merged_stream_order_and_keeps_result_output(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ToolRegistry()
+    reported: list[str] = []
+    register_runtime_tools(
+        registry,
+        resolve_workspace(workspace),
+        _answer,
+        output_reporter=lambda _call_id, _tool_name, text: reported.append(text),
+    )
+
+    result = asyncio.run(
+        registry.resolve("bash").handler(
+            ToolRequest(
+                "bash-merged-stream",
+                "bash",
+                {"command": "printf 'stdout\\n'; printf 'stderr\\n' >&2; exit 7"},
+            ),
+            CancellationToken(),
+        )
+    )
+
+    assert result.status is ToolResultStatus.EXECUTION_FAILED
+    assert result.message == "command exited with non-zero status"
+    assert result.data == {
+        "exit_code": 7,
+        "output": "stdout\nstderr\n",
+    }
+    assert reported == ["stdout\n", "stderr\n"]
+
+
+def test_bash_reporter_reports_eof_tail_on_success(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ToolRegistry()
+    reported: list[str] = []
+    register_runtime_tools(
+        registry,
+        resolve_workspace(workspace),
+        _answer,
+        output_reporter=lambda _call_id, _tool_name, text: reported.append(text),
+    )
+
+    result = asyncio.run(
+        registry.resolve("bash").handler(
+            ToolRequest(
+                "bash-eof-tail-success",
+                "bash",
+                {"command": "printf 'complete line\\ntail without newline'"},
+            ),
+            CancellationToken(),
+        )
+    )
+
+    assert result.status is ToolResultStatus.SUCCESS
+    assert result.data == {
+        "exit_code": 0,
+        "output": "complete line\ntail without newline",
+    }
+    assert reported == ["complete line\n", "tail without newline"]
+
+
+def test_bash_reporter_reports_eof_tail_on_nonzero_exit(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ToolRegistry()
+    reported: list[str] = []
+    register_runtime_tools(
+        registry,
+        resolve_workspace(workspace),
+        _answer,
+        output_reporter=lambda _call_id, _tool_name, text: reported.append(text),
+    )
+
+    result = asyncio.run(
+        registry.resolve("bash").handler(
+            ToolRequest(
+                "bash-eof-tail-failure",
+                "bash",
+                {"command": "printf 'complete line\\ntail without newline'; exit 7"},
+            ),
+            CancellationToken(),
+        )
+    )
+
+    assert result.status is ToolResultStatus.EXECUTION_FAILED
+    assert result.message == "command exited with non-zero status"
+    assert result.data == {
+        "exit_code": 7,
+        "output": "complete line\ntail without newline",
+    }
+    assert reported == ["complete line\n", "tail without newline"]
+
+
+def test_bash_reporter_exception_is_safe_failure_and_reaps_process(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ToolRegistry()
+    marker = "reporter-sensitive-exception-marker"
+
+    def reporter(_call_id: str, _tool_name: str, _safe_text: str) -> None:
+        raise RuntimeError(marker)
+
+    register_runtime_tools(
+        registry,
+        resolve_workspace(workspace),
+        _answer,
+        output_reporter=reporter,
+    )
+
+    async def scenario() -> object:
+        return await asyncio.wait_for(
+            registry.resolve("bash").handler(
+                ToolRequest(
+                    "bash-reporter-error",
+                    "bash",
+                    {"command": "printf 'safe output\\n'; sleep 5"},
+                ),
+                CancellationToken(),
+            ),
+            timeout=3,
+        )
+
+    result = asyncio.run(scenario())
+
+    assert result.status is ToolResultStatus.EXECUTION_FAILED
+    assert result.message == "command output reporting failed"
+    assert result.data is None
+    assert marker not in result.message
+    assert "safe output" not in result.message
+    assert "traceback" not in result.message.lower()
+
+
+def test_bash_sync_reporter_returning_awaitable_is_safe_failure_and_reaped(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    release = workspace / "release.marker"
+    after = workspace / "after.marker"
+    waiting = workspace / "waiting.marker"
+    registry = ToolRegistry()
+    reporter_called = asyncio.Event()
+    returned: list[object] = []
+
+    async def pending_report() -> None:
+        await asyncio.Future()
+
+    def reporter(_call_id: str, _tool_name: str, _text: str) -> object:
+        coroutine = pending_report()
+        returned.append(coroutine)
+        reporter_called.set()
+        return coroutine
+
+    register_runtime_tools(
+        registry,
+        resolve_workspace(workspace),
+        _answer,
+        output_reporter=reporter,  # type: ignore[arg-type]
+        command_timeout_seconds=1.0,
+    )
+
+    async def scenario() -> object:
+        task = asyncio.create_task(
+            registry.resolve("bash").handler(
+                ToolRequest(
+                    "bash-awaitable-reporter",
+                    "bash",
+                    {
+                        "command": (
+                            ": > waiting.marker; "
+                            "printf 'complete line\\n'; "
+                            "while [ ! -f release.marker ]; do sleep 0.01; done; "
+                            ": > after.marker"
+                        )
+                    },
+                ),
+                CancellationToken(),
+            )
+        )
+        await asyncio.wait_for(reporter_called.wait(), timeout=3)
+        await asyncio.wait_for(_wait_for_marker(waiting), timeout=3)
+        result = await asyncio.wait_for(task, timeout=3)
+        release.write_text("release", encoding="utf-8")
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(_wait_for_marker(after), timeout=0.3)
+        current = asyncio.current_task()
+        assert current is not None
+        assert {live for live in asyncio.all_tasks() if live is not current} == set()
+        return result
+
+    result = asyncio.run(scenario())
+
+    assert result.status is ToolResultStatus.EXECUTION_FAILED
+    assert result.message == "command output reporting failed"
+    assert result.data is None
+    assert len(returned) == 1
+    assert getattr(returned[0], "cr_frame", None) is None

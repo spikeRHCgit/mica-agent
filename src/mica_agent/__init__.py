@@ -170,6 +170,7 @@ __all__ = [
     "ToolHandler",
     "ToolNotFoundError",
     "ToolOutputDelta",
+    "ToolOutputReporter",
     "ToolPrepared",
     "ToolPresentationKind",
     "ToolPresentationSnapshot",
@@ -258,6 +259,7 @@ def __getattr__(name: str) -> object:
     runtime_tool_exports = {
         "DEFAULT_COMMAND_TIMEOUT_SECONDS",
         "MAX_COMMAND_OUTPUT_BYTES",
+        "ToolOutputReporter",
         "UserInputRequester",
         "register_runtime_tools",
     }

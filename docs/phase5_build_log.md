@@ -417,16 +417,31 @@ P5-12 相关目标测试使用 `-W error` 为 `420 passed, 1 skipped`，全量�
 
 # P5-13 Bash 动态输出
 
-## 当前切片：事件契约
+## P5-13A：事件契约
 
-P5-13A 仅完成工具输出增量的公共事件契约切片。新增不可变的
+P5-13A 完成工具输出增量的公共事件契约切片。新增不可变的
 `ToolOutputDelta(run_id, seq, call_id, tool_name, text)`，沿用既有 Run、序号和工具名校验；
 输出文本必须是非空字符串，原样保留且不进入 dataclass 默认 `repr`。
 
-当前边界：`AgentEngine` 和 Bash 尚未产生 `ToolOutputDelta`；Bash 仍在结束后返回完整结果。
-本章节只记录事件契约切片，P5-13 整体尚未完成，P5-13B（Bash 流式读取及清洗）和
-P5-13C（Engine 事件转发及生命周期验收）尚未开始。
+## P5-13B：Bash 有界动态输出与安全清洗
 
-本切片验证结果：目标事件与公共 API 测试 `98 passed`，旧核心兼容组 `129 passed`，全量
-测试 `978 passed, 2 skipped`，分发测试 `15 passed`；Ruff 检查、格式检查、离线构建和
-diff 检查均通过。
+P5-13B 完成 Bash 运行时输出源切片。新增同步 `ToolOutputReporter`，仅向 Bash 注入可选的
+`(call_id, tool_name, safe_text)` 回调；`ask` 不使用该回调。Bash 继续合并 stdout/stderr，
+按原始字节数执行总上限，使用增量 UTF-8 解码，并以完整 LF/CRLF 记录或 EOF 剩余文本为
+报告单位。每条记录在回调前复用集中凭据清洗逻辑，最终 `ToolResult` 仍保留完整解码输出，
+不改变原有状态、消息或数据语义。
+
+无 reporter 时不执行增量展示清洗；超限、取消、超时和 reporter 异常都会停止后续报告并
+沿用进程树回收与异步任务清理边界，reporter 异常返回固定安全失败。返工补充了一个在
+cleanup 开始前关闭的报告 gate，确保异常终止阶段不会迟到报告 EOF 尾部；正常成功和非零
+退出仍报告 EOF 尾部。注册阶段拒绝异步函数，运行阶段对同步 callable 返回的 awaitable
+只做安全 close/cancel，不 await 且转换为固定失败。P5-13B 不创建 `ToolOutputDelta`，不
+接入 Engine、CLI 或 TUI。
+
+当前边界：`AgentEngine` 尚未产生 `ToolOutputDelta`，P5-13C（Engine 事件转发及生命周期
+验收）尚未开始；因此 P5-13 整体尚未完成。
+
+P5-13B 目标运行时与公共 API 测试 `95 passed`，事件/工具契约与 ToolExecutor 兼容组
+`133 passed`，分发测试 `15 passed`，全量测试 `1001 passed, 2 skipped`；Ruff 检查、格式
+检查、`uv build --offline` 和 diff 检查均通过。验证未出现 pending task、异步生成器、未关闭
+transport/pipe 或 `ResourceWarning`。本章节不记录测试凭据或原始敏感值。
