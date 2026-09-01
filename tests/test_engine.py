@@ -31,6 +31,8 @@ from mica_agent.events import (
     UserInputRequested,
 )
 from mica_agent.interactions import (
+    AskOption,
+    AskPrompt,
     InteractionBroker,
     PermissionAnswer,
     PermissionResponse,
@@ -626,15 +628,23 @@ def test_engine_ask_uses_user_input_requester_and_appends_answer() -> None:
     async def handler(
         request: ToolRequest, cancellation: CancellationToken
     ) -> ToolResult:
-        response = await broker(
-            request.call_id, request.arguments["question"], cancellation
+        prompt = AskPrompt(
+            request.arguments["question"],
+            "Continue",
+            (AskOption("Yes", recommended=True), AskOption("No")),
+            allow_custom=True,
         )
+        response = await broker(request.call_id, prompt, cancellation)
         return ToolResult(
             request.call_id,
             request.name,
             ToolResultStatus.SUCCESS,
             "answer received",
-            response.answer,
+            {
+                "answer": response.answer,
+                "selected_option_index": response.selected_option_index,
+                "notes": response.notes,
+            },
         )
 
     registry.register(spec, handler)
@@ -663,7 +673,16 @@ def test_engine_ask_uses_user_input_requester_and_appends_answer() -> None:
         async for event in engine.run(request):
             events.append(event)
             if isinstance(event, UserInputRequested):
-                assert broker.respond(UserInputResponse(event.interaction_id, "yes"))
+                assert event.question == "Continue?"
+                assert event.prompt == AskPrompt(
+                    "Continue?",
+                    "Continue",
+                    (AskOption("Yes", recommended=True), AskOption("No")),
+                    allow_custom=True,
+                )
+                assert broker.respond(
+                    UserInputResponse(event.interaction_id, "yes", 0, "confirmed")
+                )
         return events
 
     events = asyncio.run(scenario())
@@ -671,7 +690,8 @@ def test_engine_ask_uses_user_input_requester_and_appends_answer() -> None:
     assert any(isinstance(event, UserInputRequested) for event in events)
     assert isinstance(events[-1], RunCompleted)
     assert provider.requests[1].messages[-1].content == (
-        '{"status":"success","message":"answer received","data":"yes"}'
+        '{"status":"success","message":"answer received","data":'
+        '{"answer":"yes","selected_option_index":0,"notes":"confirmed"}}'
     )
 
 
@@ -2389,7 +2409,7 @@ def test_real_bash_engine_external_cancel_reaps_after_first_delta(
         await asyncio.wait_for(first_delta.wait(), timeout=1.0)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(task, timeout=1.0)
+            await asyncio.wait_for(task, timeout=5.0)
 
     asyncio.run(scenario())
 

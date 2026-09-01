@@ -143,7 +143,11 @@ def test_ask_answers_are_tool_results_including_empty_answer(
     assert provider.requests[1].messages[-1].role is MessageRole.TOOL
     result = json.loads(provider.requests[1].messages[-1].content)
     assert result["status"] == "success"
-    assert result["data"] == answer
+    assert result["data"] == {
+        "answer": answer,
+        "selected_option_index": None,
+        "notes": None,
+    }
     assert provider.requests[1].messages[-1].tool_call_id == "ask-call"
 
 

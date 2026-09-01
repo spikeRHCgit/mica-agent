@@ -337,11 +337,13 @@ class AgentEngine:
                                         message=interaction.message,
                                     )
                                 else:
+                                    assert interaction.ask_prompt is not None
                                     yield UserInputRequested(
                                         run_id=run_id,
                                         seq=seq,
                                         interaction_id=interaction.interaction_id,
                                         question=interaction.message,
+                                        prompt=interaction.ask_prompt,
                                     )
                                 seq += 1
                             elif signal.kind == "output":

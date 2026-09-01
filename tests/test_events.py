@@ -29,6 +29,7 @@ from mica_agent.events import (
     ToolStarted,
     UserInputRequested,
 )
+from mica_agent.interactions import AskOption, AskPrompt
 from mica_agent.tool_contracts import ToolResultStatus
 from mica_agent.tool_presentation import (
     ToolPresentationKind,
@@ -308,6 +309,25 @@ def test_interaction_events_carry_frontend_independent_data() -> None:
     assert not hasattr(permission, "exception")
     assert not hasattr(user_input, "ui")
     assert not hasattr(user_input, "terminal")
+
+
+def test_user_input_requested_preserves_or_builds_compatible_ask_prompt() -> None:
+    legacy = UserInputRequested("run-1", 2, "interaction-legacy", "Continue?")
+    prompt = AskPrompt(
+        "Which encoding?",
+        "Encoding",
+        (AskOption("UTF-8", recommended=True), AskOption("Latin-1")),
+        allow_custom=True,
+    )
+    structured = UserInputRequested(
+        "run-1", 3, "interaction-structured", prompt.question, prompt
+    )
+
+    assert legacy.prompt == AskPrompt("Continue?")
+    assert structured.question == prompt.question
+    assert structured.prompt is prompt
+    with pytest.raises(ValueError, match="prompt"):
+        UserInputRequested("run-1", 4, "interaction-bad", "Different?", prompt)
 
 
 @pytest.mark.parametrize("run_id", ["", "   ", "\t\n"])

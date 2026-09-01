@@ -104,6 +104,7 @@ class InteractionRequest:
     call_id: str
     tool_name: str
     message: str
+    ask_prompt: AskPrompt | None = None
 
     def __post_init__(self) -> None:
         _validate_interaction_id(self.interaction_id)
@@ -115,6 +116,15 @@ class InteractionRequest:
             raise ValueError("tool_name must be non-empty and non-blank")
         if not isinstance(self.message, str) or not self.message.strip():
             raise ValueError("message must be non-empty and non-blank")
+        if self.kind is InteractionKind.USER_INPUT:
+            if self.ask_prompt is None:
+                object.__setattr__(self, "ask_prompt", AskPrompt(self.message))
+            elif not isinstance(self.ask_prompt, AskPrompt):
+                raise TypeError("ask_prompt must be an AskPrompt or None")
+            elif self.ask_prompt.question != self.message:
+                raise ValueError("ask_prompt question must match message")
+        elif self.ask_prompt is not None:
+            raise ValueError("permission requests must not include ask_prompt")
 
 
 @dataclass(slots=True)
@@ -172,10 +182,14 @@ class InteractionBroker:
     async def request_user_input(
         self,
         interaction_id: str,
-        question: str,
+        prompt: AskPrompt | str,
         cancellation: CancellationToken,
     ) -> UserInputResponse:
         """实现 UserInputRequester 协议并等待匹配回答。"""
+        if isinstance(prompt, str):
+            prompt = AskPrompt(prompt)
+        elif not isinstance(prompt, AskPrompt):
+            raise TypeError("prompt must be an AskPrompt or str")
         request_interaction_id = self._new_interaction_id()
         response = await self._request(
             InteractionRequest(
@@ -183,21 +197,27 @@ class InteractionBroker:
                 InteractionKind.USER_INPUT,
                 interaction_id,
                 "ask",
-                question,
+                prompt.question,
+                prompt,
             ),
             cancellation,
         )
         if not isinstance(response, UserInputResponse):
             raise TypeError("user input response type mismatch")
-        return UserInputResponse(interaction_id, response.answer)
+        return UserInputResponse(
+            interaction_id,
+            response.answer,
+            response.selected_option_index,
+            response.notes,
+        )
 
     async def __call__(
         self,
         interaction_id: str,
-        question: str,
+        prompt: AskPrompt | str,
         cancellation: CancellationToken,
     ) -> UserInputResponse:
-        return await self.request_user_input(interaction_id, question, cancellation)
+        return await self.request_user_input(interaction_id, prompt, cancellation)
 
     def respond(self, response: PermissionResponse | UserInputResponse) -> bool:
         """提交一次响应；错误类型、ID、重复和迟到响应均返回 False。"""

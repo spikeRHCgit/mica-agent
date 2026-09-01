@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .cancellation import CancellationRequested, CancellationToken
-from .interactions import UserInputResponse
+from .interactions import AskPrompt, UserInputResponse
 from .message_sanitizer import sanitize_presentation_text
 from .tool_contracts import ToolRequest, ToolResult, ToolResultStatus, ToolSpec
 from .tool_registry import DuplicateToolError, ToolRegistry
@@ -51,7 +51,7 @@ class UserInputRequester(Protocol):
     def __call__(
         self,
         interaction_id: str,
-        question: str,
+        prompt: AskPrompt,
         cancellation: CancellationToken,
     ) -> Awaitable[UserInputResponse]: ...
 
@@ -484,7 +484,7 @@ async def _ask_handler(
                 request, ToolResultStatus.INVALID_ARGUMENTS, "invalid question"
             )
         requester_task = asyncio.ensure_future(
-            requester(request.call_id, question, cancellation)
+            requester(request.call_id, AskPrompt(question), cancellation)
         )
         cancellation_task = asyncio.create_task(cancellation.wait())
         try:
@@ -509,7 +509,11 @@ async def _ask_handler(
                 request,
                 ToolResultStatus.SUCCESS,
                 "user input received",
-                response.answer,
+                {
+                    "answer": response.answer,
+                    "selected_option_index": response.selected_option_index,
+                    "notes": response.notes,
+                },
             )
         finally:
             cancellation_task.cancel()

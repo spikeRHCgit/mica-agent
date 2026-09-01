@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
+from .interactions import AskPrompt
 from .tool_contracts import ToolResultStatus, _validate_tool_name
 from .tool_presentation import (
     ToolPresentationSnapshot,
@@ -240,12 +241,19 @@ class UserInputRequested:
     seq: int
     interaction_id: str
     question: str
+    prompt: AskPrompt | None = None
 
     def __post_init__(self) -> None:
         _validate_run_id(self.run_id)
         _validate_seq(self.seq)
         _validate_non_blank_text(self.interaction_id, "interaction_id")
         _validate_non_blank_text(self.question, "question")
+        if self.prompt is None:
+            object.__setattr__(self, "prompt", AskPrompt(self.question))
+        elif not isinstance(self.prompt, AskPrompt):
+            raise TypeError("prompt must be an AskPrompt or None")
+        elif self.prompt.question != self.question:
+            raise ValueError("prompt question must match question")
 
 
 @dataclass(frozen=True, slots=True)

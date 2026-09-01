@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from mica_agent.cancellation import CancellationToken
-from mica_agent.interactions import UserInputResponse
+from mica_agent.interactions import AskPrompt, UserInputResponse
 from mica_agent.runtime_tools import (
     DEFAULT_COMMAND_TIMEOUT_SECONDS,
     MAX_COMMAND_OUTPUT_BYTES,
@@ -24,7 +24,7 @@ from mica_agent.tool_registry import DuplicateToolError, ToolRegistry
 from mica_agent.workspace import resolve_workspace
 
 
-async def _answer(interaction_id: str, question: str, cancellation) -> object:
+async def _answer(interaction_id: str, prompt: AskPrompt, cancellation) -> object:
     raise AssertionError("requester should not be called during registration")
 
 
@@ -34,10 +34,10 @@ def test_ask_returns_matching_user_response(tmp_path: Path) -> None:
     registry = ToolRegistry()
 
     async def requester(
-        interaction_id: str, question: str, cancellation: CancellationToken
-    ):
-        assert question == "Continue?"
-        return UserInputResponse(interaction_id, "")
+        interaction_id: str, prompt: AskPrompt, cancellation: CancellationToken
+    ) -> UserInputResponse:
+        assert prompt == AskPrompt("Continue?")
+        return UserInputResponse(interaction_id, "", 0, "kept")
 
     register_runtime_tools(registry, resolve_workspace(workspace), requester)
     result = asyncio.run(
@@ -51,7 +51,11 @@ def test_ask_returns_matching_user_response(tmp_path: Path) -> None:
 
     assert result.status.value == "success"
     assert result.message == "user input received"
-    assert result.data == ""
+    assert result.data == {
+        "answer": "",
+        "selected_option_index": 0,
+        "notes": "kept",
+    }
 
 
 def test_ask_cancellation_cancels_waiting_requester(tmp_path: Path) -> None:
@@ -61,7 +65,7 @@ def test_ask_cancellation_cancels_waiting_requester(tmp_path: Path) -> None:
     requester_cancelled = asyncio.Event()
 
     async def requester(
-        interaction_id: str, question: str, cancellation: CancellationToken
+        interaction_id: str, prompt: AskPrompt, cancellation: CancellationToken
     ):
         try:
             await asyncio.Future()
@@ -103,7 +107,7 @@ def test_ask_rejects_invalid_requester_response(
     registry = ToolRegistry()
 
     async def requester(
-        interaction_id: str, question: str, cancellation: CancellationToken
+        interaction_id: str, prompt: AskPrompt, cancellation: CancellationToken
     ) -> object:
         return response
 
@@ -127,7 +131,7 @@ def test_ask_handler_task_cancellation_waits_for_requester(tmp_path: Path) -> No
     requester_cancelled = asyncio.Event()
 
     async def requester(
-        interaction_id: str, question: str, cancellation: CancellationToken
+        interaction_id: str, prompt: AskPrompt, cancellation: CancellationToken
     ) -> UserInputResponse:
         try:
             await asyncio.Future()
@@ -159,7 +163,7 @@ def test_ask_requester_exception_is_safe_failure(tmp_path: Path) -> None:
     registry = ToolRegistry()
 
     async def requester(
-        interaction_id: str, question: str, cancellation: CancellationToken
+        interaction_id: str, prompt: AskPrompt, cancellation: CancellationToken
     ) -> UserInputResponse:
         raise RuntimeError("secret exception detail")
 
@@ -184,7 +188,7 @@ def test_ask_does_not_call_requester_when_already_cancelled(tmp_path: Path) -> N
     called = False
 
     async def requester(
-        interaction_id: str, question: str, cancellation: CancellationToken
+        interaction_id: str, prompt: AskPrompt, cancellation: CancellationToken
     ) -> UserInputResponse:
         nonlocal called
         called = True
@@ -212,7 +216,7 @@ def test_ask_accepts_requester_returning_future(tmp_path: Path) -> None:
     registry = ToolRegistry()
 
     def requester(
-        interaction_id: str, question: str, cancellation: CancellationToken
+        interaction_id: str, prompt: AskPrompt, cancellation: CancellationToken
     ) -> asyncio.Future[UserInputResponse]:
         future: asyncio.Future[UserInputResponse] = (
             asyncio.get_running_loop().create_future()
@@ -229,7 +233,11 @@ def test_ask_accepts_requester_returning_future(tmp_path: Path) -> None:
     )
 
     assert result.status is ToolResultStatus.SUCCESS
-    assert result.data == "answer"
+    assert result.data == {
+        "answer": "answer",
+        "selected_option_index": None,
+        "notes": None,
+    }
 
 
 def test_ask_rejects_missing_extra_and_blank_question(tmp_path: Path) -> None:
@@ -239,7 +247,7 @@ def test_ask_rejects_missing_extra_and_blank_question(tmp_path: Path) -> None:
     calls = 0
 
     async def requester(
-        interaction_id: str, question: str, cancellation: CancellationToken
+        interaction_id: str, prompt: AskPrompt, cancellation: CancellationToken
     ) -> UserInputResponse:
         nonlocal calls
         calls += 1
@@ -1056,6 +1064,12 @@ def test_register_runtime_tools_exposes_valid_bash_and_ask_specs(
     assert [spec.name for spec in specs] == ["ask", "bash"]
     for spec in specs:
         validate_tool_schema(spec)
+    assert specs[0].input_schema == {
+        "type": "object",
+        "properties": {"question": {"type": "string", "minLength": 1}},
+        "required": ("question",),
+        "additionalProperties": False,
+    }
     assert specs[1].input_schema == {
         "type": "object",
         "properties": {"command": {"type": "string", "minLength": 1}},
@@ -1612,7 +1626,7 @@ def test_ask_never_calls_bash_output_reporter_on_success_failure_or_cancel(
     requester_started = asyncio.Event()
 
     async def requester(
-        interaction_id: str, question: str, cancellation: CancellationToken
+        interaction_id: str, prompt: AskPrompt, cancellation: CancellationToken
     ) -> UserInputResponse:
         if interaction_id == "ask-success":
             return UserInputResponse(interaction_id, "answer")
@@ -1652,7 +1666,11 @@ def test_ask_never_calls_bash_output_reporter_on_success_failure_or_cancel(
     success, failure, cancelled = asyncio.run(scenario())
 
     assert success.status is ToolResultStatus.SUCCESS
-    assert success.data == "answer"
+    assert success.data == {
+        "answer": "answer",
+        "selected_option_index": None,
+        "notes": None,
+    }
     assert failure.status is ToolResultStatus.INVALID_ARGUMENTS
     assert cancelled.status is ToolResultStatus.CANCELLED
     assert reported == []

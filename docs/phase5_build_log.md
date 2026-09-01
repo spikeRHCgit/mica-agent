@@ -508,5 +508,19 @@ bool 校验。`AskPrompt` 只接受 tuple/list 选项输入，并在构造时复
 Prompt 或任何运行时对象。
 
 目标交互与公共 API 测试为 `87 passed`，与 events/runtime tools/Engine 的兼容组为 `296 passed`，
-安装态分发测试为 `15 passed`。P5-14B 的 ToolSpec、runtime handler 与 Broker/Engine 接入，P5-14C
-的 CLI 或会话闭环，以及 Textual TUI 均未开始。
+安装态分发测试为 `15 passed`。P5-14A 的公共数据契约在本切片基础上由 P5-14B 接入 runtime
+ask、InteractionBroker、InteractionRequest、AgentEngine 和 `UserInputRequested`：runtime 仍仅以
+`question` 构造 Provider 可见的原有 `_ASK_SPEC`，内部传递完整 `AskPrompt`；成功 `ToolResult.data`
+固定为有序的 `answer`、`selected_option_index`、`notes` 三字段映射。Broker 在 UI interaction ID
+与原始 tool call ID 重映射时保留完整 `UserInputResponse`，Engine 原样转发 Prompt；旧字符串调用和
+旧事件构造继续兼容，Prompt 与 question 不一致以及权限请求携带 Prompt 均固定拒绝。未接入 CLI、TUI、
+Provider、会话或持久化，也未修改权限交互。
+
+P5-14B 目标测试为 `275 passed`（含 `-W error`），P5-08 普通回答与空字符串回答兼容测试为
+`23 passed`，CLI/App/P5-08/P5-13 兼容组为 `104 passed`，安装态分发测试为 `15 passed`，全量测试
+为 `1074 passed, 2 skipped`；Ruff、格式检查、`uv build --offline`、`git diff --check` 与
+`git diff --cached --check` 均通过。经 master 明确授权，`tests/test_p5_08_integration.py` 仅将
+参数化 ask 测试中旧的 `assert result["data"] == answer` 更新为上述三字段对象，普通回答和空回答
+均通过；该文件的 status、tool_call_id、TOOL Message、安全性及其他 P5-08 产品语义断言未修改。
+`tasks/lessons.md` 保留 master 管理的既有修改，worker 未编辑。P5-14C 的 CLI 或会话闭环以及
+Textual TUI 尚未开始。

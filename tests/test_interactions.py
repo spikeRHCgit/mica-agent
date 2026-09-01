@@ -13,6 +13,7 @@ from mica_agent.interactions import (
     AskPrompt,
     InteractionBroker,
     InteractionKind,
+    InteractionRequest,
     PermissionAnswer,
     PermissionResponse,
     UserInputResponse,
@@ -76,6 +77,44 @@ def test_responses_validate_answer_types() -> None:
         UserInputResponse("interaction-1", b"answer")  # type: ignore[arg-type]
 
 
+def test_interaction_request_validates_ask_prompt_by_interaction_kind() -> None:
+    prompt = AskPrompt("Continue?")
+    legacy = InteractionRequest(
+        "interaction-legacy", InteractionKind.USER_INPUT, "call-ask", "ask", "Continue?"
+    )
+
+    assert legacy.ask_prompt == prompt
+    assert (
+        InteractionRequest(
+            "interaction-structured",
+            InteractionKind.USER_INPUT,
+            "call-ask",
+            "ask",
+            "Continue?",
+            prompt,
+        ).ask_prompt
+        is prompt
+    )
+    with pytest.raises(ValueError, match="ask_prompt"):
+        InteractionRequest(
+            "interaction-bad",
+            InteractionKind.USER_INPUT,
+            "call-ask",
+            "ask",
+            "Different?",
+            prompt,
+        )
+    with pytest.raises(ValueError, match="permission"):
+        InteractionRequest(
+            "interaction-permission",
+            InteractionKind.PERMISSION,
+            "call-write",
+            "write",
+            "Allow?",
+            prompt,
+        )
+
+
 def test_interaction_broker_matches_permission_response_once() -> None:
     async def scenario() -> None:
         broker = InteractionBroker(
@@ -126,11 +165,42 @@ def test_interaction_broker_user_input_cancellation_cleans_waiter() -> None:
         request = await asyncio.wait_for(broker.next_request(), timeout=0.1)
         assert request.kind is InteractionKind.USER_INPUT
         assert request.message == "What?"
+        assert request.ask_prompt == AskPrompt("What?")
         cancellation.cancel()
         with pytest.raises(CancellationRequested):
             await asyncio.wait_for(waiting, timeout=0.1)
         assert (
             broker.respond(UserInputResponse(request.interaction_id, "late")) is False
+        )
+
+    asyncio.run(scenario())
+
+
+def test_interaction_broker_preserves_structured_prompt_and_response_fields() -> None:
+    prompt = AskPrompt(
+        "Which encoding?",
+        "Encoding",
+        (AskOption("UTF-8", recommended=True), AskOption("Latin-1")),
+        allow_custom=True,
+    )
+
+    async def scenario() -> None:
+        broker = InteractionBroker(
+            interaction_id_factory=iter(["structured-ui"]).__next__
+        )
+        waiting = asyncio.create_task(
+            broker.request_user_input("call-ask", prompt, CancellationToken())
+        )
+        request = await asyncio.wait_for(broker.next_request(), timeout=0.1)
+        assert request.kind is InteractionKind.USER_INPUT
+        assert request.call_id == "call-ask"
+        assert request.message == prompt.question
+        assert request.ask_prompt is prompt
+        assert broker.respond(
+            UserInputResponse(request.interaction_id, "UTF-8", 0, "portable")
+        )
+        assert await asyncio.wait_for(waiting, timeout=0.1) == UserInputResponse(
+            "call-ask", "UTF-8", 0, "portable"
         )
 
     asyncio.run(scenario())
