@@ -292,6 +292,15 @@ Textual TUI 仍属于后续任务。
 stderr 实时显示输出，正式模型回复仍只进入 stdout；动态事件不进入 Provider 消息、完成快照
 或 JSONL。安装态 wheel 已在 Unicode 与空格工作区使用真实 Windows Git Bash 完成验收。
 
+### P5-14：结构化 ask
+
+状态：进行中；P5-14A、P5-14B 已完成并通过 master 验收。
+
+已建立 `AskOption`、`AskPrompt` 和扩展后的 `UserInputResponse` 公共契约，并打通 runtime ask、
+InteractionBroker、Engine 与 `UserInputRequested` 的结构化 Prompt 传递。后续切片负责响应与
+Prompt 的一致性校验，以及 Provider ToolSpec、基础 CLI 选择交互和安装态闭环；Textual TUI
+仍不属于本任务。
+
 ## 8. 测试与验收
 
 默认测试不得访问真实网络、真实 HOME、真实 Key 或工作区外用户文件。至少覆盖：
