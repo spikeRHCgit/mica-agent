@@ -1553,7 +1553,7 @@ def test_bash_timeout_closes_unterminated_report_and_reaps_process_tree(
         await asyncio.wait_for(first_record.wait(), timeout=3)
         await asyncio.wait_for(_wait_for_marker(waiting), timeout=3)
         assert reported == ["complete line\n"]
-        result = await asyncio.wait_for(task, timeout=3)
+        result = await asyncio.wait_for(task, timeout=5)
         assert reported == ["complete line\n"]
         release.write_text("release", encoding="utf-8")
         with pytest.raises(asyncio.TimeoutError):

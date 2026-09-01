@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
 
@@ -24,6 +25,7 @@ from mica_agent.events import (
     RunStarted,
     TextDelta,
     ToolFinished,
+    ToolOutputDelta,
     ToolPrepared,
     ToolStarted,
     UserInputRequested,
@@ -54,6 +56,7 @@ from mica_agent.providers import (
     TextDelta as ProviderTextDelta,
 )
 from mica_agent.reasoning import ReasoningEffort
+from mica_agent.runtime_tools import register_runtime_tools
 from mica_agent.tool_contracts import (
     ToolCall,
     ToolRequest,
@@ -69,6 +72,7 @@ from mica_agent.tool_presentation import (
     prepare_tool_presentation,
 )
 from mica_agent.tool_registry import ToolRegistry
+from mica_agent.workspace import resolve_workspace
 
 
 def _request() -> ProviderRequest:
@@ -164,6 +168,27 @@ def _lookup_executor() -> tuple[ToolExecutor, ToolRegistry]:
         ),
         registry,
     )
+
+
+def _runtime_bash_executor(workspace: Path) -> ToolExecutor:
+    registry = ToolRegistry()
+    executor = ToolExecutor(
+        registry,
+        PolicyEngine(PermissionMode.DEFAULT, allow_rules=[lambda _: True]),
+    )
+
+    async def requester(
+        interaction_id: str, question: str, cancellation: CancellationToken
+    ) -> UserInputResponse:
+        raise AssertionError("ask must not run in the runtime bash test")
+
+    register_runtime_tools(
+        registry,
+        resolve_workspace(workspace),
+        requester,
+        output_reporter=executor.output_reporter,
+    )
+    return executor
 
 
 def test_engine_emits_prepared_before_started_and_final_presentation() -> None:
@@ -1672,3 +1697,762 @@ def test_cancellation_maps_to_single_runcancelled() -> None:
         "RunCancelled",
     ]
     assert not any(isinstance(event, (RunCompleted, RunFailed)) for event in collected)
+
+
+def test_engine_emits_tool_output_deltas_in_strict_sequence() -> None:
+    spec = _tool_spec()
+    registry = ToolRegistry()
+    reporter = None
+
+    async def handler(
+        request: ToolRequest, cancellation: CancellationToken
+    ) -> ToolResult:
+        assert reporter is not None
+        reporter(request.call_id, request.name, "first\n")
+        reporter(request.call_id, request.name, "second\n")
+        return ToolResult(request.call_id, request.name, ToolResultStatus.SUCCESS, "ok")
+
+    registry.register(spec, handler)
+    executor = ToolExecutor(
+        registry,
+        PolicyEngine(PermissionMode.DEFAULT),
+        policy_input_factory=lambda request, spec: PolicyInput(
+            request.name, PolicyOperation.READ, False, False
+        ),
+    )
+    reporter = executor.output_reporter
+    call = ToolCall("call-output", "lookup", {"query": "mica"})
+    provider = _ScriptedProvider(
+        [[Finish(tool_calls=(call,))], [ProviderTextDelta("done"), Finish()]]
+    )
+    engine = AgentEngine(
+        provider,
+        tool_executor=executor,
+        run_id_factory=lambda: "run-output",
+    )
+
+    events = _run_collect(
+        engine,
+        ProviderRequest(
+            "test-model",
+            (Message(MessageRole.USER, "inspect"),),
+            (spec,),
+        ),
+    )
+
+    assert [type(event) for event in events] == [
+        RunStarted,
+        ToolPrepared,
+        ToolStarted,
+        ToolOutputDelta,
+        ToolOutputDelta,
+        ToolFinished,
+        TextDelta,
+        RunCompleted,
+    ]
+    assert [event.seq for event in events] == list(range(8))
+    assert [
+        (event.call_id, event.tool_name, event.text)
+        for event in events
+        if isinstance(event, ToolOutputDelta)
+    ] == [
+        ("call-output", "lookup", "first\n"),
+        ("call-output", "lookup", "second\n"),
+    ]
+    assert provider.requests[1].messages[-1] == Message(
+        MessageRole.TOOL,
+        '{"status":"success","message":"ok","data":null}',
+        tool_call_id="call-output",
+    )
+
+
+def test_engine_token_cancellation_after_output_finishes_tool_and_run() -> None:
+    spec = _tool_spec()
+    registry = ToolRegistry()
+    reporter = None
+    entered = asyncio.Event()
+
+    async def handler(
+        request: ToolRequest, cancellation: CancellationToken
+    ) -> ToolResult:
+        assert reporter is not None
+        reporter(request.call_id, request.name, "first\n")
+        entered.set()
+        await cancellation.wait()
+        cancellation.raise_if_cancelled()
+        return ToolResult(
+            request.call_id, request.name, ToolResultStatus.SUCCESS, "bad"
+        )
+
+    registry.register(spec, handler)
+    executor = ToolExecutor(
+        registry,
+        PolicyEngine(PermissionMode.DEFAULT),
+        policy_input_factory=lambda request, spec: PolicyInput(
+            request.name, PolicyOperation.READ, False, False
+        ),
+    )
+    reporter = executor.output_reporter
+    call = ToolCall("call-token-output", "lookup", {"query": "mica"})
+    provider = _ScriptedProvider([[Finish(tool_calls=(call,))]])
+    engine = AgentEngine(
+        provider,
+        tool_executor=executor,
+        run_id_factory=lambda: "run-token-output",
+    )
+    token = CancellationToken()
+    request = ProviderRequest(
+        "test-model",
+        (Message(MessageRole.USER, "inspect"),),
+        (spec,),
+    )
+
+    async def scenario() -> list[EngineEvent]:
+        events: list[EngineEvent] = []
+        async for event in engine.run(request, cancellation=token):
+            events.append(event)
+            if isinstance(event, ToolOutputDelta):
+                await asyncio.wait_for(entered.wait(), timeout=0.2)
+                token.cancel()
+        return events
+
+    events = asyncio.run(scenario())
+
+    assert [type(event) for event in events] == [
+        RunStarted,
+        ToolPrepared,
+        ToolStarted,
+        ToolOutputDelta,
+        ToolFinished,
+        RunCancelled,
+    ]
+    assert [event.seq for event in events] == list(range(6))
+    finished = events[-2]
+    assert isinstance(finished, ToolFinished)
+    assert finished.status is ToolResultStatus.CANCELLED
+    reporter("call-token-output", "lookup", "late")
+    assert not any(
+        isinstance(event, ToolOutputDelta) and event.text == "late" for event in events
+    )
+
+
+def test_engine_external_task_cancellation_removes_output_route() -> None:
+    spec = _tool_spec()
+    registry = ToolRegistry()
+    reporter = None
+    first_delta = asyncio.Event()
+    handler_cancelled = asyncio.Event()
+    observed: list[tuple[str, str, str]] = []
+
+    async def handler(
+        request: ToolRequest, cancellation: CancellationToken
+    ) -> ToolResult:
+        assert reporter is not None
+        reporter(request.call_id, request.name, "first\n")
+        try:
+            await asyncio.Event().wait()
+        finally:
+            handler_cancelled.set()
+        return ToolResult(
+            request.call_id, request.name, ToolResultStatus.SUCCESS, "bad"
+        )
+
+    registry.register(spec, handler)
+    executor = ToolExecutor(
+        registry,
+        PolicyEngine(PermissionMode.DEFAULT),
+        policy_input_factory=lambda request, spec: PolicyInput(
+            request.name, PolicyOperation.READ, False, False
+        ),
+    )
+    reporter = executor.output_reporter
+    call = ToolCall("call-external-output", "lookup", {"query": "mica"})
+    provider = _ScriptedProvider([[Finish(tool_calls=(call,))]])
+    engine = AgentEngine(
+        provider,
+        tool_executor=executor,
+        run_id_factory=lambda: "run-external-output",
+    )
+    request = ProviderRequest(
+        "test-model",
+        (Message(MessageRole.USER, "inspect"),),
+        (spec,),
+    )
+
+    async def consume() -> None:
+        async for event in engine.run(request):
+            observed.append(
+                (
+                    type(event).__name__,
+                    getattr(event, "call_id", ""),
+                    getattr(event, "text", ""),
+                )
+            )
+            if isinstance(event, ToolOutputDelta):
+                first_delta.set()
+
+    async def scenario() -> None:
+        task = asyncio.create_task(consume())
+        await asyncio.wait_for(first_delta.wait(), timeout=0.2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=0.2)
+        await asyncio.wait_for(handler_cancelled.wait(), timeout=0.2)
+
+    asyncio.run(scenario())
+
+    assert [kind for kind, _call_id, _text in observed] == [
+        "RunStarted",
+        "ToolPrepared",
+        "ToolStarted",
+        "ToolOutputDelta",
+        "RunCancelled",
+    ]
+    reporter("call-external-output", "lookup", "late")
+    assert all(text != "late" for _kind, _call_id, text in observed)
+
+
+def test_engine_consumer_aclose_after_output_cleans_tool_execution() -> None:
+    spec = _tool_spec()
+    registry = ToolRegistry()
+    reporter = None
+    handler_cancelled = asyncio.Event()
+    observed: list[EngineEvent] = []
+    completed_messages: list[tuple[Message, ...]] = []
+    completed_presentations: list[tuple[object, ...]] = []
+
+    async def handler(
+        request: ToolRequest, cancellation: CancellationToken
+    ) -> ToolResult:
+        assert reporter is not None
+        reporter(request.call_id, request.name, "first\n")
+        try:
+            await asyncio.Event().wait()
+        finally:
+            handler_cancelled.set()
+        return ToolResult(
+            request.call_id, request.name, ToolResultStatus.SUCCESS, "bad"
+        )
+
+    registry.register(spec, handler)
+    executor = ToolExecutor(
+        registry,
+        PolicyEngine(PermissionMode.DEFAULT),
+        policy_input_factory=lambda request, spec: PolicyInput(
+            request.name, PolicyOperation.READ, False, False
+        ),
+    )
+    reporter = executor.output_reporter
+    call = ToolCall("call-close-output", "lookup", {"query": "mica"})
+    engine = AgentEngine(
+        _ScriptedProvider([[Finish(tool_calls=(call,))]]),
+        tool_executor=executor,
+        run_id_factory=lambda: "run-close-output",
+    )
+    request = ProviderRequest(
+        "test-model",
+        (Message(MessageRole.USER, "inspect"),),
+        (spec,),
+    )
+
+    async def scenario() -> None:
+        stream = engine.run(
+            request,
+            completed_messages_sink=completed_messages.append,
+            completed_tool_presentations_sink=completed_presentations.append,
+        )
+        while True:
+            event = await asyncio.wait_for(anext(stream), timeout=0.2)
+            observed.append(event)
+            if isinstance(event, ToolOutputDelta):
+                await asyncio.wait_for(stream.aclose(), timeout=0.2)
+                break
+        await asyncio.wait_for(handler_cancelled.wait(), timeout=0.2)
+
+    asyncio.run(scenario())
+
+    assert [type(event) for event in observed] == [
+        RunStarted,
+        ToolPrepared,
+        ToolStarted,
+        ToolOutputDelta,
+    ]
+    assert completed_messages == []
+    assert completed_presentations == []
+    reporter("call-close-output", "lookup", "late")
+    assert len(observed) == 4
+
+
+def test_engine_nonzero_tool_result_keeps_delta_before_finished() -> None:
+    spec = _tool_spec()
+    registry = ToolRegistry()
+    reporter = None
+
+    async def handler(
+        request: ToolRequest, cancellation: CancellationToken
+    ) -> ToolResult:
+        assert reporter is not None
+        reporter(request.call_id, request.name, "nonzero output\n")
+        return ToolResult(
+            request.call_id,
+            request.name,
+            ToolResultStatus.EXECUTION_FAILED,
+            "command exited with non-zero status",
+            {"exit_code": 7, "output": "nonzero output\n"},
+        )
+
+    registry.register(spec, handler)
+    executor = ToolExecutor(
+        registry,
+        PolicyEngine(PermissionMode.DEFAULT),
+        policy_input_factory=lambda request, spec: PolicyInput(
+            request.name, PolicyOperation.READ, False, False
+        ),
+    )
+    reporter = executor.output_reporter
+    call = ToolCall("call-nonzero-output", "lookup", {"query": "mica"})
+    provider = _ScriptedProvider([[Finish(tool_calls=(call,))], [Finish()]])
+    engine = AgentEngine(
+        provider,
+        tool_executor=executor,
+        run_id_factory=lambda: "run-nonzero-output",
+    )
+
+    events = _run_collect(
+        engine,
+        ProviderRequest(
+            "test-model",
+            (Message(MessageRole.USER, "inspect"),),
+            (spec,),
+        ),
+    )
+
+    assert [type(event) for event in events] == [
+        RunStarted,
+        ToolPrepared,
+        ToolStarted,
+        ToolOutputDelta,
+        ToolFinished,
+        RunCompleted,
+    ]
+    assert [event.seq for event in events] == list(range(6))
+    finished = events[4]
+    assert isinstance(finished, ToolFinished)
+    assert finished.status is ToolResultStatus.EXECUTION_FAILED
+
+
+def test_engine_tool_without_output_emits_no_output_delta() -> None:
+    spec = _tool_spec()
+    registry = ToolRegistry()
+
+    async def handler(
+        request: ToolRequest, cancellation: CancellationToken
+    ) -> ToolResult:
+        return ToolResult(request.call_id, request.name, ToolResultStatus.SUCCESS, "ok")
+
+    registry.register(spec, handler)
+    executor = ToolExecutor(
+        registry,
+        PolicyEngine(PermissionMode.DEFAULT),
+        policy_input_factory=lambda request, spec: PolicyInput(
+            request.name, PolicyOperation.READ, False, False
+        ),
+    )
+    call = ToolCall("call-no-output", "lookup", {"query": "mica"})
+    engine = AgentEngine(
+        _ScriptedProvider([[Finish(tool_calls=(call,))], [Finish()]]),
+        tool_executor=executor,
+        run_id_factory=lambda: "run-no-output",
+    )
+
+    events = _run_collect(
+        engine,
+        ProviderRequest(
+            "test-model",
+            (Message(MessageRole.USER, "inspect"),),
+            (spec,),
+        ),
+    )
+
+    assert [type(event) for event in events] == [
+        RunStarted,
+        ToolPrepared,
+        ToolStarted,
+        ToolFinished,
+        RunCompleted,
+    ]
+    assert [event.seq for event in events] == list(range(5))
+    assert not any(isinstance(event, ToolOutputDelta) for event in events)
+
+
+def test_reused_executor_does_not_route_late_output_between_runs() -> None:
+    spec = _tool_spec()
+    registry = ToolRegistry()
+    reporter = None
+
+    async def handler(
+        request: ToolRequest, cancellation: CancellationToken
+    ) -> ToolResult:
+        assert reporter is not None
+        if request.call_id == "call-second-run":
+            reporter("call-first-run", request.name, "late old output")
+        reporter(request.call_id, request.name, f"{request.call_id} output")
+        return ToolResult(request.call_id, request.name, ToolResultStatus.SUCCESS, "ok")
+
+    registry.register(spec, handler)
+    executor = ToolExecutor(
+        registry,
+        PolicyEngine(PermissionMode.DEFAULT),
+        policy_input_factory=lambda request, spec: PolicyInput(
+            request.name, PolicyOperation.READ, False, False
+        ),
+    )
+    reporter = executor.output_reporter
+    first_call = ToolCall("call-first-run", "lookup", {"query": "first"})
+    second_call = ToolCall("call-second-run", "lookup", {"query": "second"})
+    request = ProviderRequest(
+        "test-model",
+        (Message(MessageRole.USER, "inspect"),),
+        (spec,),
+    )
+
+    first_engine = AgentEngine(
+        _ScriptedProvider([[Finish(tool_calls=(first_call,))], [Finish()]]),
+        tool_executor=executor,
+        run_id_factory=lambda: "run-first",
+    )
+    second_engine = AgentEngine(
+        _ScriptedProvider([[Finish(tool_calls=(second_call,))], [Finish()]]),
+        tool_executor=executor,
+        run_id_factory=lambda: "run-second",
+    )
+
+    async def scenario() -> tuple[list[EngineEvent], list[EngineEvent]]:
+        first_events = [event async for event in first_engine.run(request)]
+        reporter("call-first-run", "lookup", "late after first run")
+        second_events = [event async for event in second_engine.run(request)]
+        return first_events, second_events
+
+    first_events, second_events = asyncio.run(scenario())
+
+    assert [
+        (event.run_id, event.call_id, event.text)
+        for event in first_events
+        if isinstance(event, ToolOutputDelta)
+    ] == [("run-first", "call-first-run", "call-first-run output")]
+    assert [
+        (event.run_id, event.call_id, event.text)
+        for event in second_events
+        if isinstance(event, ToolOutputDelta)
+    ] == [("run-second", "call-second-run", "call-second-run output")]
+
+
+def test_engine_real_git_bash_output_closes_loop_before_next_model_request(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "工作区 space"
+    workspace.mkdir()
+    registry = ToolRegistry()
+    executor = ToolExecutor(
+        registry,
+        PolicyEngine(PermissionMode.DEFAULT, allow_rules=[lambda policy_input: True]),
+    )
+
+    async def requester(
+        interaction_id: str, question: str, cancellation: CancellationToken
+    ) -> UserInputResponse:
+        raise AssertionError("ask must not run in the bash loop")
+
+    register_runtime_tools(
+        registry,
+        resolve_workspace(workspace),
+        requester,
+        output_reporter=executor.output_reporter,
+    )
+    assert {spec.name for spec in executor.tool_specs} == {"ask", "bash"}
+
+    command = (
+        "printf 'first line\\n'; "
+        "while [ ! -f release.marker ]; do sleep 0.01; done; "
+        "printf 'second line\\n'"
+    )
+    call = ToolCall("call-real-bash", "bash", {"command": command})
+    provider = _ScriptedProvider(
+        [[Finish(tool_calls=(call,))], [ProviderTextDelta("done"), Finish()]]
+    )
+    engine = AgentEngine(
+        provider,
+        tool_executor=executor,
+        run_id_factory=lambda: "run-real-bash",
+    )
+    request = ProviderRequest(
+        "test-model",
+        (Message(MessageRole.USER, "run"),),
+        executor.tool_specs,
+    )
+    events: list[EngineEvent] = []
+    first_delta_seen = False
+
+    async def scenario() -> None:
+        nonlocal first_delta_seen
+        async for event in engine.run(request):
+            events.append(event)
+            if isinstance(event, ToolOutputDelta) and not first_delta_seen:
+                first_delta_seen = True
+                assert event.text == "first line\n"
+                assert not any(isinstance(item, ToolFinished) for item in events)
+                assert not any(isinstance(item, RunCompleted) for item in events)
+                (workspace / "release.marker").touch()
+
+    asyncio.run(scenario())
+
+    assert first_delta_seen is True
+    assert [
+        (event.call_id, event.tool_name, event.text)
+        for event in events
+        if isinstance(event, ToolOutputDelta)
+    ] == [
+        ("call-real-bash", "bash", "first line\n"),
+        ("call-real-bash", "bash", "second line\n"),
+    ]
+    assert [event.seq for event in events] == list(range(len(events)))
+    assert isinstance(events[-1], RunCompleted)
+    assert len(provider.requests) == 2
+
+
+def test_engine_real_bash_output_events_are_clean_and_not_persisted_as_deltas(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ToolRegistry()
+    executor = ToolExecutor(
+        registry,
+        PolicyEngine(PermissionMode.DEFAULT, allow_rules=[lambda policy_input: True]),
+    )
+
+    async def requester(
+        interaction_id: str, question: str, cancellation: CancellationToken
+    ) -> UserInputResponse:
+        raise AssertionError("ask must not run in the bash safety test")
+
+    register_runtime_tools(
+        registry,
+        resolve_workspace(workspace),
+        requester,
+        output_reporter=executor.output_reporter,
+    )
+    secret = "engine-sensitive-marker"
+    command = (
+        f"secret='{secret}'; "
+        "printf 'plain 中文  继续\\r\\n'; "
+        'printf \'api_key=%s token=%s authorization=%s\\n\' "$secret" "$secret" "$secret"; '
+        'printf \'Authorization: Bearer %s sk-%s\\n\' "$secret" "$secret"'
+    )
+    call = ToolCall("call-safe-bash", "bash", {"command": command})
+    provider = _ScriptedProvider(
+        [[Finish(tool_calls=(call,))], [ProviderTextDelta("done"), Finish()]]
+    )
+    engine = AgentEngine(
+        provider,
+        tool_executor=executor,
+        run_id_factory=lambda: "run-safe-bash",
+    )
+    request = ProviderRequest(
+        "test-model",
+        (Message(MessageRole.USER, "run"),),
+        executor.tool_specs,
+    )
+    completed_messages: list[tuple[Message, ...]] = []
+    completed_presentations: list[tuple[object, ...]] = []
+
+    async def scenario() -> list[EngineEvent]:
+        return [
+            event
+            async for event in engine.run(
+                request,
+                completed_messages_sink=completed_messages.append,
+                completed_tool_presentations_sink=completed_presentations.append,
+            )
+        ]
+
+    events = asyncio.run(scenario())
+    deltas = [event for event in events if isinstance(event, ToolOutputDelta)]
+    assert deltas
+    assert deltas[0].text == "plain 中文  继续\r\n"
+    assert all(secret not in delta.text for delta in deltas)
+    assert any("[REDACTED]" in delta.text for delta in deltas)
+    assert all(secret not in str(event) for event in events)
+    assert all(secret not in repr(event) for event in events)
+
+    tool_messages = [
+        message
+        for message in provider.requests[1].messages
+        if message.role is MessageRole.TOOL
+    ]
+    assert len(tool_messages) == 1
+    assert secret not in tool_messages[0].content
+    assert "[REDACTED]" in tool_messages[0].content
+    assert completed_messages
+    assert secret not in repr(completed_messages)
+    assert completed_presentations
+    assert secret not in repr(completed_presentations)
+    assert not any(isinstance(item, ToolOutputDelta) for item in completed_messages)
+    assert not any(
+        isinstance(item, ToolOutputDelta) for item in completed_presentations
+    )
+
+
+def test_real_bash_engine_token_cancel_reaps_after_first_delta(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    executor = _runtime_bash_executor(workspace)
+    command = (
+        "printf 'first line\\n'; "
+        "while [ ! -f release.marker ]; do sleep 0.01; done; "
+        "printf 'second line\\n'"
+    )
+    call = ToolCall("call-real-token-cancel", "bash", {"command": command})
+    provider = _ScriptedProvider([[Finish(tool_calls=(call,))]])
+    engine = AgentEngine(
+        provider,
+        tool_executor=executor,
+        run_id_factory=lambda: "run-real-token-cancel",
+    )
+    request = ProviderRequest(
+        "test-model",
+        (Message(MessageRole.USER, "run"),),
+        executor.tool_specs,
+    )
+    token = CancellationToken()
+
+    async def scenario() -> list[EngineEvent]:
+        events: list[EngineEvent] = []
+        async for event in engine.run(request, cancellation=token):
+            events.append(event)
+            if isinstance(event, ToolOutputDelta):
+                token.cancel()
+        return events
+
+    events = asyncio.run(scenario())
+
+    assert [type(event) for event in events] == [
+        RunStarted,
+        ToolPrepared,
+        ToolStarted,
+        ToolOutputDelta,
+        ToolFinished,
+        RunCancelled,
+    ]
+    assert isinstance(events[-2], ToolFinished)
+    assert events[-2].status is ToolResultStatus.CANCELLED
+    assert [event.seq for event in events] == list(range(6))
+
+
+def test_real_bash_engine_external_cancel_reaps_after_first_delta(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    executor = _runtime_bash_executor(workspace)
+    call_id = "call-real-external-cancel"
+    command = (
+        "printf 'first line\\n'; "
+        "while [ ! -f release.marker ]; do sleep 0.01; done; "
+        "printf 'second line\\n'"
+    )
+    call = ToolCall(call_id, "bash", {"command": command})
+    provider = _ScriptedProvider([[Finish(tool_calls=(call,))]])
+    engine = AgentEngine(
+        provider,
+        tool_executor=executor,
+        run_id_factory=lambda: "run-real-external-cancel",
+    )
+    request = ProviderRequest(
+        "test-model",
+        (Message(MessageRole.USER, "run"),),
+        executor.tool_specs,
+    )
+    observed: list[EngineEvent] = []
+    first_delta = asyncio.Event()
+
+    async def consume() -> None:
+        async for event in engine.run(request):
+            observed.append(event)
+            if isinstance(event, ToolOutputDelta):
+                first_delta.set()
+
+    async def scenario() -> None:
+        task = asyncio.create_task(consume())
+        await asyncio.wait_for(first_delta.wait(), timeout=1.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(scenario())
+
+    assert [type(event) for event in observed] == [
+        RunStarted,
+        ToolPrepared,
+        ToolStarted,
+        ToolOutputDelta,
+        RunCancelled,
+    ]
+    executor.output_reporter(call_id, "bash", "late")
+    assert len(observed) == 5
+
+
+def test_real_bash_engine_aclose_after_first_delta_reaps_tool(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    executor = _runtime_bash_executor(workspace)
+    call_id = "call-real-stream-close"
+    command = (
+        "printf 'first line\\n'; "
+        "while [ ! -f release.marker ]; do sleep 0.01; done; "
+        "printf 'second line\\n'"
+    )
+    call = ToolCall(call_id, "bash", {"command": command})
+    engine = AgentEngine(
+        _ScriptedProvider([[Finish(tool_calls=(call,))]]),
+        tool_executor=executor,
+        run_id_factory=lambda: "run-real-stream-close",
+    )
+    request = ProviderRequest(
+        "test-model",
+        (Message(MessageRole.USER, "run"),),
+        executor.tool_specs,
+    )
+    observed: list[EngineEvent] = []
+    completed_messages: list[tuple[Message, ...]] = []
+    completed_presentations: list[tuple[object, ...]] = []
+
+    async def scenario() -> None:
+        stream = engine.run(
+            request,
+            completed_messages_sink=completed_messages.append,
+            completed_tool_presentations_sink=completed_presentations.append,
+        )
+        while True:
+            event = await asyncio.wait_for(anext(stream), timeout=1.0)
+            observed.append(event)
+            if isinstance(event, ToolOutputDelta):
+                await asyncio.wait_for(stream.aclose(), timeout=1.0)
+                return
+
+    asyncio.run(scenario())
+
+    assert [type(event) for event in observed] == [
+        RunStarted,
+        ToolPrepared,
+        ToolStarted,
+        ToolOutputDelta,
+    ]
+    assert completed_messages == []
+    assert completed_presentations == []
+    executor.output_reporter(call_id, "bash", "late")
+    assert len(observed) == 4

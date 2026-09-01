@@ -10,6 +10,7 @@ from .cancellation import CancellationRequested, CancellationToken
 from .interactions import InteractionBroker, PermissionAnswer
 from .permissions import PolicyDecision
 from .policy import PolicyEngine, PolicyInput, PolicyOperation
+from .runtime_tools import ToolOutputReporter
 from .schema_validation import ToolArgumentsValidationError, validate_tool_arguments
 from .tool_contracts import ToolRequest, ToolResult, ToolResultStatus, ToolSpec
 from .tool_registry import ToolNotFoundError, ToolRegistry
@@ -69,6 +70,12 @@ class ToolExecutor:
         self._policy = policy
         self._policy_input_factory = policy_input_factory or _default_policy_input
         self._interaction_broker = interaction_broker or InteractionBroker()
+        self._output_routes: dict[tuple[str, str], ToolOutputReporter] = {}
+
+    @property
+    def output_reporter(self) -> ToolOutputReporter:
+        """返回当前工具调用的同步安全输出路由入口。"""
+        return self._report_output
 
     @property
     def tool_specs(self) -> tuple[ToolSpec, ...]:
@@ -80,6 +87,16 @@ class ToolExecutor:
         """Engine 或前端用来观察请求和提交响应的 broker。"""
         return self._interaction_broker
 
+    def _report_output(self, call_id: str, tool_name: str, safe_text: str) -> None:
+        if not isinstance(call_id, str) or not isinstance(tool_name, str):
+            return
+        callback = self._output_routes.get((call_id, tool_name))
+        if callback is None:
+            return
+        if not isinstance(safe_text, str) or not safe_text:
+            raise ValueError("tool output must be a non-empty string")
+        callback(call_id, tool_name, safe_text)
+
     async def execute(
         self,
         request: ToolRequest,
@@ -87,6 +104,7 @@ class ToolExecutor:
         *,
         on_started: LifecycleCallback | None = None,
         on_finished: LifecycleCallback | None = None,
+        on_output: ToolOutputReporter | None = None,
     ) -> ToolResult:
         """执行一次 ToolRequest；所有失败均转换为安全 ToolResult。"""
 
@@ -94,6 +112,8 @@ class ToolExecutor:
             raise TypeError("request must be a ToolRequest")
         if not isinstance(cancellation, CancellationToken):
             raise TypeError("cancellation must be a CancellationToken")
+        if on_output is not None and not callable(on_output):
+            raise TypeError("on_output must be callable or None")
 
         def finish(result: ToolResult) -> ToolResult:
             if on_finished is not None:
@@ -194,21 +214,26 @@ class ToolExecutor:
 
         if on_started is not None:
             on_started(request)
+        output_key = (request.call_id, request.name)
+        if on_output is not None:
+            self._output_routes[output_key] = on_output
         try:
-            result = await registered.handler(request, cancellation)
-            cancellation.raise_if_cancelled()
-        except CancellationRequested:
-            return finish(
-                _result(request, ToolResultStatus.CANCELLED, "operation cancelled")
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 - handler boundary is intentionally safe
-            return finish(
-                _result(
+            try:
+                result = await registered.handler(request, cancellation)
+                cancellation.raise_if_cancelled()
+            except CancellationRequested:
+                result = _result(
+                    request, ToolResultStatus.CANCELLED, "operation cancelled"
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - handler boundary is intentionally safe
+                result = _result(
                     request, ToolResultStatus.EXECUTION_FAILED, "tool execution failed"
                 )
-            )
+        finally:
+            if on_output is not None:
+                self._output_routes.pop(output_key, None)
 
         if not isinstance(result, ToolResult):
             return finish(

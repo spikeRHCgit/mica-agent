@@ -25,6 +25,7 @@ from .events import (
     RunStarted,
     TextDelta,
     ToolFinished,
+    ToolOutputDelta,
     ToolPrepared,
     ToolStarted,
     UserInputRequested,
@@ -343,6 +344,16 @@ class AgentEngine:
                                         question=interaction.message,
                                     )
                                 seq += 1
+                            elif signal.kind == "output":
+                                call_id, tool_name, text = signal.value
+                                yield ToolOutputDelta(
+                                    run_id=run_id,
+                                    seq=seq,
+                                    call_id=call_id,
+                                    tool_name=tool_name,
+                                    text=text,
+                                )
+                                seq += 1
                             elif signal.kind == "started":
                                 started = signal.value
                                 assert isinstance(started, ToolRequest)
@@ -474,12 +485,16 @@ class AgentEngine:
         def finished(value: ToolResult) -> None:
             signals.put_nowait(_ToolSignal("finished", value))
 
+        def output(call_id: str, tool_name: str, text: str) -> None:
+            signals.put_nowait(_ToolSignal("output", (call_id, tool_name, text)))
+
         task = asyncio.create_task(
             self._tool_executor.execute(
                 request,
                 cancellation,
                 on_started=started,
                 on_finished=finished,
+                on_output=output,
             )
         )
         interaction_task: asyncio.Task[InteractionRequest] | None = None

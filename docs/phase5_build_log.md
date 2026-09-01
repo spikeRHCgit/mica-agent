@@ -438,10 +438,29 @@ cleanup 开始前关闭的报告 gate，确保异常终止阶段不会迟到报�
 只做安全 close/cancel，不 await 且转换为固定失败。P5-13B 不创建 `ToolOutputDelta`，不
 接入 Engine、CLI 或 TUI。
 
-当前边界：`AgentEngine` 尚未产生 `ToolOutputDelta`，P5-13C（Engine 事件转发及生命周期
-验收）尚未开始；因此 P5-13 整体尚未完成。
+## P5-13C1：ToolExecutor 输出路由与 Engine 事件闭环
 
-P5-13B 目标运行时与公共 API 测试 `95 passed`，事件/工具契约与 ToolExecutor 兼容组
-`133 passed`，分发测试 `15 passed`，全量测试 `1001 passed, 2 skipped`；Ruff 检查、格式
-检查、`uv build --offline` 和 diff 检查均通过。验证未出现 pending task、异步生成器、未关闭
-transport/pipe 或 `ResourceWarning`。本章节不记录测试凭据或原始敏感值。
+C1 完成 `ToolOutputReporter → ToolExecutor → AgentEngine` 的单向输出链路。`ToolExecutor`
+提供同步 `output_reporter`，以 `(call_id, tool_name)` 为身份维护仅在当前 handler 执行期间
+有效的路由；`execute(on_output=...)` 在执行前校验 callback，并在 handler 返回、失败、取消
+或外部任务取消时通过 `finally` 移除路由。迟到或身份不匹配的输出安全忽略，安全文本不在
+Executor 中保存，也不重复清洗；callback 异常原样返回上游运行时边界。
+
+`AgentEngine` 在既有 `_tool_execution_signals()` 队列中增加同步 output signal，不创建第二套
+异步任务系统。每个 signal 直接生成一个 `ToolOutputDelta(run_id, seq, call_id, tool_name,
+text)`，只由 Engine 注入 `run_id` 和严格递增的 `seq`；正常调用顺序为
+`ToolPrepared → ToolStarted → ToolOutputDelta* → ToolFinished`，随后才进入下一轮 Provider
+请求。动态输出不写入 Provider 消息、ToolResult、完成 sink 或工具展示快照。
+
+新增测试使用受控 handler 及真实 Windows Git Bash：先确认空 registry 上构造的 Executor 能
+观察随后注册的 runtime ToolSpec，再由 Bash 输出第一条记录、等待标记文件、输出第二条记录
+并进入下一轮模型请求；同时覆盖 token 取消、外部 Engine task 取消、消费者 `aclose()`、
+路由复用隔离、正常非零退出、无输出和敏感内容清洗。取消及关闭均验证路由解除、工具执行
+等待结束和完成 sink 不提交半轮；事件中的安全文本保留 Unicode、空格与换行边界。
+
+当前边界：P5-13C2 尚未开始，CLI、TUI、安装态闭环和会话格式均未在本切片接入；因此
+P5-13 整体尚未完成。
+
+P5-13C1 ToolExecutor 与 Engine 目标测试 `84 passed`，runtime/events 兼容组 `146 passed`，
+App/P5-12 组 `37 passed`，分发测试 `15 passed`，全量测试 `1021 passed, 2 skipped`；Ruff
+检查、格式检查、`uv build --offline` 和 diff 检查均通过。本章节不记录测试凭据或原始敏感值。
