@@ -33,6 +33,8 @@ from .events import (
     UserInputRequested,
 )
 from .interactions import (
+    AskOption,
+    AskPrompt,
     InteractionBroker,
     InteractionKind,
     InteractionRequest,
@@ -109,6 +111,8 @@ __all__ = [
     "MAX_FILE_BYTES",
     "AgentEngine",
     "AgentFileSource",
+    "AskOption",
+    "AskPrompt",
     "CancellationRequested",
     "CancellationToken",
     "CleanupResult",

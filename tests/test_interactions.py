@@ -9,6 +9,8 @@ import pytest
 
 from mica_agent.cancellation import CancellationRequested, CancellationToken
 from mica_agent.interactions import (
+    AskOption,
+    AskPrompt,
     InteractionBroker,
     InteractionKind,
     PermissionAnswer,
@@ -207,3 +209,213 @@ def test_responses_are_immutable() -> None:
         permission.answer = PermissionAnswer.ALLOW_ONCE  # type: ignore[misc]
     with pytest.raises(FrozenInstanceError):
         user_input.answer = "changed"  # type: ignore[misc]
+
+
+def test_ask_option_expresses_label_description_and_recommendation() -> None:
+    minimal = AskOption("Continue")
+    detailed = AskOption("Continue", "Use the current configuration")
+    recommended = AskOption("Recommended", recommended=True)
+
+    assert minimal.label == "Continue"
+    assert minimal.description is None
+    assert minimal.recommended is False
+    assert detailed.description == "Use the current configuration"
+    assert recommended.recommended is True
+
+
+def test_ask_option_is_frozen_and_has_no_instance_dictionary() -> None:
+    option = AskOption("Continue")
+
+    assert not hasattr(option, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        option.label = "Changed"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize("label", [None, 1, "", " \t\n "])
+def test_ask_option_rejects_invalid_labels(label: object) -> None:
+    with pytest.raises((TypeError, ValueError), match="label"):
+        AskOption(label)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("description", [1, "", " \t\n "])
+def test_ask_option_rejects_invalid_descriptions(description: object) -> None:
+    with pytest.raises((TypeError, ValueError), match="description"):
+        AskOption("Continue", description)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("recommended", [0, 1, "true", object()])
+def test_ask_option_requires_a_strict_boolean_recommendation(
+    recommended: object,
+) -> None:
+    with pytest.raises(TypeError, match="recommended"):
+        AskOption("Continue", recommended=recommended)  # type: ignore[arg-type]
+
+
+def test_ask_option_validation_errors_do_not_echo_untrusted_text() -> None:
+    sentinel = "ask-option-secret-sentinel"
+
+    with pytest.raises(ValueError) as error:
+        AskOption(sentinel, " \t")
+
+    assert sentinel not in str(error.value)
+    assert sentinel not in repr(error.value)
+    assert "Traceback" not in str(error.value)
+
+
+@pytest.mark.parametrize("option_count", [2, 3, 4])
+def test_ask_prompt_accepts_structured_options(option_count: int) -> None:
+    options = tuple(AskOption(f"Option {index}") for index in range(option_count))
+    prompt = AskPrompt("Which option?", "Setup", options, allow_custom=True)
+
+    assert prompt.question == "Which option?"
+    assert prompt.title == "Setup"
+    assert prompt.options == options
+    assert prompt.allow_custom is True
+
+
+def test_ask_prompt_without_options_is_a_free_text_question() -> None:
+    prompt = AskPrompt("What should happen next?", allow_custom=False)
+
+    assert prompt.options == ()
+    assert prompt.allow_custom is False
+    assert all(option.label != "Type something." for option in prompt.options)
+
+
+def test_ask_prompt_copies_list_options_to_an_immutable_tuple() -> None:
+    options = [AskOption("First"), AskOption("Second", recommended=True)]
+    prompt = AskPrompt("Choose", options=options)
+    options.append(AskOption("Later"))
+
+    assert prompt.options == (AskOption("First"), AskOption("Second", recommended=True))
+    assert isinstance(prompt.options, tuple)
+
+
+def test_ask_prompt_is_frozen_and_has_no_instance_dictionary() -> None:
+    prompt = AskPrompt("Choose", options=(AskOption("First"), AskOption("Second")))
+
+    assert not hasattr(prompt, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        prompt.question = "Changed"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        (AskOption("Only"),),
+        tuple(AskOption(f"Option {index}") for index in range(5)),
+    ],
+)
+def test_ask_prompt_rejects_invalid_structured_option_counts(
+    options: tuple[AskOption, ...],
+) -> None:
+    with pytest.raises(ValueError, match="options"):
+        AskPrompt("Choose", options=options)
+
+
+def test_ask_prompt_rejects_multiple_recommended_options() -> None:
+    with pytest.raises(ValueError, match="recommended"):
+        AskPrompt(
+            "Choose",
+            options=(
+                AskOption("First", recommended=True),
+                AskOption("Second", recommended=True),
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ("not an option",),
+        [{"label": "First"}, {"label": "Second"}],
+        (object(), AskOption("Second")),
+    ],
+)
+def test_ask_prompt_rejects_non_option_members(options: object) -> None:
+    with pytest.raises((TypeError, ValueError), match="options"):
+        AskPrompt("Choose", options=options)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("question", [None, 1, "", " \t\n "])
+def test_ask_prompt_rejects_invalid_questions(question: object) -> None:
+    with pytest.raises((TypeError, ValueError), match="question"):
+        AskPrompt(question)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("title", [1, "", " \t\n "])
+def test_ask_prompt_rejects_invalid_titles(title: object) -> None:
+    with pytest.raises((TypeError, ValueError), match="title"):
+        AskPrompt("Choose", title=title)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("allow_custom", [0, 1, "true", object()])
+def test_ask_prompt_requires_a_strict_boolean_allow_custom(
+    allow_custom: object,
+) -> None:
+    with pytest.raises(TypeError, match="allow_custom"):
+        AskPrompt("Choose", allow_custom=allow_custom)  # type: ignore[arg-type]
+
+
+def test_ask_prompt_validation_errors_do_not_echo_untrusted_text() -> None:
+    question_sentinel = "ask-prompt-question-secret-sentinel"
+    title_sentinel = "ask-prompt-title-secret-sentinel"
+    option_sentinel = "ask-prompt-option-secret-sentinel"
+
+    with pytest.raises(ValueError) as question_error:
+        AskPrompt(question_sentinel, options=(AskOption("Only"),))
+    with pytest.raises(ValueError) as option_error:
+        AskPrompt(
+            "Choose",
+            title=title_sentinel,
+            options=(AskOption(option_sentinel),),
+        )
+
+    for error in question_error.value, option_error.value:
+        assert question_sentinel not in str(error)
+        assert question_sentinel not in repr(error)
+        assert title_sentinel not in str(error)
+        assert title_sentinel not in repr(error)
+        assert option_sentinel not in str(error)
+        assert option_sentinel not in repr(error)
+        assert "Traceback" not in str(error)
+
+
+def test_user_input_response_preserves_two_argument_compatibility() -> None:
+    positional = UserInputResponse("interaction-1", "answer")
+    keyword = UserInputResponse(interaction_id="interaction-1", answer="answer")
+
+    assert positional == keyword
+    assert positional.selected_option_index is None
+    assert positional.notes is None
+    assert UserInputResponse("interaction-2", "").answer == ""
+
+
+def test_user_input_response_carries_structured_selection_and_notes() -> None:
+    response = UserInputResponse("interaction-1", "custom", 0, "")
+
+    assert response.selected_option_index == 0
+    assert response.notes == ""
+
+
+@pytest.mark.parametrize("selected_option_index", [-1, True, 1.0, "1", object()])
+def test_user_input_response_rejects_invalid_selected_option_indexes(
+    selected_option_index: object,
+) -> None:
+    with pytest.raises((TypeError, ValueError), match="selected_option_index"):
+        UserInputResponse(
+            "interaction-1",
+            "answer",
+            selected_option_index=selected_option_index,  # type: ignore[arg-type]
+        )
+
+
+def test_user_input_response_rejects_non_string_notes() -> None:
+    with pytest.raises(TypeError, match="notes"):
+        UserInputResponse("interaction-1", "answer", notes=1)  # type: ignore[arg-type]
+
+
+def test_user_input_response_keeps_frozen_behavior_for_new_fields() -> None:
+    response = UserInputResponse("interaction-1", "answer", 1, "note")
+
+    with pytest.raises(FrozenInstanceError):
+        response.selected_option_index = 0  # type: ignore[misc]

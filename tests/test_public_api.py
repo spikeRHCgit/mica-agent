@@ -13,6 +13,8 @@ import mica_agent
 from mica_agent import (
     CURRENT_SESSION_FORMAT_VERSION,
     AgentEngine,
+    AskOption,
+    AskPrompt,
     CancellationRequested,
     CancellationToken,
     DuplicateToolError,
@@ -192,6 +194,8 @@ def test_top_level_exports_engine_and_app() -> None:
 
 
 def test_top_level_exports_p5_06_execution_contracts() -> None:
+    from mica_agent.interactions import AskOption as AskOptionClass
+    from mica_agent.interactions import AskPrompt as AskPromptClass
     from mica_agent.interactions import (
         InteractionBroker as InteractionBrokerClass,
     )
@@ -203,6 +207,8 @@ def test_top_level_exports_p5_06_execution_contracts() -> None:
     )
     from mica_agent.tool_executor import ToolExecutor as ToolExecutorClass
 
+    assert AskOption is AskOptionClass
+    assert AskPrompt is AskPromptClass
     assert InteractionBroker is InteractionBrokerClass
     assert InteractionKind is InteractionKindEnum
     assert InteractionRequest is InteractionRequestClass
@@ -265,6 +271,8 @@ pathlib.Path.home = blocked
 import mica_agent
 assert 'mica_agent.runtime_tools' not in sys.modules
 assert 'ToolOutputReporter' in mica_agent.__all__
+assert 'AskOption' in mica_agent.__all__
+assert 'AskPrompt' in mica_agent.__all__
 assert 'mica_agent.app' not in sys.modules
 assert 'mica_agent.engine' not in sys.modules
 assert 'mica_agent.cli' not in sys.modules

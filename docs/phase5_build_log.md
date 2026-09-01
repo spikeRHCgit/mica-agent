@@ -492,3 +492,21 @@ ToolExecutor、Engine、事件、Provider、会话或 TUI。C2 目标与既有 C
 `15 passed`，全量测试为 `1024 passed, 2 skipped`；Ruff、格式检查、`uv build --offline`
 和 diff 检查均通过。P5-13 已完成并通过 master 验收。P5-14、结构化 ask 和 Textual TUI
 尚未开始。
+
+# P5-14 结构化 ask
+
+P5-14A 只建立前端无关的公共数据契约。新增 frozen、slots 的 `AskOption(label,
+description=None, recommended=False)` 与 `AskPrompt(question, title=None, options=(),
+allow_custom=False)`；文本字段使用非空非纯空白校验，`recommended` 与 `allow_custom` 使用严格
+bool 校验。`AskPrompt` 只接受 tuple/list 选项输入，并在构造时复制为独立 tuple；无选项固定表示
+自由文本问题，结构化选项只能为二至四个且最多一个推荐项。错误信息只给出固定字段说明，不回显
+不可信的标题、问题、选项或对象内容。
+
+`UserInputResponse(interaction_id, answer)` 保持既有两参数位置和关键字构造、空 answer、相等性与
+冻结语义，并追加兼容默认字段 `selected_option_index=None` 与 `notes=None`。前者仅接受 None 或
+非负严格 int，后者仅接受 None 或 str（空字符串合法）；本切片不把索引关联到 Prompt，也不保存
+Prompt 或任何运行时对象。
+
+目标交互与公共 API 测试为 `87 passed`，与 events/runtime tools/Engine 的兼容组为 `296 passed`，
+安装态分发测试为 `15 passed`。P5-14B 的 ToolSpec、runtime handler 与 Broker/Engine 接入，P5-14C
+的 CLI 或会话闭环，以及 Textual TUI 均未开始。

@@ -45,6 +45,56 @@ class InteractionKind(Enum):
     USER_INPUT = "user_input"
 
 
+def _validate_nonblank_string(name: str, value: object) -> None:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a str")
+    if not value.strip():
+        raise ValueError(f"{name} must be non-empty and non-blank")
+
+
+@dataclass(frozen=True, slots=True)
+class AskOption:
+    """前端无关的一个结构化 ask 选项。"""
+
+    label: str
+    description: str | None = None
+    recommended: bool = False
+
+    def __post_init__(self) -> None:
+        _validate_nonblank_string("label", self.label)
+        if self.description is not None:
+            _validate_nonblank_string("description", self.description)
+        if type(self.recommended) is not bool:
+            raise TypeError("recommended must be a bool")
+
+
+@dataclass(frozen=True, slots=True)
+class AskPrompt:
+    """前端无关的结构化 ask 请求内容。"""
+
+    question: str
+    title: str | None = None
+    options: tuple[AskOption, ...] = ()
+    allow_custom: bool = False
+
+    def __post_init__(self) -> None:
+        _validate_nonblank_string("question", self.question)
+        if self.title is not None:
+            _validate_nonblank_string("title", self.title)
+        if not isinstance(self.options, (tuple, list)):
+            raise TypeError("options must be a tuple or list")
+        options = tuple(self.options)
+        if not all(isinstance(option, AskOption) for option in options):
+            raise TypeError("options must contain AskOption instances")
+        if options and not 2 <= len(options) <= 4:
+            raise ValueError("options must contain two to four items")
+        if sum(option.recommended for option in options) > 1:
+            raise ValueError("options may contain at most one recommended item")
+        if type(self.allow_custom) is not bool:
+            raise TypeError("allow_custom must be a bool")
+        object.__setattr__(self, "options", options)
+
+
 @dataclass(frozen=True, slots=True)
 class InteractionRequest:
     """不含运行时对象的、可供前端展示的交互请求快照。"""
@@ -227,8 +277,17 @@ class UserInputResponse:
 
     interaction_id: str
     answer: str
+    selected_option_index: int | None = None
+    notes: str | None = None
 
     def __post_init__(self) -> None:
         _validate_interaction_id(self.interaction_id)
         if not isinstance(self.answer, str):
             raise TypeError("answer must be a str")
+        if self.selected_option_index is not None:
+            if type(self.selected_option_index) is not int:
+                raise TypeError("selected_option_index must be an int or None")
+            if self.selected_option_index < 0:
+                raise ValueError("selected_option_index must be non-negative")
+        if self.notes is not None and not isinstance(self.notes, str):
+            raise TypeError("notes must be a str or None")
