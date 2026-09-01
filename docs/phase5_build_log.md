@@ -414,3 +414,19 @@ P5-12 相关目标测试使用 `-W error` 为 `420 passed, 1 skipped`，全量�
 2 skipped`，安装态分发测试为 `15 passed`；Ruff 检查、格式检查、`uv build --offline`、
 `git diff --check` 和 `git diff --cached --check` 均通过。当前保留 Windows 环境下普通 symlink
 不可用的既有跳过项；本任务没有执行 Git 写操作、远程操作或历史改写。
+
+# P5-13 Bash 动态输出
+
+## 当前切片：事件契约
+
+P5-13A 仅完成工具输出增量的公共事件契约切片。新增不可变的
+`ToolOutputDelta(run_id, seq, call_id, tool_name, text)`，沿用既有 Run、序号和工具名校验；
+输出文本必须是非空字符串，原样保留且不进入 dataclass 默认 `repr`。
+
+当前边界：`AgentEngine` 和 Bash 尚未产生 `ToolOutputDelta`；Bash 仍在结束后返回完整结果。
+本章节只记录事件契约切片，P5-13 整体尚未完成，P5-13B（Bash 流式读取及清洗）和
+P5-13C（Engine 事件转发及生命周期验收）尚未开始。
+
+本切片验证结果：目标事件与公共 API 测试 `98 passed`，旧核心兼容组 `129 passed`，全量
+测试 `978 passed, 2 skipped`，分发测试 `15 passed`；Ruff 检查、格式检查、离线构建和
+diff 检查均通过。

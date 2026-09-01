@@ -8,7 +8,7 @@ run_failed / run_cancelled）都能关联 Run 并保留顺序语义；
 
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, fields
 from typing import get_args
 
 import pytest
@@ -462,3 +462,115 @@ def test_tool_prepared_and_finished_carry_presentation_contract() -> None:
         ).presentation
         is None
     )
+
+
+def test_tool_output_delta_carries_clean_output_and_joins_engine_event() -> None:
+    from mica_agent.events import ToolOutputDelta
+
+    event = ToolOutputDelta(
+        run_id="run-1",
+        seq=3,
+        call_id="call-1",
+        tool_name="bash",
+        text="line 1\n",
+    )
+
+    assert event.run_id == "run-1"
+    assert event.seq == 3
+    assert event.call_id == "call-1"
+    assert event.tool_name == "bash"
+    assert event.text == "line 1\n"
+    assert isinstance(event, get_args(EngineEvent))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "plain ASCII",
+        "中文输出 🙂",
+        "\n",
+        "first\r\nsecond\r\n",
+        "partial line",
+        "  leading and trailing  ",
+    ],
+)
+def test_tool_output_delta_preserves_text_exactly(text: str) -> None:
+    from mica_agent.events import ToolOutputDelta
+
+    event = ToolOutputDelta("run-1", 3, "call-1", "bash", text)
+
+    assert event.text == text
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "error_type"),
+    [
+        ("run_id", 123, TypeError),
+        ("run_id", "   ", ValueError),
+        ("seq", -1, ValueError),
+        ("seq", True, TypeError),
+        ("call_id", 123, TypeError),
+        ("call_id", "\t\n", ValueError),
+        ("tool_name", "has space", ValueError),
+        ("tool_name", 123, TypeError),
+        ("text", b"tool-output-sensitive-marker", TypeError),
+        ("text", "", ValueError),
+    ],
+)
+def test_tool_output_delta_rejects_invalid_fields_without_echoing_text(
+    field_name: str, value: object, error_type: type[Exception]
+) -> None:
+    from mica_agent.events import ToolOutputDelta
+
+    values: dict[str, object] = {
+        "run_id": "run-1",
+        "seq": 3,
+        "call_id": "call-1",
+        "tool_name": "bash",
+        "text": "safe text",
+    }
+    values[field_name] = value
+
+    with pytest.raises(error_type) as exc_info:
+        ToolOutputDelta(**values)  # type: ignore[arg-type]
+
+    assert "tool-output-sensitive-marker" not in str(exc_info.value)
+
+
+def test_tool_output_delta_has_only_five_immutable_slot_fields() -> None:
+    from mica_agent.events import ToolOutputDelta
+
+    event = ToolOutputDelta("run-1", 3, "call-1", "bash", "output")
+
+    assert tuple(item.name for item in fields(event)) == (
+        "run_id",
+        "seq",
+        "call_id",
+        "tool_name",
+        "text",
+    )
+    assert not hasattr(event, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        event.text = "changed"  # type: ignore[misc]
+    with pytest.raises((AttributeError, TypeError)):
+        event.extra = "not allowed"  # type: ignore[attr-defined]
+
+
+def test_tool_output_delta_repr_omits_sensitive_text() -> None:
+    from mica_agent.events import ToolOutputDelta
+
+    marker = "tool-output-sensitive-marker"
+    event = ToolOutputDelta("run-1", 3, "call-1", "bash", marker)
+
+    assert event.text == marker
+    representation = repr(event)
+    assert "ToolOutputDelta" in representation
+    assert "run-1" in representation
+    assert "call-1" in representation
+    assert "bash" in representation
+    assert marker not in representation
+    assert "traceback" not in representation.lower()
+
+    with pytest.raises(FrozenInstanceError) as exc_info:
+        event.text = marker  # type: ignore[misc]
+    assert marker not in str(exc_info.value)

@@ -436,6 +436,14 @@ def test_events_are_importable_from_events_module() -> None:
     assert RunCancelled is not None
 
 
+def test_tool_output_delta_is_available_from_public_apis() -> None:
+    from mica_agent import ToolOutputDelta as TopLevelToolOutputDelta
+    from mica_agent.events import ToolOutputDelta as EventsToolOutputDelta
+
+    assert TopLevelToolOutputDelta is EventsToolOutputDelta
+    assert "ToolOutputDelta" in mica_agent.__all__
+
+
 def test_provider_contract_is_importable_from_providers_package() -> None:
     assert isinstance(Provider, type)
     for public_name in (

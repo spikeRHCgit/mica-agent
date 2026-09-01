@@ -110,6 +110,27 @@ class TextDelta:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolOutputDelta:
+    """按序排列、已安全清洗的工具输出增量。"""
+
+    run_id: str
+    seq: int
+    call_id: str
+    tool_name: str
+    text: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        _validate_run_id(self.run_id)
+        _validate_seq(self.seq)
+        _validate_non_blank_text(self.call_id, "call_id")
+        _validate_tool_name(self.tool_name, "tool_name")
+        if not isinstance(self.text, str):
+            raise TypeError("text must be a str")
+        if not self.text:
+            raise ValueError("text must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
 class ToolPrepared:
     """工具调用已提出但尚未授权或执行。"""
 
@@ -280,6 +301,7 @@ EngineEvent = (
     RunStarted
     | ReasoningDelta
     | TextDelta
+    | ToolOutputDelta
     | ToolPrepared
     | ToolStarted
     | ToolFinished
