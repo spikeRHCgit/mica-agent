@@ -283,7 +283,7 @@ Mica 核心交付 ExtensionAPI、扩展发现与加载、稳定注册契约、�
 | Phase 3：会话持久化 | 已完成 | 建立工作区身份、JSONL Store、SessionService、上下文加载和退出后恢复。 | `docs/phase3_plan.md` |
 | Phase 4：仓库收口 | 已完成 | 删除历史实现，统一 Mica 仓库、包名、入口和本地工作目录。 | `docs/phase4_plan.md` |
 | Phase 5：工具与权限 | 已完成 | 建立工具契约、文件/Bash/结构化 ask、权限策略、多步工具循环、思考事件、工具展示与会话 v3、动态输出和系统提示词快照。 | `docs/phase5_plan.md`、`docs/system_prompt_design.md` |
-| Phase 6：Textual TUI | 计划已批准，尚未构建 | 交付启动界面、历史回放、输入编辑、工作状态、思考展示、工具卡片、权限/ask 窗口和可靠取消。 | `docs/tui_design.md`、`docs/phase6_plan.md` |
+| Phase 6：Textual TUI | 构建中 | 交付启动界面、历史回放、输入编辑、工作状态、思考展示、工具卡片、权限/ask 窗口和可靠取消。 | `docs/tui_design.md`、`docs/phase6_plan.md` |
 | Phase 7：配置与模型 | 未开始 | 建立 JSON 配置、首次向导、模型发现与切换、思考/工作/权限模式和界面偏好。 | 阶段开始前创建 |
 | Phase 8：会话命令与上下文 | 未开始 | 交付会话选择和 `/new`、`/rename`、`/branch`、`/rewind`、`/clear`、`/btw`、`/compact`，以及上下文用量和压缩。 | 阶段开始前创建 |
 | Phase 9：扩展契约 | 未开始 | 建立 ExtensionAPI、显式发现和工具、Provider、命令、事件的稳定扩展入口及最小示例。 | 阶段开始前创建 |

@@ -47,10 +47,28 @@ class ContextDiagnostic:
 
 @dataclass(frozen=True, slots=True)
 class ContextBuildResult:
-    """一次上下文构建产生的新消息序列与诊断。"""
+    """一次上下文构建产生的新消息序列、诊断与已加载来源。"""
 
     messages: tuple[Message, ...]
     diagnostics: tuple[ContextDiagnostic, ...]
+    loaded_sources: tuple[AgentFileSource, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.loaded_sources, tuple):
+            raise TypeError("loaded_sources must be a tuple of AgentFileSource")
+        if not all(
+            isinstance(source, AgentFileSource) for source in self.loaded_sources
+        ):
+            raise TypeError("loaded_sources must contain only AgentFileSource")
+        expected_order = (
+            source
+            for source in (AgentFileSource.GLOBAL, AgentFileSource.WORKSPACE)
+            if source in self.loaded_sources
+        )
+        if self.loaded_sources != tuple(expected_order):
+            raise ValueError(
+                "loaded_sources must be unique and ordered GLOBAL, WORKSPACE"
+            )
 
 
 class ContextBuilder:
@@ -83,6 +101,7 @@ class ContextBuilder:
         messages = self._validate_session_messages(session_messages)
         context: list[Message] = []
         diagnostics: list[ContextDiagnostic] = []
+        loaded_sources: list[AgentFileSource] = []
         for source, path in self._agent_file_paths():
             content, diagnostic = self._read_agents_file(source, path)
             if diagnostic is not None:
@@ -91,8 +110,13 @@ class ContextBuilder:
                 context.append(
                     Message(MessageRole.SYSTEM, self._wrap_agents(source, content))
                 )
+                loaded_sources.append(source)
         context.extend(messages)
-        return ContextBuildResult(tuple(context), tuple(diagnostics))
+        return ContextBuildResult(
+            tuple(context),
+            tuple(diagnostics),
+            tuple(loaded_sources),
+        )
 
     def _agent_file_paths(
         self,

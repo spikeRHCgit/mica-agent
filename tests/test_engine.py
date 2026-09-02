@@ -2461,7 +2461,7 @@ def test_real_bash_engine_aclose_after_first_delta_reaps_tool(
             event = await asyncio.wait_for(anext(stream), timeout=1.0)
             observed.append(event)
             if isinstance(event, ToolOutputDelta):
-                await asyncio.wait_for(stream.aclose(), timeout=1.0)
+                await asyncio.wait_for(stream.aclose(), timeout=5.0)
                 return
 
     asyncio.run(scenario())

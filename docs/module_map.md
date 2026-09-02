@@ -18,7 +18,7 @@
 | `src/mica_agent/app.py` | 应用层装配边界；绑定 SessionService、启动上下文、AgentEngine 和工具执行器，只在完整成功后提交包含最终工具展示快照的会话轮次。 |
 | `src/mica_agent/cancellation.py` | Provider、Engine、工具和交互等待共享的协作式取消令牌与固定取消异常。 |
 | `src/mica_agent/cli.py` | 当前基础终端入口；负责参数解析、环境配置检查、工作区与会话选择、工具装配、权限/ask 输入、事件消费和资源关闭。 |
-| `src/mica_agent/context_builder.py` | 会话激活时读取 global/workspace `AGENTS.md`，生成独立指令消息和安全诊断；不负责系统提示词正文。 |
+| `src/mica_agent/context_builder.py` | 会话激活时读取 global/workspace `AGENTS.md`，生成独立指令消息、安全诊断和实际加载来源的不可变快照；不负责系统提示词正文。 |
 | `src/mica_agent/engine.py` | 单次 Run 的核心循环；按序推进 Provider 请求、文本事件、工具调用、交互等待、限制、取消和唯一终态。 |
 | `src/mica_agent/events.py` | Engine 对前端公开的有序事件契约，包括 Run、思考与文本增量、工具准备/开始/完成、工具展示快照、动态输出、权限、用户输入和终态事件。 |
 | `src/mica_agent/file_tools.py` | 当前文件工具实现与注册入口；提供 `read`、`write`、`edit`，并执行大小限制、UTF-8、原子写入和安全结果转换。 |

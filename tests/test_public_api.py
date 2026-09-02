@@ -140,6 +140,12 @@ def test_top_level_exports_context_builder() -> None:
     assert mica_agent.ContextBuildResult is ContextBuildResult
     assert mica_agent.ContextBuilder is ContextBuilder
     assert mica_agent.ContextDiagnostic is ContextDiagnostic
+    assert ContextBuildResult((), ()).loaded_sources == ()
+    assert ContextBuildResult(
+        messages=(),
+        diagnostics=(),
+        loaded_sources=(AgentFileSource.GLOBAL,),
+    ).loaded_sources == (AgentFileSource.GLOBAL,)
     assert mica_agent.ContextDiagnosticKind is ContextDiagnosticKind
 
 
@@ -268,6 +274,9 @@ shutil.which = blocked
 subprocess.Popen = blocked
 pathlib.Path.is_file = blocked
 pathlib.Path.home = blocked
+pathlib.Path.mkdir = blocked
+pathlib.Path.open = blocked
+asyncio.create_task = blocked
 import mica_agent
 assert 'mica_agent.runtime_tools' not in sys.modules
 assert 'ToolOutputReporter' in mica_agent.__all__

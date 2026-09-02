@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from mica_agent.context_builder import (
     MAX_AGENTS_FILE_BYTES,
     AgentFileSource,
     ContextBuilder,
+    ContextBuildResult,
     ContextDiagnosticKind,
 )
 from mica_agent.jsonl_store import JsonlSessionStore
@@ -64,6 +66,10 @@ def test_build_orders_global_workspace_and_session_messages(
         *history,
     )
     assert result.diagnostics == ()
+    assert result.loaded_sources == (
+        AgentFileSource.GLOBAL,
+        AgentFileSource.WORKSPACE,
+    )
 
 
 def test_each_agent_source_can_be_present_alone_or_missing(
@@ -74,22 +80,27 @@ def test_each_agent_source_can_be_present_alone_or_missing(
 
     data_root.mkdir()
     (data_root / "AGENTS.md").write_text("global", encoding="utf-8")
-    assert builder.build(session).messages == (
+    global_result = builder.build(session)
+    assert global_result.messages == (
         agents_message("global", "global"),
         *session,
     )
+    assert global_result.loaded_sources == (AgentFileSource.GLOBAL,)
 
     (data_root / "AGENTS.md").unlink()
     (workspace_path / "AGENTS.md").write_text("workspace", encoding="utf-8")
-    assert builder.build(session).messages == (
+    workspace_result = builder.build(session)
+    assert workspace_result.messages == (
         agents_message("workspace", "workspace"),
         *session,
     )
+    assert workspace_result.loaded_sources == (AgentFileSource.WORKSPACE,)
 
     (workspace_path / "AGENTS.md").unlink()
-    result = builder.build()
-    assert result.messages == ()
+    result = builder.build(session)
+    assert result.messages == session
     assert result.diagnostics == ()
+    assert result.loaded_sources == ()
 
 
 def test_empty_agents_file_is_skipped_without_empty_system_message(
@@ -104,6 +115,7 @@ def test_empty_agents_file_is_skipped_without_empty_system_message(
 
     assert result.messages == (agents_message("workspace", "\n"),)
     assert result.diagnostics == ()
+    assert result.loaded_sources == (AgentFileSource.WORKSPACE,)
 
 
 def test_invalid_utf8_and_too_large_diagnostics_are_ordered_and_safe(
@@ -126,6 +138,7 @@ def test_invalid_utf8_and_too_large_diagnostics_are_ordered_and_safe(
         "global AGENTS.md is not valid UTF-8",
         "workspace AGENTS.md exceeds the size limit",
     ]
+    assert result.loaded_sources == ()
 
 
 def test_unreadable_directory_does_not_block_valid_other_source(
@@ -145,6 +158,7 @@ def test_unreadable_directory_does_not_block_valid_other_source(
     )
     assert result.diagnostics[0].source is AgentFileSource.GLOBAL
     assert result.diagnostics[0].kind is ContextDiagnosticKind.UNREADABLE
+    assert result.loaded_sources == (AgentFileSource.WORKSPACE,)
 
 
 def test_exact_limit_is_allowed_but_limit_plus_one_is_not_used(
@@ -160,12 +174,14 @@ def test_exact_limit_is_allowed_but_limit_plus_one_is_not_used(
 
     assert allowed.messages == (agents_message("global", exact.decode()),)
     assert allowed.diagnostics == ()
+    assert allowed.loaded_sources == (AgentFileSource.GLOBAL,)
 
     path.write_bytes(exact + b"b")
     rejected = builder.build()
 
     assert rejected.messages == ()
     assert rejected.diagnostics[0].kind is ContextDiagnosticKind.TOO_LARGE
+    assert rejected.loaded_sources == ()
     assert "b" not in rejected.messages
 
 
@@ -177,7 +193,7 @@ def test_build_reads_agents_again_without_caching(tmp_path: Path) -> None:
     global_path.write_text("first global", encoding="utf-8")
 
     first = builder.build()
-    global_path.write_text("second global", encoding="utf-8")
+    global_path.unlink()
     workspace_path.joinpath("AGENTS.md").write_text(
         "second workspace", encoding="utf-8"
     )
@@ -187,9 +203,15 @@ def test_build_reads_agents_again_without_caching(tmp_path: Path) -> None:
         agents_message("global", "first global"),
         agents_message("workspace", "first workspace"),
     )
-    assert second.messages == (
-        agents_message("global", "second global"),
-        agents_message("workspace", "second workspace"),
+    assert first.loaded_sources == (
+        AgentFileSource.GLOBAL,
+        AgentFileSource.WORKSPACE,
+    )
+    assert second.messages == (agents_message("workspace", "second workspace"),)
+    assert second.loaded_sources == (AgentFileSource.WORKSPACE,)
+    assert first.loaded_sources == (
+        AgentFileSource.GLOBAL,
+        AgentFileSource.WORKSPACE,
     )
 
 
@@ -204,10 +226,41 @@ def test_result_and_input_are_immutable_snapshots(tmp_path: Path) -> None:
 
     assert isinstance(result.messages, tuple)
     assert isinstance(result.diagnostics, tuple)
+    assert isinstance(result.loaded_sources, tuple)
     assert result.messages == (
         agents_message("global", "global"),
         Message(MessageRole.USER, "before"),
     )
+    assert result.loaded_sources == (AgentFileSource.GLOBAL,)
+    assert not hasattr(result, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        result.loaded_sources += (AgentFileSource.WORKSPACE,)
+
+
+def test_result_preserves_old_construction_and_validates_loaded_sources() -> None:
+    positional = ContextBuildResult((), ())
+    keyword = ContextBuildResult(messages=(), diagnostics=())
+
+    assert positional.loaded_sources == ()
+    assert keyword.loaded_sources == ()
+
+    with pytest.raises(TypeError) as not_tuple:
+        ContextBuildResult((), (), [AgentFileSource.GLOBAL])  # type: ignore[arg-type]
+    assert str(not_tuple.value) == "loaded_sources must be a tuple of AgentFileSource"
+
+    with pytest.raises(TypeError) as wrong_item:
+        ContextBuildResult((), (), ("global",))  # type: ignore[arg-type]
+    assert str(wrong_item.value) == "loaded_sources must contain only AgentFileSource"
+
+    for invalid_order in (
+        (AgentFileSource.GLOBAL, AgentFileSource.GLOBAL),
+        (AgentFileSource.WORKSPACE, AgentFileSource.GLOBAL),
+    ):
+        with pytest.raises(ValueError) as invalid:
+            ContextBuildResult((), (), invalid_order)
+        assert str(invalid.value) == (
+            "loaded_sources must be unique and ordered GLOBAL, WORKSPACE"
+        )
 
 
 def test_session_messages_must_be_standard_messages(tmp_path: Path) -> None:
