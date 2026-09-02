@@ -6,6 +6,7 @@ from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.widgets import Static
 
+from .logo import MicaLogo
 from .theme import MICA_THEME, SHELL_CSS
 
 
@@ -20,7 +21,8 @@ class MicaTuiApp(App[None]):
         self.theme = MICA_THEME.name
 
     def compose(self) -> ComposeResult:
-        yield VerticalScroll(id="transcript")
+        with VerticalScroll(id="transcript"):
+            yield MicaLogo(id="mica-logo")
         yield Static(id="work-status")
         yield Static(id="composer")
 

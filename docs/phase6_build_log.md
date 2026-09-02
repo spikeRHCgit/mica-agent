@@ -53,3 +53,25 @@ Textual headless/Pilot 测试覆盖外壳挂载退出、区域唯一性与顺序
 ## 后续边界
 
 本切片未接入 CLI、会话、MicaApp、Engine、Provider、工具、权限、ask 或真实输入。P6-01C 尚未开始。
+
+# P6-01C Logo 与启动资源区
+
+## P6-01C1 Logo 组件边界
+
+`MicaLogo` 是只属于 TUI 的静态只读组件，不依赖会话、应用、Engine、Provider、工具执行器、工作区或配置，也不读取文件、创建目录、启动任务、Timer、Worker、动画或子进程。
+
+## 响应式规则
+
+Logo 使用组件可用宽度选择三个稳定档位：宽度不小于 54 时显示六行完整折叠几何 M，宽度不小于 28 且小于 54 时显示四行紧凑 M，宽度小于 28 时只显示精确文本 `Mica`。完整与紧凑形态使用块字符和留白形成高低错落的切面轮廓，不使用三角字符。组件监听 Textual 尺寸事件，在同一生命周期内更新现有视图，不重复挂载。
+
+## 颜色与降级
+
+完整和紧凑形态复用主题现有的浅蓝、标准蓝与深蓝令牌分层渲染，不引入紫色、原始 ANSI、图片、外部字体或平台探测。几何字符和 `Mica` 文本独立表达品牌，禁用颜色或使用有限 ANSI 颜色时仍可读取，能力协商继续交给 Textual/Rich。
+
+## 挂载与安装态
+
+唯一的 `#mica-logo` 是可滚动 `#transcript` 的第一个子节点，不是 Screen 的直接子节点；Logo 过高时由 transcript 的滚动区域容纳，不改变 Screen 直属的 work-status 和底部 composer。wheel 包含 `mica_agent/tui/logo.py`，安装态显式导入 `MicaTuiApp` 的入口保持不变。
+
+## 后续边界
+
+P6-01C2 启动资源区尚未开始；本切片未连接真实会话、Run、CLI 或业务运行时。

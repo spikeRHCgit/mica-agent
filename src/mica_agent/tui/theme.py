@@ -51,6 +51,12 @@ Screen {
     border-bottom: solid $mica-border;
 }
 
+#mica-logo {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+}
+
 #work-status {
     width: 100%;
     height: 1;
