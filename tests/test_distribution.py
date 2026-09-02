@@ -445,6 +445,11 @@ def test_wheel_contains_only_mica_package_and_metadata(
         f"mica_agent-{VERSION}.dist-info",
     }
     assert "mica_agent/prompts/system.md" in members
+    assert {
+        "mica_agent/tui/__init__.py",
+        "mica_agent/tui/app.py",
+        "mica_agent/tui/theme.py",
+    } <= members
     assert 'name="ls"' not in file_tools_source
     assert "MAX_LIST_ENTRIES" not in file_tools_source
     assert "MAX_LIST_OUTPUT_BYTES" not in file_tools_source
@@ -482,7 +487,31 @@ def test_installed_distribution_declares_runtime_dependencies(
     )
 
     assert result.returncode == 0
-    assert result.stdout == "['httpx>=0.28.1', 'jsonschema>=4.25.1']\n"
+    assert result.stdout == (
+        "['httpx>=0.28.1', 'jsonschema>=4.25.1', 'textual>=8.2.8']\n"
+    )
+    assert result.stderr == ""
+
+
+def test_installed_wheel_explicitly_imports_tui(
+    full_distribution: InstalledDistribution,
+) -> None:
+    result = run_installed(
+        full_distribution,
+        [
+            full_distribution.python,
+            "-c",
+            (
+                "import mica_agent; "
+                "assert not hasattr(mica_agent, 'MicaTuiApp'); "
+                "from mica_agent.tui import MicaTuiApp; "
+                "assert MicaTuiApp.__name__ == 'MicaTuiApp'"
+            ),
+        ],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
     assert result.stderr == ""
 
 

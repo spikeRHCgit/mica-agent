@@ -262,6 +262,7 @@ def test_top_level_exports_p5_06_execution_contracts() -> None:
 def test_plain_import_isolates_runtime_tools_and_runtime_side_effects() -> None:
     code = """
 import asyncio
+import os
 import pathlib
 import shutil
 import subprocess
@@ -272,8 +273,10 @@ def blocked(*args, **kwargs):
 
 shutil.which = blocked
 subprocess.Popen = blocked
+os.getcwd = blocked
 pathlib.Path.is_file = blocked
 pathlib.Path.home = blocked
+pathlib.Path.cwd = blocked
 pathlib.Path.mkdir = blocked
 pathlib.Path.open = blocked
 asyncio.create_task = blocked
@@ -282,6 +285,46 @@ assert 'mica_agent.runtime_tools' not in sys.modules
 assert 'ToolOutputReporter' in mica_agent.__all__
 assert 'AskOption' in mica_agent.__all__
 assert 'AskPrompt' in mica_agent.__all__
+assert 'mica_agent.app' not in sys.modules
+assert 'mica_agent.engine' not in sys.modules
+assert 'mica_agent.cli' not in sys.modules
+assert 'mica_agent.tui' not in sys.modules
+assert 'textual' not in sys.modules
+assert not any(name == 'mica_agent.providers' or name.startswith('mica_agent.providers.') for name in sys.modules)
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_tui_is_an_explicit_side_effect_free_import() -> None:
+    code = """
+import asyncio
+import os
+import pathlib
+import shutil
+import subprocess
+import sys
+import mica_agent
+assert 'mica_agent.tui' not in sys.modules
+assert 'textual' not in sys.modules
+assert not hasattr(mica_agent, 'MicaTuiApp')
+
+def blocked(*args, **kwargs):
+    raise AssertionError('runtime side effect')
+
+shutil.which = blocked
+subprocess.Popen = blocked
+pathlib.Path.home = blocked
+pathlib.Path.cwd = blocked
+pathlib.Path.mkdir = blocked
+pathlib.Path.open = blocked
+asyncio.create_task = blocked
+from mica_agent.tui import MicaTuiApp
+app = MicaTuiApp()
+assert app is not None
+assert 'MicaTuiApp' not in mica_agent.__all__
 assert 'mica_agent.app' not in sys.modules
 assert 'mica_agent.engine' not in sys.modules
 assert 'mica_agent.cli' not in sys.modules

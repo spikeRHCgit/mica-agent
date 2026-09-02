@@ -37,6 +37,9 @@
 | `src/mica_agent/tool_executor.py` | 工具统一执行入口；依次完成注册查询、参数校验、权限判定、交互等待、handler 调用、取消和安全 ToolResult 转换。 |
 | `src/mica_agent/tool_presentation.py` | 工具展示快照和生成边界；提供五个内置工具与未知工具的安全 payload、编辑逐行差异、状态映射和深层不可变快照。 |
 | `src/mica_agent/tool_registry.py` | 进程内工具注册表；保存 ToolSpec 与异步 handler，提供原子注册、确定性列表、重复拒绝和按名解析。 |
+| `src/mica_agent/tui/__init__.py` | Textual TUI 包的显式导入入口；公开 `MicaTuiApp`，不扩展 `mica_agent` 顶层公共 API。 |
+| `src/mica_agent/tui/app.py` | 不连接业务运行时的 Textual 空外壳；建立 transcript、唯一 work-status 和底部 composer 三段稳定布局。 |
+| `src/mica_agent/tui/theme.py` | TUI 外壳的深色语义主题令牌与基础布局样式；依靠 Textual/Rich 完成颜色能力协商和外壳级降级。 |
 | `src/mica_agent/workspace.py` | 工作区身份与数据根边界；优先识别 Git 根目录，否则使用启动目录，并生成规范路径、slug、SHA-256 ID 和会话目录。 |
 | `src/mica_agent/workspace_paths.py` | 文件工具共享的工作区路径解析器；拒绝绝对/越界路径、重解析点、Windows 别名、ADS 和集中定义的敏感文件。 |
 | `src/mica_agent/providers/__init__.py` | Provider 子包的公共出口；只重导出供应商无关契约和错误，不执行网络请求。 |
