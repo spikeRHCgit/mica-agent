@@ -451,6 +451,7 @@ def test_wheel_contains_only_mica_package_and_metadata(
         "mica_agent/tui/composer.py",
         "mica_agent/tui/logo.py",
         "mica_agent/tui/models.py",
+        "mica_agent/tui/output.py",
         "mica_agent/tui/startup.py",
         "mica_agent/tui/theme.py",
     } <= members

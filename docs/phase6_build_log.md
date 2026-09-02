@@ -108,3 +108,13 @@ Composer 仍是 Screen 的第三个直接子节点并保持底部焦点；本切
 - **用户消息卡片**：提交后向 transcript 追加只读用户消息卡片，展示紧凑显示快照并继续保留摘要，不主动解释为 Markdown。
 
 本切片只产生 TUI 内部状态与消息，仍不连接 CLI、MicaApp、Engine、Provider、会话、Run 或真实业务运行；未升级任何依赖。P6-03 尚未开始。
+
+# P6-03A+B 模型回复与思考内容投影
+
+- **公共事件投影 seam**：`await MicaTuiApp.project_engine_event(event)` 只消费现有 `EngineEvent` 公共对象；返回 `True` 表示该事件已被当前 TUI Run 投影接受，工具、权限和 ask 事件安全返回 `False`。
+- **Run/seq 隔离**：`RunStarted` 建立不可复用的 Run 投影；每个已识别事件按 Run 维护严格递增的 `seq`，重复、倒序、未知 Run、终态后的事件均被拒绝。非本切片事件只消耗有效序号，不创建占位视图。
+- **正式回复边界**：首个 `TextDelta` 创建唯一的 `AssistantResponseView`，后续增量原样追加到同一对象及其 Textual `Markdown` 源；流式蓝色光标定位在正文末尾区域，不占独立正文行，`RunCompleted` 以完整源执行稳定 Markdown 更新，失败/取消只保留已有内容并完全移除光标。
+- **思考显示模式**：`ReasoningDelta` 进入独立的 `ReasoningView`，默认 `COLLAPSED`，并支持 `FULL`、`COLLAPSED`、`HIDDEN`。折叠预览按真实显示宽度生成，窄终端仍在最后可见行保留省略提示；隐藏模式保留隔离状态但不挂载正文或空白占位。
+- **焦点规则**：折叠思考视图聚焦后，`Ctrl+O` 只切换当前组件的折叠/完整显示；完整和隐藏模式不被该快捷键改变。
+- **无颜色降级**：思考使用主题 `MUTED` 语义色、细左线和额外缩进；布局分隔与纯文本仍在禁用颜色时保持可读，未依赖颜色作为唯一区分。
+- **范围边界**：本切片不接入 CLI、MicaApp、真实 Engine 流或 Provider，不持久化界面状态，不实现工具卡片或唯一工作状态条；**P6-03C 尚未开始**。
