@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 from textual.binding import Binding
+from textual.events import Resize
 from textual.message import Message
 from textual.widgets import TextArea
 
@@ -37,7 +38,21 @@ class MicaComposer(TextArea):
 
     def on_mount(self) -> None:
         super().on_mount()
+        self._sync_max_height()
         self.focus()
+
+    def on_resize(self, event: Resize) -> None:
+        self._sync_max_height()
+
+    def _sync_max_height(self) -> None:
+        """按可用高度限制内容行，保证 transcript 至少一行可见。"""
+        if self.app is None:
+            return
+        # 上部保留 work-status 一行和 transcript 至少一行可见区域。
+        max_chrome_height = self.app.size.height - 2
+        target = min(10, max(3, max_chrome_height))
+        if self.styles.max_height != target:
+            self.styles.max_height = target
 
     def action_submit(self) -> None:
         text = self.text

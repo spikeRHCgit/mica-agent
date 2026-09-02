@@ -75,8 +75,9 @@ Screen {
 
 #composer {
     width: 100%;
-    height: 3;
+    height: auto;
     min-height: 3;
+    max-height: 10;
     padding: 0 1;
     border-top: solid $mica-border;
     background: $surface;

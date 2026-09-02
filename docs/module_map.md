@@ -39,7 +39,7 @@
 | `src/mica_agent/tool_registry.py` | 进程内工具注册表；保存 ToolSpec 与异步 handler，提供原子注册、确定性列表、重复拒绝和按名解析。 |
 | `src/mica_agent/tui/__init__.py` | Textual TUI 包的显式导入入口；公开 `MicaTuiApp`、Composer 与启动资源快照，不扩展 `mica_agent` 顶层公共 API。 |
 | `src/mica_agent/tui/app.py` | 不连接业务运行时的 Textual 外壳；接收可选启动资源快照，并建立 transcript、唯一 work-status 和可编辑 composer 三段稳定布局。 |
-| `src/mica_agent/tui/composer.py` | TUI 专用的可编辑输入组件；负责软换行、真实换行以及原始文本的安全提交消息。 |
+| `src/mica_agent/tui/composer.py` | TUI 专用的可编辑输入组件；负责软换行、真实换行、按显示行数 1～8 行自动增高与内部滚动，以及原始文本的安全提交消息。 |
 | `src/mica_agent/tui/logo.py` | transcript 顶部的只读响应式 Mica Logo；按可用宽度切换完整、紧凑与纯文本形态。 |
 | `src/mica_agent/tui/models.py` | TUI 专用的不可变启动资源视图快照；保存系统提示词名称、AGENTS 来源以及工具、Skill 和扩展名称。 |
 | `src/mica_agent/tui/startup.py` | transcript 内的只读启动资源组件；把注入快照安全渲染为紧凑文本，不读取或推断业务状态。 |
