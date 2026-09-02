@@ -11,6 +11,7 @@ from .logo import MicaLogo
 from .models import StartupResourceSnapshot
 from .startup import StartupResourcesView
 from .theme import MICA_THEME, SHELL_CSS
+from .transcript import UserMessageCard
 
 
 class MicaTuiApp(App[None]):
@@ -44,6 +45,11 @@ class MicaTuiApp(App[None]):
             )
         yield Static(id="work-status")
         yield MicaComposer(id="composer")
+
+    def on_mica_composer_submitted(self, message: MicaComposer.Submitted) -> None:
+        """收到有效提交后，在 transcript 中追加用户消息卡片。"""
+        transcript = self.query_one("#transcript")
+        transcript.mount(UserMessageCard(message))
 
 
 __all__ = ["MicaTuiApp"]

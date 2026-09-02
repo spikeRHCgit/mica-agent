@@ -38,9 +38,11 @@
 | `src/mica_agent/tool_presentation.py` | 工具展示快照和生成边界；提供五个内置工具与未知工具的安全 payload、编辑逐行差异、状态映射和深层不可变快照。 |
 | `src/mica_agent/tool_registry.py` | 进程内工具注册表；保存 ToolSpec 与异步 handler，提供原子注册、确定性列表、重复拒绝和按名解析。 |
 | `src/mica_agent/tui/__init__.py` | Textual TUI 包的显式导入入口；公开 `MicaTuiApp`、Composer 与启动资源快照，不扩展 `mica_agent` 顶层公共 API。 |
-| `src/mica_agent/tui/app.py` | 不连接业务运行时的 Textual 外壳；接收可选启动资源快照，并建立 transcript、唯一 work-status 和可编辑 composer 三段稳定布局。 |
-| `src/mica_agent/tui/composer.py` | TUI 专用的可编辑输入组件；负责软换行、真实换行、按显示行数 1～8 行自动增高与内部滚动，以及原始文本的安全提交消息。 |
+| `src/mica_agent/tui/app.py` | 不连接业务运行时的 Textual 外壳；接收可选启动资源快照，并建立 transcript、唯一 work-status 和可编辑 composer 三段稳定布局；收到 Composer 提交后向 transcript 追加用户消息卡片。 |
+| `src/mica_agent/tui/composer.py` | TUI 专用的可编辑输入组件；负责软换行、真实换行、按显示行数 1～8 行自动增高与内部滚动、溢出提示、长粘贴折叠原子片段、原文还原提交消息与安全展示快照。 |
 | `src/mica_agent/tui/logo.py` | transcript 顶部的只读响应式 Mica Logo；按可用宽度切换完整、紧凑与纯文本形态。 |
+| `src/mica_agent/tui/paste.py` | TUI 内长粘贴折叠片段的模型与源文本判定；按逻辑行阈值决定是否折叠，并提供不可展开的紧凑摘要与真实原文快照。 |
+| `src/mica_agent/tui/transcript.py` | transcript 内只读的用户消息卡片；展示提交时保存的紧凑显示快照，不把用户原始文本解释为 Markdown。 |
 | `src/mica_agent/tui/models.py` | TUI 专用的不可变启动资源视图快照；保存系统提示词名称、AGENTS 来源以及工具、Skill 和扩展名称。 |
 | `src/mica_agent/tui/startup.py` | transcript 内的只读启动资源组件；把注入快照安全渲染为紧凑文本，不读取或推断业务状态。 |
 | `src/mica_agent/tui/theme.py` | TUI 外壳的深色语义主题令牌与基础布局样式；依靠 Textual/Rich 完成颜色能力协商和外壳级降级。 |

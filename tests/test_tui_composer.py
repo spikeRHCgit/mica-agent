@@ -501,7 +501,7 @@ def test_submitted_repr_does_not_disclose_text() -> None:
     assert message.text == sentinel
     assert sentinel not in repr(message)
     assert "Traceback" not in repr(message)
-    assert MicaComposer.Submitted.__slots__ == ("_text",)
+    assert set(MicaComposer.Submitted.__slots__) == {"_text", "_display_text"}
 
 
 def test_tui_explicit_import_exposes_composer_without_top_level_export() -> None:
