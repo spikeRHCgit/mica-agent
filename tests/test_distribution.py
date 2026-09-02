@@ -448,6 +448,7 @@ def test_wheel_contains_only_mica_package_and_metadata(
     assert {
         "mica_agent/tui/__init__.py",
         "mica_agent/tui/app.py",
+        "mica_agent/tui/composer.py",
         "mica_agent/tui/logo.py",
         "mica_agent/tui/models.py",
         "mica_agent/tui/startup.py",
@@ -508,9 +509,12 @@ def test_installed_wheel_explicitly_imports_tui(
                 "import asyncio\n"
                 "import mica_agent\n"
                 "assert not hasattr(mica_agent, 'MicaTuiApp')\n"
+                "assert not hasattr(mica_agent, 'MicaComposer')\n"
                 "assert not hasattr(mica_agent, 'StartupResourceSnapshot')\n"
                 "from mica_agent.context_builder import AgentFileSource\n"
-                "from mica_agent.tui import MicaTuiApp, StartupResourceSnapshot\n"
+                "from mica_agent.tui import (\n"
+                " MicaComposer, MicaTuiApp, StartupResourceSnapshot,\n"
+                ")\n"
                 "snapshot = StartupResourceSnapshot(\n"
                 " agent_sources=(AgentFileSource.GLOBAL,), tool_names=('read',)\n"
                 ")\n"
@@ -520,6 +524,10 @@ def test_installed_wheel_explicitly_imports_tui(
                 "  await pilot.pause()\n"
                 "  text = app.query_one('#startup-resources').render().plain\n"
                 "  assert 'global AGENTS.md' in text and 'read' in text\n"
+                "  composer = app.query_one('#composer', MicaComposer)\n"
+                "  assert composer.has_focus\n"
+                "  await pilot.press('安', '装')\n"
+                "  assert composer.text == '安装'\n"
                 "asyncio.run(main())"
             ),
         ],

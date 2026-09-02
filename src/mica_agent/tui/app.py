@@ -6,6 +6,7 @@ from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.widgets import Static
 
+from .composer import MicaComposer
 from .logo import MicaLogo
 from .models import StartupResourceSnapshot
 from .startup import StartupResourcesView
@@ -42,7 +43,7 @@ class MicaTuiApp(App[None]):
                 id="startup-resources",
             )
         yield Static(id="work-status")
-        yield Static(id="composer")
+        yield MicaComposer(id="composer")
 
 
 __all__ = ["MicaTuiApp"]

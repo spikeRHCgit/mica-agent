@@ -9,7 +9,7 @@ from textual.app import App
 from textual.containers import VerticalScroll
 from textual.widgets import Static
 
-from mica_agent.tui import MicaTuiApp
+from mica_agent.tui import MicaComposer, MicaTuiApp
 from mica_agent.tui.theme import MICA_THEME
 
 
@@ -40,7 +40,7 @@ def test_shell_mounts_ordered_regions_with_visible_bottom_composer(
             assert app.current_theme is MICA_THEME
             transcript = app.query_one("#transcript", VerticalScroll)
             work_status = app.query_one("#work-status", Static)
-            composer = app.query_one("#composer", Static)
+            composer = app.query_one("#composer", MicaComposer)
 
             assert len(app.query("#transcript")) == 1
             assert len(app.query("#work-status")) == 1

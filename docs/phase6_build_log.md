@@ -83,3 +83,9 @@ Logo 使用组件可用宽度选择三个稳定档位：宽度不小于 54 时�
 ## P6-01C 安全与集成边界
 
 快照和视图不携带或显示系统提示词正文、AGENTS 正文、绝对路径、诊断对象、traceback 或运行时对象，也不创建任务、Timer、Worker、线程或子进程。P6-01C2 仍未连接 CLI、真实 ContextBuilder 调用、会话、MicaApp、Engine、Provider、工具执行器或 Run；P6-02A 尚未开始。
+
+# P6-02A1 Composer 输入与提交契约
+
+`MicaComposer` 基于 Textual 的多行编辑组件，保持固定基础高度和显示层软换行；普通 Enter 对非空白原文发出一个只读 `Submitted.text` 快照并清空输入，Shift+Enter 在光标处插入真实换行。有效提交不裁剪空格、不重排文本或规范化 Unicode，空白输入只清空，不产生提交。
+
+Composer 仍是 Screen 的第三个直接子节点并保持底部焦点；本切片只产生 TUI 内部消息，不连接 CLI、MicaApp、会话、Engine、Provider 或 Run，也未实现粘贴摘要、用户消息卡片、自动增长或内部溢出提示。P6-02A2 与 P6-02B 尚未开始。
