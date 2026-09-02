@@ -46,20 +46,23 @@ def test_logo_uses_full_compact_and_plain_renderings() -> None:
             (100, 30): (
                 "full",
                 _FULL_LOGO,
+                6,
             ),
             (40, 16): (
                 "compact",
                 " ██    ██ \n██ █  █ ██   mica\n██      ██\n▀        ▀",
+                4,
             ),
-            (24, 8): ("plain", "Mica"),
+            (24, 8): ("plain", "Mica", 1),
         }
-        for size, (mode, text) in expected.items():
+        for size, (mode, text, height) in expected.items():
             app = MicaTuiApp()
             async with app.run_test(size=size) as pilot:
                 await pilot.pause()
                 logo = app.query_one("#mica-logo", MicaLogo)
                 assert logo.display_mode == mode
                 assert logo.render().plain == text
+                assert logo.region.height == height
                 assert not {"◢", "◣", "◥", "◤"} & set(text)
                 assert app.query_one("#composer").region.bottom == size[1]
 
@@ -75,6 +78,7 @@ def test_full_logo_overflow_stays_inside_scrollable_transcript() -> None:
             logo = app.query_one("#mica-logo", MicaLogo)
 
             assert logo.display_mode == "full"
+            assert logo.region.height == 6
             assert logo.region.height > transcript.size.height
             assert transcript.max_scroll_y > 0
             assert app.query_one("#composer").region.bottom == 8
@@ -86,18 +90,24 @@ def test_logo_switches_mode_during_terminal_resize_without_duplication() -> None
     async def scenario() -> None:
         app = MicaTuiApp()
         async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
             logo = app.query_one("#mica-logo", MicaLogo)
             assert logo.display_mode == "full"
+            assert logo.region.height == 6
 
             await pilot.resize_terminal(40, 16)
             await pilot.pause()
             assert logo.display_mode == "compact"
+            assert logo.region.height == 4
             assert app.query_one("#mica-logo", MicaLogo) is logo
+            assert app.query_one("#composer").region.bottom == 16
 
             await pilot.resize_terminal(24, 8)
             await pilot.pause()
             assert logo.display_mode == "plain"
             assert logo.render().plain == "Mica"
+            assert logo.region.height == 1
+            assert app.query_one("#mica-logo", MicaLogo) is logo
             assert len(app.query("#mica-logo")) == 1
             assert app.query_one("#composer").region.bottom == 8
 

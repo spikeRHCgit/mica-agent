@@ -69,11 +69,13 @@ class MicaLogo(Static):
 
     def _update_mode(self, width: int) -> None:
         if width >= FULL_MIN_WIDTH:
-            self.display_mode = "full"
+            mode, height = "full", 6
         elif width >= COMPACT_MIN_WIDTH:
-            self.display_mode = "compact"
+            mode, height = "compact", 4
         else:
-            self.display_mode = "plain"
+            mode, height = "plain", 1
+        self.display_mode = mode
+        self.styles.height = height
 
 
 __all__ = ["MicaLogo"]

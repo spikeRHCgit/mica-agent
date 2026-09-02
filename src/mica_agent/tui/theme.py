@@ -57,6 +57,14 @@ Screen {
     margin-bottom: 1;
 }
 
+#startup-resources {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+    padding: 0 1;
+    border-left: solid $mica-border;
+}
+
 #work-status {
     width: 100%;
     height: 1;

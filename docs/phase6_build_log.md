@@ -72,6 +72,14 @@ Logo 使用组件可用宽度选择三个稳定档位：宽度不小于 54 时�
 
 唯一的 `#mica-logo` 是可滚动 `#transcript` 的第一个子节点，不是 Screen 的直接子节点；Logo 过高时由 transcript 的滚动区域容纳，不改变 Screen 直属的 work-status 和底部 composer。wheel 包含 `mica_agent/tui/logo.py`，安装态显式导入 `MicaTuiApp` 的入口保持不变。
 
-## 后续边界
+## P6-01C2 启动资源快照
 
-P6-01C2 启动资源区尚未开始；本切片未连接真实会话、Run、CLI 或业务运行时。
+`StartupResourceSnapshot` 是 TUI 专用的 frozen、slots 不可变视图状态，保存系统提示词稳定名称、按 global/workspace 固定顺序排列的 `AgentFileSource`，以及保持注入顺序的工具、Skill 和扩展名称。列表输入在构造时复制为元组；名称只接受安全的单行非空文本。校验错误使用固定字段说明，不回显输入值、路径、内容、对象表示或原始异常。未来装配层直接把 `ContextBuildResult.loaded_sources` 注入 `agent_sources`，TUI 不调用 ContextBuilder，也不重新读取文件。
+
+## P6-01C2 只读资源区
+
+`MicaTuiApp` 新增可选 `startup_resources` 关键字入口，`None` 规范化为空快照，既有无参和 `ansi_color` 构造保持有效。`#startup-resources` 是 `#transcript` 中紧随唯一 Logo 的第二个子节点，稳定显示系统提示词名称、AGENTS 来源、工具、Skill 和扩展；空值明确显示 `none`，名称按纯文本渲染。资源区与 Logo 一起由 transcript 负责滚动，不覆盖唯一 work-status 或底部 composer。
+
+## P6-01C 安全与集成边界
+
+快照和视图不携带或显示系统提示词正文、AGENTS 正文、绝对路径、诊断对象、traceback 或运行时对象，也不创建任务、Timer、Worker、线程或子进程。P6-01C2 仍未连接 CLI、真实 ContextBuilder 调用、会话、MicaApp、Engine、Provider、工具执行器或 Run；P6-02A 尚未开始。

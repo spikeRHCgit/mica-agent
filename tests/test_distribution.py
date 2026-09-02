@@ -449,6 +449,8 @@ def test_wheel_contains_only_mica_package_and_metadata(
         "mica_agent/tui/__init__.py",
         "mica_agent/tui/app.py",
         "mica_agent/tui/logo.py",
+        "mica_agent/tui/models.py",
+        "mica_agent/tui/startup.py",
         "mica_agent/tui/theme.py",
     } <= members
     assert 'name="ls"' not in file_tools_source
@@ -503,10 +505,22 @@ def test_installed_wheel_explicitly_imports_tui(
             full_distribution.python,
             "-c",
             (
-                "import mica_agent; "
-                "assert not hasattr(mica_agent, 'MicaTuiApp'); "
-                "from mica_agent.tui import MicaTuiApp; "
-                "assert MicaTuiApp.__name__ == 'MicaTuiApp'"
+                "import asyncio\n"
+                "import mica_agent\n"
+                "assert not hasattr(mica_agent, 'MicaTuiApp')\n"
+                "assert not hasattr(mica_agent, 'StartupResourceSnapshot')\n"
+                "from mica_agent.context_builder import AgentFileSource\n"
+                "from mica_agent.tui import MicaTuiApp, StartupResourceSnapshot\n"
+                "snapshot = StartupResourceSnapshot(\n"
+                " agent_sources=(AgentFileSource.GLOBAL,), tool_names=('read',)\n"
+                ")\n"
+                "async def main():\n"
+                " app = MicaTuiApp(startup_resources=snapshot)\n"
+                " async with app.run_test(size=(40, 12)) as pilot:\n"
+                "  await pilot.pause()\n"
+                "  text = app.query_one('#startup-resources').render().plain\n"
+                "  assert 'global AGENTS.md' in text and 'read' in text\n"
+                "asyncio.run(main())"
             ),
         ],
     )
