@@ -36,7 +36,11 @@ def test_run_started_creates_no_empty_output_components() -> None:
             assert await app.project_engine_event(RunStarted("run-1")) is True
             assert list(app.query(AssistantResponseView)) == []
             assert list(app.query(ReasoningView)) == []
-            assert [child.id for child in app.query_one("#transcript").children] == [
+            assert [
+                child.id
+                for child in app.query_one("#transcript").children
+                if child.id != "new-output"
+            ] == [
                 "mica-logo",
                 "startup-resources",
             ]

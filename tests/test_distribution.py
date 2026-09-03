@@ -449,12 +449,14 @@ def test_wheel_contains_only_mica_package_and_metadata(
         "mica_agent/tui/__init__.py",
         "mica_agent/tui/app.py",
         "mica_agent/tui/composer.py",
+        "mica_agent/tui/history.py",
         "mica_agent/tui/logo.py",
         "mica_agent/tui/models.py",
         "mica_agent/tui/output.py",
         "mica_agent/tui/startup.py",
         "mica_agent/tui/status.py",
         "mica_agent/tui/theme.py",
+        "mica_agent/tui/transcript.py",
     } <= members
     assert 'name="ls"' not in file_tools_source
     assert "MAX_LIST_ENTRIES" not in file_tools_source
@@ -515,7 +517,8 @@ def test_installed_wheel_explicitly_imports_tui(
                 "assert not hasattr(mica_agent, 'StartupResourceSnapshot')\n"
                 "from mica_agent.context_builder import AgentFileSource\n"
                 "from mica_agent.tui import (\n"
-                " MicaComposer, MicaTuiApp, StartupResourceSnapshot,\n"
+                " ConversationTranscript, MicaComposer, MicaTuiApp,\n"
+                " NewOutputIndicator, StartupResourceSnapshot,\n"
                 ")\n"
                 "snapshot = StartupResourceSnapshot(\n"
                 " agent_sources=(AgentFileSource.GLOBAL,), tool_names=('read',)\n"
@@ -530,6 +533,10 @@ def test_installed_wheel_explicitly_imports_tui(
                 "  assert composer.has_focus\n"
                 "  await pilot.press('安', '装')\n"
                 "  assert composer.text == '安装'\n"
+                "  transcript = app.query_one(ConversationTranscript)\n"
+                "  assert transcript.is_following is True\n"
+                "  assert transcript.has_pending_new_output is False\n"
+                "  assert len(app.query(NewOutputIndicator)) == 0\n"
                 "asyncio.run(main())"
             ),
         ],

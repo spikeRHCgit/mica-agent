@@ -56,6 +56,16 @@ class AssistantResponseView(Static):
         self._is_streaming = True
         super().__init__(id=id, markup=False)
 
+    @classmethod
+    def from_history(cls, text: str, *, id: str | None = None) -> AssistantResponseView:
+        """建立已完成且不显示流式光标的历史回复。"""
+        if not isinstance(text, str):
+            raise TypeError("text must be a str")
+        view = cls(id=id)
+        view._text = text
+        view._is_streaming = False
+        return view
+
     @property
     def text(self) -> str:
         """目前收到的完整正式回复原文。"""
@@ -72,8 +82,9 @@ class AssistantResponseView(Static):
         return self.query_one(Markdown)
 
     def compose(self) -> ComposeResult:
-        yield Markdown("", classes="assistant-markdown")
-        yield Static("▌", classes="streaming-cursor", markup=False)
+        yield Markdown(self._text, classes="assistant-markdown")
+        if self._is_streaming:
+            yield Static("▌", classes="streaming-cursor", markup=False)
 
     async def append_text(self, text: str) -> None:
         """追加一个已经通过 Engine 顺序校验的文本增量。"""

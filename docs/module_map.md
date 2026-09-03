@@ -37,13 +37,14 @@
 | `src/mica_agent/tool_executor.py` | 工具统一执行入口；依次完成注册查询、参数校验、权限判定、交互等待、handler 调用、取消和安全 ToolResult 转换。 |
 | `src/mica_agent/tool_presentation.py` | 工具展示快照和生成边界；提供五个内置工具与未知工具的安全 payload、编辑逐行差异、状态映射和深层不可变快照。 |
 | `src/mica_agent/tool_registry.py` | 进程内工具注册表；保存 ToolSpec 与异步 handler，提供原子注册、确定性列表、重复拒绝和按名解析。 |
-| `src/mica_agent/tui/__init__.py` | Textual TUI 包的显式导入入口；公开 `MicaTuiApp`、Composer、启动资源快照以及模型输出视图类型，不扩展 `mica_agent` 顶层公共 API。 |
-| `src/mica_agent/tui/app.py` | Textual 外壳与 Engine 公共事件投影边界；建立 transcript、唯一 work-status 和可编辑 composer 三段稳定布局，按 Run/seq 隔离并追加模型思考与正式回复视图，同时驱动唯一工作状态条；不连接真实业务运行时。 |
+| `src/mica_agent/tui/__init__.py` | Textual TUI 包的显式导入入口；公开 `MicaTuiApp`、Composer、启动资源快照、模型输出视图以及 transcript 滚动与历史记录类型，不扩展 `mica_agent` 顶层公共 API。 |
+| `src/mica_agent/tui/app.py` | Textual 外壳与 Engine 公共事件投影边界；建立 transcript、唯一 work-status 和可编辑 composer 三段稳定布局，接收已加载的 `StoredSession` 恢复历史，按 Run/seq 隔离并追加模型思考与正式回复视图，同时驱动唯一工作状态条；不连接真实业务运行时。 |
 | `src/mica_agent/tui/composer.py` | TUI 专用的可编辑输入组件；负责软换行、真实换行、按显示行数 1～8 行自动增高与内部滚动、溢出提示、长粘贴折叠原子片段、原文还原提交消息与安全展示快照。 |
 | `src/mica_agent/tui/logo.py` | transcript 顶部的只读响应式 Mica Logo；按可用宽度切换完整、紧凑与纯文本形态。 |
 | `src/mica_agent/tui/paste.py` | TUI 内长粘贴折叠片段的模型与源文本判定；按逻辑行阈值决定是否折叠，并提供不可展开的紧凑摘要与真实原文快照。 |
-| `src/mica_agent/tui/transcript.py` | transcript 内只读的用户消息卡片；展示提交时保存的紧凑显示快照，不把用户原始文本解释为 Markdown。 |
-| `src/mica_agent/tui/output.py` | TUI 模型正式回复与独立思考视图；使用 Textual Markdown、流式光标、完整/折叠/隐藏思考模式及当前焦点的 `Ctrl+O` 切换，不持久化事件内容。 |
+| `src/mica_agent/tui/history.py` | `StoredSession` 到 TUI 历史视图的只读投影；按持久化顺序产出历史用户卡片、紧凑工具记录和最终回复视图，不重放 Run、不重新执行工具、不读取会话存储。 |
+| `src/mica_agent/tui/transcript.py` | transcript 容器、用户消息卡片与历史工具记录；提供底部自动跟随、用户上滚离底检测、唯一 `↓ new output` 提示与返回底部动作，展示提交时保存的紧凑显示快照，不把用户原始文本解释为 Markdown，也不展开工具细节。 |
+| `src/mica_agent/tui/output.py` | TUI 模型正式回复与独立思考视图；使用 Textual Markdown、流式光标、完整/折叠/隐藏思考模式及当前焦点的 `Ctrl+O` 切换，支持从历史正文构造非流式回复，不持久化事件内容。 |
 | `src/mica_agent/tui/models.py` | TUI 专用的不可变启动资源视图快照；保存系统提示词名称、AGENTS 来源以及工具、Skill 和扩展名称。 |
 | `src/mica_agent/tui/startup.py` | transcript 内的只读启动资源组件；把注入快照安全渲染为紧凑文本，不读取或推断业务状态。 |
 | `src/mica_agent/tui/status.py` | 唯一工作状态条视图；公开 Run 工作状态和阶段类型，消费已校验事件投影提供的时钟，负责阶段/总耗时、进展颜色和确定性点号动画，不显示敏感运行标识或正文。 |

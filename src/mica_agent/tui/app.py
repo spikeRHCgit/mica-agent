@@ -6,7 +6,6 @@ from collections.abc import Callable
 from time import monotonic
 
 from textual.app import App, ComposeResult
-from textual.containers import VerticalScroll
 
 from mica_agent.events import (
     EngineEvent,
@@ -23,15 +22,20 @@ from mica_agent.events import (
     ToolStarted,
     UserInputRequested,
 )
+from mica_agent.jsonl_store import StoredSession
 
 from .composer import MicaComposer
+from .history import iter_history_views
 from .logo import MicaLogo
 from .models import StartupResourceSnapshot
 from .output import AssistantResponseView, ReasoningDisplayMode, ReasoningView
 from .startup import StartupResourcesView
 from .status import WorkPhase, WorkStatus, WorkStatusView
 from .theme import MICA_THEME, SHELL_CSS
-from .transcript import UserMessageCard
+from .transcript import (
+    ConversationTranscript,
+    UserMessageCard,
+)
 
 
 class MicaTuiApp(App[None]):
@@ -46,6 +50,7 @@ class MicaTuiApp(App[None]):
         startup_resources: StartupResourceSnapshot | None = None,
         reasoning_display_mode: ReasoningDisplayMode = ReasoningDisplayMode.COLLAPSED,
         clock: Callable[[], float] = monotonic,
+        stored_session: StoredSession | None = None,
     ) -> None:
         if startup_resources is not None and not isinstance(
             startup_resources, StartupResourceSnapshot
@@ -59,7 +64,10 @@ class MicaTuiApp(App[None]):
         self.reasoning_display_mode = reasoning_display_mode
         if not callable(clock):
             raise TypeError("clock must be callable")
+        if stored_session is not None and not isinstance(stored_session, StoredSession):
+            raise TypeError("stored_session must be a StoredSession or None")
         self._clock = clock
+        self.stored_session = stored_session
         self._last_seq: dict[str, int] = {}
         self._terminated_run_ids: set[str] = set()
         self._response_views: dict[str, AssistantResponseView] = {}
@@ -70,12 +78,13 @@ class MicaTuiApp(App[None]):
         self.theme = MICA_THEME.name
 
     def compose(self) -> ComposeResult:
-        with VerticalScroll(id="transcript"):
+        with ConversationTranscript(id="transcript"):
             yield MicaLogo(id="mica-logo")
             yield StartupResourcesView(
                 self.startup_resources,
                 id="startup-resources",
             )
+            yield from iter_history_views(self.stored_session)
         yield WorkStatusView(
             clock=self._clock,
             auto_animate=self._clock is monotonic,
@@ -166,6 +175,7 @@ class MicaTuiApp(App[None]):
                 self._reasoning_views[event.run_id] = view
             else:
                 view.append_text(event.text)
+            self.query_one(ConversationTranscript).content_added()
             return True
         if not isinstance(event, TextDelta):
             return False
@@ -175,12 +185,14 @@ class MicaTuiApp(App[None]):
             await self.query_one("#transcript").mount(view)
             self._response_views[event.run_id] = view
         await view.append_text(event.text)
+        self.query_one(ConversationTranscript).content_added()
         return True
 
     def on_mica_composer_submitted(self, message: MicaComposer.Submitted) -> None:
         """收到有效提交后，在 transcript 中追加用户消息卡片。"""
-        transcript = self.query_one("#transcript")
+        transcript = self.query_one(ConversationTranscript)
         transcript.mount(UserMessageCard(message))
+        transcript.content_added()
 
 
 __all__ = ["MicaTuiApp"]

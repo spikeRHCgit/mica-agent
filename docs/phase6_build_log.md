@@ -126,3 +126,12 @@ Composer 仍是 Screen 的第三个直接子节点并保持底部焦点；本切
 - **计时与进展**：使用可注入单调时钟；RunStarted 建立 waiting 起点，独立 ReasoningDelta 进入 thinking，TextDelta 进入 responding，工具/权限/用户输入事件进入 waiting。阶段增量不重置阶段起点，但所有可观察进展重置颜色计时；thought 只累计 thinking，waited 统计首个正式文本前等待，无正式文本时使用总时长。
 - **视觉与资源边界**：点号通过同一 `advance_animation()` 循环推进，生产环境最多一个 Textual Timer；主体颜色从 `BRAND_LIGHT`、`BRAND`、`BRAND_DEEP` 插值，颜色不是状态唯一表达。ready、done、cancel、interrupt 停止动画；取消前无进展显示 cancel，否则显示 interrupt，失败统一 interrupt。
 - **验收结论**：公开行为测试覆盖状态生命周期、阶段与耗时、颜色边界、时钟倒退、Run 隔离、唯一性、窄终端、无颜色、resize 和安全 repr；新增 `status.py` 纳入 wheel 分发。P6-04 尚未开始。
+
+# P6-04 历史恢复与滚动
+
+- **历史注入边界**：`MicaTuiApp(stored_session=...)` 只接收由外部加载完成的 `StoredSession`，非法类型在构造期抛固定 `TypeError`；TUI 不读取 Store、不访问会话文件路径、不重放 Run。
+- **只读历史投影**：新增 `tui/history.py`，按 `StoredSession.turns` 原始顺序产出「历史用户卡片 → 该轮工具记录 → 最终回复视图」，多轮保持持久化顺序；工具记录顺序取自 `intermediate_messages` 中真实 `tool_calls` 序列。
+- **历史工具记录**：v3 快照存在时显示 `tool <name> · <终态>`，缺快照的旧版本降级为 `tool <name> · recorded`，只表示存在该调用而不猜测结果；组件持有不可变快照供 P6-05 替换为正式卡片，`repr` 与渲染都不泄漏 `call_id`、参数、命令或结果正文。
+- **历史与实时边界**：历史恢复不建立 Run、不污染 seq 与终态集合，启动后状态条仍是 `Mica · ready`；不恢复或伪造历史思考内容，历史回复以非流式 Markdown 呈现且不挂载流式光标。实时 `ReasoningDelta`/`TextDelta` 与新提交继续追加在历史之后。
+- **滚动与跟随**：`ConversationTranscript` 在底部时自动跟随新增内容，真实 PageUp 等用户滚动离底后停止强制跟随；离底期间新增可见内容显示唯一 `↓ new output` 提示，返回底部后隐藏提示并恢复跟随。提示是 transcript 内的覆盖层，不进入滚动历史，也不改变工作状态条与 composer 的位置和高度。
+- **验收结论**：公开行为测试通过真实 Textual Pilot 覆盖历史顺序、工具记录降级、空会话、底部跟随、离底提示、被拒事件隔离、隐藏思考、resize、无颜色降级与安全 `repr`；新增 `history.py`、`transcript.py` 纳入 wheel 分发校验。P6-05A 尚未开始。
