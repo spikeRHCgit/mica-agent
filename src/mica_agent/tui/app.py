@@ -34,7 +34,7 @@ from .output import AssistantResponseView, ReasoningDisplayMode, ReasoningView
 from .startup import StartupResourcesView
 from .status import WorkPhase, WorkStatus, WorkStatusView
 from .theme import MICA_THEME, SHELL_CSS
-from .tool_cards import ReadToolCard, ToolCard, ToolCardState
+from .tool_cards import ReadToolCard, ToolCard, ToolCardState, WriteToolCard
 from .transcript import (
     ConversationTranscript,
     UserMessageCard,
@@ -198,15 +198,16 @@ class MicaTuiApp(App[None]):
             self.query_one(ConversationTranscript).content_added()
             return True
         if isinstance(event, ToolPrepared):
-            if (
-                event.tool_name != "read"
-                or event.presentation.kind is not ToolPresentationKind.READ
-            ):
+            card_type = {
+                ToolPresentationKind.READ: ReadToolCard,
+                ToolPresentationKind.WRITE: WriteToolCard,
+            }.get(event.presentation.kind)
+            if card_type is None or event.tool_name != event.presentation.tool_name:
                 return False
             key = (event.run_id, event.call_id)
             if key in self._tool_cards:
                 return False
-            card = ReadToolCard(event.presentation)
+            card = card_type(event.presentation)
             self._tool_cards[key] = card
             await self.query_one("#transcript").mount(card)
             await card.wait_for_refresh()

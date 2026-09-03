@@ -89,6 +89,11 @@ class ConversationTranscript(VerticalScroll):
             self._pending_new_output = True
             self._sync_indicator()
 
+    def content_resized(self) -> None:
+        """Reconcile scroll position after an existing card changes height."""
+        if self._following:
+            self.call_after_refresh(self._scroll_latest)
+
     def return_to_latest(self) -> None:
         """公开动作：返回 transcript 底部并恢复自动跟随。"""
         self._following = True

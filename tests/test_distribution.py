@@ -519,7 +519,8 @@ def test_installed_wheel_explicitly_imports_tui(
                 "from mica_agent.context_builder import AgentFileSource\n"
                 "from mica_agent.tui import (\n"
                 " ConversationTranscript, MicaComposer, MicaTuiApp,\n"
-                " NewOutputIndicator, StartupResourceSnapshot,\n"
+                " NewOutputIndicator, ReadToolCard, StartupResourceSnapshot,\n"
+                " WriteToolCard,\n"
                 ")\n"
                 "snapshot = StartupResourceSnapshot(\n"
                 " agent_sources=(AgentFileSource.GLOBAL,), tool_names=('read',)\n"
@@ -538,6 +539,8 @@ def test_installed_wheel_explicitly_imports_tui(
                 "  assert transcript.is_following is True\n"
                 "  assert transcript.has_pending_new_output is False\n"
                 "  assert len(app.query(NewOutputIndicator)) == 0\n"
+                "  assert ReadToolCard.__name__ == 'ReadToolCard'\n"
+                "  assert WriteToolCard.__name__ == 'WriteToolCard'\n"
                 "asyncio.run(main())"
             ),
         ],

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 from enum import Enum
-from typing import Self
+from typing import ClassVar, Self
 
 from rich.text import Text
+from textual.binding import Binding
 from textual.widgets import Static
 
 from mica_agent.tool_contracts import ToolResultStatus
@@ -131,6 +132,12 @@ class ToolCard(Static):
         }:
             return self
         if presentation is not None:
+            expected_status = {
+                ToolResultStatus.SUCCESS: ToolPresentationStatus.SUCCESS,
+                ToolResultStatus.CANCELLED: ToolPresentationStatus.CANCELLED,
+            }.get(status, ToolPresentationStatus.FAILED)
+            if presentation.status is not expected_status:
+                raise ValueError("presentation status must match tool result")
             if (
                 presentation.call_id != self.call_id
                 or presentation.tool_name != self.tool_name
@@ -189,6 +196,100 @@ class ToolCard(Static):
         return "<ToolCard>"
 
 
+class WriteToolCard(ToolCard):
+    """Plain-text file preview card with a ten-line display fold."""
+
+    can_focus = True
+    BINDINGS: ClassVar = [Binding("ctrl+o", "toggle_expanded", show=False)]
+    MAX_VISIBLE_LINES = 10
+
+    DEFAULT_CSS = """
+    WriteToolCard {
+        height: auto;
+        text-wrap: wrap;
+    }
+    """
+
+    def __init__(
+        self,
+        snapshot: ToolPresentationSnapshot,
+        *,
+        id: str | None = None,
+    ) -> None:
+        if snapshot.kind is not ToolPresentationKind.WRITE:
+            raise ValueError("WriteToolCard requires a write presentation")
+        if not isinstance(snapshot.payload.get("content"), str):
+            raise TypeError("write presentation content must be a string")
+        self._expanded = False
+        super().__init__(snapshot, id=id)
+
+    @property
+    def expanded(self) -> bool:
+        """Whether the complete content preview is currently displayed."""
+        return self._expanded
+
+    @property
+    def logical_line_count(self) -> int:
+        """Number of logical content lines, independent of terminal wrapping."""
+        return len(self._content_lines())
+
+    def _notify_transcript_resize(self) -> None:
+        from .transcript import ConversationTranscript
+
+        parent = self.parent
+        while parent is not None:
+            if isinstance(parent, ConversationTranscript):
+                parent.content_resized()
+                return
+            parent = parent.parent
+
+    def action_toggle_expanded(self) -> None:
+        """Toggle only this card's display fold when content needs one."""
+        if self.logical_line_count <= self.MAX_VISIBLE_LINES:
+            return
+        self._expanded = not self._expanded
+        self.refresh(layout=True)
+        self._notify_transcript_resize()
+
+    def _content_lines(self) -> list[str]:
+        content = self._snapshot.payload["content"]
+        assert isinstance(content, str)
+        normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+        return normalized.removesuffix("\n").split("\n")
+
+    def render(self) -> Text:
+        text = Text()
+        text.append(self.tool_name, style="bold")
+        text.append("  ")
+        text.append(self._display_path(), style="underline #7dd3fc")
+        text.append("\n\n")
+
+        lines = self._content_lines()
+        total = len(lines)
+        visible = lines if self._expanded else lines[: self.MAX_VISIBLE_LINES]
+        for index, line in enumerate(visible):
+            if index:
+                text.append("\n")
+            text.append(line)
+        if total > self.MAX_VISIBLE_LINES:
+            text.append("\n")
+            if self._expanded:
+                fold = f"... ({total} total, ctrl+o to collapse)"
+            else:
+                fold = (
+                    f"... ({total - self.MAX_VISIBLE_LINES} more lines, "
+                    f"{total} total, ctrl+o to expand)"
+                )
+            text.append(fold, style="#94a3b8")
+        if self._snapshot.message is not None:
+            text.append("\n")
+            text.append(self._snapshot.message, style="#94a3b8")
+        return text
+
+    def __repr__(self) -> str:
+        return "<WriteToolCard>"
+
+
 class ReadToolCard(ToolCard):
     """Compact single-line card for the built-in ``read`` tool."""
 
@@ -214,7 +315,13 @@ class ReadToolCard(ToolCard):
         return "<ReadToolCard>"
 
 
-__all__ = ["ReadToolCard", "ToolCard", "ToolCardState", "ToolCardStatus"]
+__all__ = [
+    "ReadToolCard",
+    "ToolCard",
+    "ToolCardState",
+    "ToolCardStatus",
+    "WriteToolCard",
+]
 
 # Stable descriptive alias for callers that prefer the status terminology.
 ToolCardStatus = ToolCardState
