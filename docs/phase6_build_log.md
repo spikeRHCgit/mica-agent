@@ -118,3 +118,11 @@ Composer 仍是 Screen 的第三个直接子节点并保持底部焦点；本切
 - **焦点规则**：折叠思考视图聚焦后，`Ctrl+O` 只切换当前组件的折叠/完整显示；完整和隐藏模式不被该快捷键改变。
 - **无颜色降级**：思考使用主题 `MUTED` 语义色、细左线和额外缩进；布局分隔与纯文本仍在禁用颜色时保持可读，未依赖颜色作为唯一区分。
 - **范围边界**：本切片不接入 CLI、MicaApp、真实 Engine 流或 Provider，不持久化界面状态，不实现工具卡片或唯一工作状态条；**P6-03C 尚未开始**。
+
+# P6-03C 唯一工作状态条
+
+- **公共事件投影**：`MicaTuiApp.project_engine_event()` 延续 P6-03A+B 的 Run/seq 校验；只将当前活动 Run 的合法事件投影到唯一 `WorkStatusView`，工具和交互事件更新阶段但保留既有 `False` 返回兼容语义。
+- **稳定状态**：状态条公开 `WorkStatus`（`READY`、`WORKING`、`DONE`、`CANCEL`、`INTERRUPT`）与 `WorkPhase`（`NONE`、`WAITING`、`THINKING`、`RESPONDING`），固定在输入区上方，不进入 transcript。
+- **计时与进展**：使用可注入单调时钟；RunStarted 建立 waiting 起点，独立 ReasoningDelta 进入 thinking，TextDelta 进入 responding，工具/权限/用户输入事件进入 waiting。阶段增量不重置阶段起点，但所有可观察进展重置颜色计时；thought 只累计 thinking，waited 统计首个正式文本前等待，无正式文本时使用总时长。
+- **视觉与资源边界**：点号通过同一 `advance_animation()` 循环推进，生产环境最多一个 Textual Timer；主体颜色从 `BRAND_LIGHT`、`BRAND`、`BRAND_DEEP` 插值，颜色不是状态唯一表达。ready、done、cancel、interrupt 停止动画；取消前无进展显示 cancel，否则显示 interrupt，失败统一 interrupt。
+- **验收结论**：公开行为测试覆盖状态生命周期、阶段与耗时、颜色边界、时钟倒退、Run 隔离、唯一性、窄终端、无颜色、resize 和安全 repr；新增 `status.py` 纳入 wheel 分发。P6-04 尚未开始。

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from time import monotonic
+
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
-from textual.widgets import Static
 
 from mica_agent.events import (
     EngineEvent,
@@ -27,6 +29,7 @@ from .logo import MicaLogo
 from .models import StartupResourceSnapshot
 from .output import AssistantResponseView, ReasoningDisplayMode, ReasoningView
 from .startup import StartupResourcesView
+from .status import WorkPhase, WorkStatus, WorkStatusView
 from .theme import MICA_THEME, SHELL_CSS
 from .transcript import UserMessageCard
 
@@ -42,6 +45,7 @@ class MicaTuiApp(App[None]):
         ansi_color: bool | None = None,
         startup_resources: StartupResourceSnapshot | None = None,
         reasoning_display_mode: ReasoningDisplayMode = ReasoningDisplayMode.COLLAPSED,
+        clock: Callable[[], float] = monotonic,
     ) -> None:
         if startup_resources is not None and not isinstance(
             startup_resources, StartupResourceSnapshot
@@ -53,10 +57,14 @@ class MicaTuiApp(App[None]):
         if not isinstance(reasoning_display_mode, ReasoningDisplayMode):
             raise TypeError("reasoning_display_mode must be a ReasoningDisplayMode")
         self.reasoning_display_mode = reasoning_display_mode
+        if not callable(clock):
+            raise TypeError("clock must be callable")
+        self._clock = clock
         self._last_seq: dict[str, int] = {}
         self._terminated_run_ids: set[str] = set()
         self._response_views: dict[str, AssistantResponseView] = {}
         self._reasoning_views: dict[str, ReasoningView] = {}
+        self._active_status_run_id: str | None = None
         super().__init__(ansi_color=ansi_color)
         self.register_theme(MICA_THEME)
         self.theme = MICA_THEME.name
@@ -68,7 +76,11 @@ class MicaTuiApp(App[None]):
                 self.startup_resources,
                 id="startup-resources",
             )
-        yield Static(id="work-status")
+        yield WorkStatusView(
+            clock=self._clock,
+            auto_animate=self._clock is monotonic,
+            id="work-status",
+        )
         yield MicaComposer(id="composer")
 
     async def project_engine_event(self, event: EngineEvent) -> bool:
@@ -77,6 +89,8 @@ class MicaTuiApp(App[None]):
             if event.run_id in self._last_seq:
                 return False
             self._last_seq[event.run_id] = event.seq
+            self._active_status_run_id = event.run_id
+            self.query_one(WorkStatusView).start_working()
             return True
         terminal = isinstance(event, (RunCompleted, RunFailed, RunCancelled))
         known_event = isinstance(
@@ -105,8 +119,35 @@ class MicaTuiApp(App[None]):
         if last_seq is None or event.seq <= last_seq:
             return False
         self._last_seq[event.run_id] = event.seq
+        if event.run_id == self._active_status_run_id:
+            if isinstance(event, ReasoningDelta):
+                self.query_one(WorkStatusView).observe_progress(WorkPhase.THINKING)
+            elif isinstance(event, TextDelta):
+                self.query_one(WorkStatusView).observe_progress(WorkPhase.RESPONDING)
+            elif isinstance(
+                event,
+                (
+                    ToolPrepared,
+                    ToolStarted,
+                    ToolOutputDelta,
+                    ToolFinished,
+                    PermissionRequested,
+                    UserInputRequested,
+                ),
+            ):
+                self.query_one(WorkStatusView).observe_progress(WorkPhase.WAITING)
         if terminal:
             self._terminated_run_ids.add(event.run_id)
+            if event.run_id == self._active_status_run_id:
+                status = (
+                    WorkStatus.DONE
+                    if isinstance(event, RunCompleted)
+                    else WorkStatus.CANCEL
+                    if isinstance(event, RunCancelled)
+                    and not self.query_one(WorkStatusView).had_progress
+                    else WorkStatus.INTERRUPT
+                )
+                self.query_one(WorkStatusView).finish(status)
             view = self._response_views.get(event.run_id)
             if view is not None:
                 await view.finish(stable_markdown=isinstance(event, RunCompleted))
