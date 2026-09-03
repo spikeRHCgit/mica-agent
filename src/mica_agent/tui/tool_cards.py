@@ -7,8 +7,10 @@ from dataclasses import replace
 from enum import Enum
 from typing import ClassVar, Self
 
+from rich.console import Console
 from rich.text import Text
 from textual.binding import Binding
+from textual.events import Key
 from textual.widgets import Static
 
 from mica_agent.tool_contracts import ToolResultStatus
@@ -460,6 +462,313 @@ class EditToolCard(ToolCard):
         return "<EditToolCard>"
 
 
+class BashToolCard(ToolCard):
+    """Safe bash command card with streaming output and bounded viewports."""
+
+    can_focus = True
+    BINDINGS: ClassVar = [Binding("ctrl+o", "toggle_expanded", show=False)]
+    MAX_COMMAND_DISPLAY_LINES = 3
+    MAX_OUTPUT_LINES = 8
+
+    DEFAULT_CSS = """
+    BashToolCard {
+        height: auto;
+        text-wrap: wrap;
+    }
+    """
+
+    def __init__(
+        self,
+        snapshot: ToolPresentationSnapshot,
+        *,
+        id: str | None = None,
+    ) -> None:
+        if snapshot.kind is not ToolPresentationKind.BASH:
+            raise ValueError("BashToolCard requires a bash presentation")
+        command = snapshot.payload.get("command")
+        if not isinstance(command, str):
+            raise TypeError("bash presentation command must be a string")
+        output = snapshot.payload.get("output", "")
+        if not isinstance(output, str):
+            raise TypeError("bash presentation output must be a string")
+        self._expanded = False
+        self._output = output
+        self._output_start = 0
+        self._output_following = True
+        self._unread_lines = 0
+        super().__init__(snapshot, id=id)
+        self._output_start = self._latest_output_start()
+
+    @property
+    def expanded(self) -> bool:
+        """Whether the complete command and terminal output are displayed."""
+        return self._expanded
+
+    @property
+    def output(self) -> str:
+        """The unmodified safe output received by the card."""
+        return self._output
+
+    @property
+    def output_following(self) -> bool:
+        """Whether new output is shown at the latest retained lines."""
+        return self._output_following
+
+    @property
+    def output_start(self) -> int:
+        """Logical line index at the start of the current output viewport."""
+        return self._output_start
+
+    @property
+    def unread_lines(self) -> int:
+        """Number of logical lines received while browsing older output."""
+        return self._unread_lines
+
+    @property
+    def logical_output_line_count(self) -> int:
+        return len(self._logical_output_lines())
+
+    def append_output(self, value: str) -> None:
+        """Append one already-sanitized output delta in event order."""
+        if not isinstance(value, str):
+            raise TypeError("output delta must be a string")
+        if self.state is not ToolCardState.RUNNING or not value:
+            return
+        before = self.logical_output_line_count
+        self._output += value
+        after = self.logical_output_line_count
+        if not self._output_following:
+            self._unread_lines += max(0, after - before)
+        self._clamp_output_start()
+        self.refresh(layout=True)
+        self._notify_transcript_resize()
+
+    def finish(
+        self,
+        status: ToolResultStatus,
+        presentation: ToolPresentationSnapshot | None = None,
+        *,
+        message: str | None = None,
+    ) -> Self:
+        """Finalize in place, replacing streaming output with the final snapshot."""
+        if self.state in {
+            ToolCardState.SUCCESS,
+            ToolCardState.FAILED,
+            ToolCardState.CANCELLED,
+        }:
+            return self
+        was_following = self._output_following
+        before = self.logical_output_line_count
+        if presentation is None:
+            final_status = {
+                ToolResultStatus.SUCCESS: ToolPresentationStatus.SUCCESS,
+                ToolResultStatus.CANCELLED: ToolPresentationStatus.CANCELLED,
+            }.get(status, ToolPresentationStatus.FAILED)
+            if message is None and status is not ToolResultStatus.SUCCESS:
+                message = _SAFE_FAILURE_MESSAGES[status]
+            presentation = replace(
+                self._snapshot,
+                status=final_status,
+                payload={
+                    "command": self._snapshot.payload["command"],
+                    "output": self._output,
+                    "exit_code": None,
+                },
+                message=message,
+            )
+        else:
+            if presentation.kind is not ToolPresentationKind.BASH:
+                raise ValueError("BashToolCard requires a bash presentation")
+            output = presentation.payload.get("output")
+            if not isinstance(output, str):
+                raise TypeError("bash presentation output must be a string")
+            self._output = output
+        result = super().finish(status, presentation)
+        after = self.logical_output_line_count
+        if not was_following:
+            self._unread_lines += max(0, after - before)
+        self._output_following = was_following
+        self._clamp_output_start()
+        return result
+
+    def action_toggle_expanded(self) -> None:
+        """Toggle the one command/output detail state for this card."""
+        if not self._needs_expansion():
+            return
+        self._expanded = not self._expanded
+        self._clamp_output_start()
+        self.refresh(layout=True)
+        self._notify_transcript_resize()
+
+    def on_key(self, event: Key) -> None:
+        """Browse retained logical output without creating a scrolling worker."""
+        if event.key == "end":
+            if self.logical_output_line_count <= self.MAX_OUTPUT_LINES:
+                return
+            latest = self._latest_output_start()
+            if (
+                self._output_following
+                and self._output_start == latest
+                and self._unread_lines == 0
+            ):
+                return
+            self._output_start = latest
+            self._output_following = True
+            self._unread_lines = 0
+            self.refresh(layout=True)
+            event.stop()
+            return
+        if self._expanded or self.logical_output_line_count <= self.MAX_OUTPUT_LINES:
+            return
+        if event.key == "up":
+            consumed = self._move_output(-1)
+        elif event.key == "down":
+            consumed = self._move_output(1)
+        elif event.key == "pageup":
+            consumed = self._move_output(-self.MAX_OUTPUT_LINES)
+        elif event.key == "pagedown":
+            consumed = self._move_output(self.MAX_OUTPUT_LINES)
+        else:
+            consumed = False
+        if consumed:
+            event.stop()
+
+    def _move_output(self, delta: int) -> bool:
+        latest = self._latest_output_start()
+        current = latest if self._output_following else self._output_start
+        target = max(0, min(latest, current + delta))
+        if target == current:
+            return False
+        self._output_start = target
+        self._output_following = target == latest
+        if self._output_following:
+            self._unread_lines = 0
+        self.refresh()
+        return True
+
+    def _needs_expansion(self) -> bool:
+        return self._command_display_line_count() > self.MAX_COMMAND_DISPLAY_LINES or (
+            self.state is not ToolCardState.RUNNING
+            and self.logical_output_line_count > self.MAX_OUTPUT_LINES
+        )
+
+    def _command_display_line_count(self) -> int:
+        return len(self._wrapped_command_lines())
+
+    def _wrapped_command_lines(self) -> list[str]:
+        command = self._snapshot.payload["command"]
+        assert isinstance(command, str)
+        width = max(1, self.content_region.width or self.size.width or 80)
+        wrapped = Text(f"$ {command}").wrap(
+            Console(width=width), width=width, overflow="fold"
+        )
+        return [line.plain for line in wrapped] or [""]
+
+    def _logical_output_lines(self) -> list[str]:
+        normalized = self._output.replace("\r\n", "\n").replace("\r", "\n")
+        if not normalized:
+            return []
+        return normalized.removesuffix("\n").split("\n")
+
+    def _latest_output_start(self) -> int:
+        return max(0, self.logical_output_line_count - self.MAX_OUTPUT_LINES)
+
+    def _clamp_output_start(self) -> None:
+        self._output_start = max(
+            0, min(self._latest_output_start(), self._output_start)
+        )
+        if self._output_following:
+            self._output_start = self._latest_output_start()
+
+    def _render_output(self, text: Text) -> None:
+        lines = self._logical_output_lines()
+        if not lines:
+            if self.state is not ToolCardState.RUNNING:
+                text.append("(no output)", style="#94a3b8")
+            return
+        if self._expanded or self.state is ToolCardState.RUNNING:
+            start = (
+                0
+                if self._expanded and self.state is not ToolCardState.RUNNING
+                else (
+                    self._latest_output_start()
+                    if self._output_following
+                    else self._output_start
+                )
+            )
+            visible = lines[start:]
+            hidden = start
+        else:
+            start = self._latest_output_start()
+            visible = lines[start:]
+            hidden = start
+        text.append("\n".join(visible), style="#e2e8f0")
+        if hidden and not self._expanded:
+            suffix = (
+                f"\n... ({hidden} earlier lines, ctrl+o to expand)"
+                if self.state is not ToolCardState.RUNNING
+                else ""
+            )
+            text.append(suffix, style="#94a3b8")
+        if self._unread_lines and not self._output_following:
+            text.append(f"\n↓ {self._unread_lines} new lines", style="#94a3b8")
+
+    def render(self) -> Text:
+        text = Text()
+        text.append(self.tool_name, style="bold")
+        text.append("\n")
+        command_lines = self._wrapped_command_lines()
+        if self._expanded:
+            text.append("\n".join(command_lines), style="#e2e8f0")
+            if len(command_lines) > self.MAX_COMMAND_DISPLAY_LINES:
+                text.append(
+                    f"\n... ({len(command_lines) - self.MAX_COMMAND_DISPLAY_LINES} display lines, "
+                    "ctrl+o to collapse)",
+                    style="#94a3b8",
+                )
+        else:
+            visible = command_lines[: self.MAX_COMMAND_DISPLAY_LINES]
+            text.append("\n".join(visible), style="#e2e8f0")
+            if len(command_lines) > self.MAX_COMMAND_DISPLAY_LINES:
+                text.append(
+                    f"\n... ({len(command_lines) - self.MAX_COMMAND_DISPLAY_LINES} more "
+                    "display lines, ctrl+o to expand)",
+                    style="#94a3b8",
+                )
+        if self._output or self.state in {
+            ToolCardState.SUCCESS,
+            ToolCardState.FAILED,
+            ToolCardState.CANCELLED,
+        }:
+            text.append("\n\n")
+            self._render_output(text)
+        if (
+            self._expanded
+            and self.state is not ToolCardState.RUNNING
+            and self.logical_output_line_count > self.MAX_OUTPUT_LINES
+        ):
+            text.append("\n... (full output, ctrl+o to collapse)", style="#94a3b8")
+        if self.snapshot.payload.get("exit_code") is not None:
+            exit_code = self.snapshot.payload["exit_code"]
+            if isinstance(exit_code, int) and exit_code > 0:
+                text.append(f"\nexit {exit_code}", style="#fca5a5")
+        if self.snapshot.message is not None:
+            message = self.snapshot.message
+        elif self.state is ToolCardState.CANCELLED:
+            message = _SAFE_FAILURE_MESSAGES[ToolResultStatus.CANCELLED]
+        elif self.state is ToolCardState.FAILED:
+            message = _SAFE_FAILURE_MESSAGES[ToolResultStatus.EXECUTION_FAILED]
+        else:
+            message = None
+        if message is not None:
+            text.append("\n")
+            text.append(message, style="#94a3b8")
+        return text
+
+    def __repr__(self) -> str:
+        return "<BashToolCard>"
+
+
 class ReadToolCard(ToolCard):
     """Compact single-line card for the built-in ``read`` tool."""
 
@@ -486,6 +795,7 @@ class ReadToolCard(ToolCard):
 
 
 __all__ = [
+    "BashToolCard",
     "EditToolCard",
     "ReadToolCard",
     "ToolCard",

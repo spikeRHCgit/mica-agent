@@ -161,3 +161,14 @@ Composer 仍是 Screen 的第三个直接子节点并保持底部焦点；本切
 - **生命周期与历史边界**：实时 `ToolPrepared → ToolStarted → ToolFinished` 原地更新同一 `(run_id, call_id)` 卡片；实时 `CANCELLED` 显示红色取消状态并保留差异。`RunFailed`/`RunCancelled` 只收口对应 Run 的未完成卡片，已完成卡片不重染。v3 历史只恢复合法的 success/failed edit 快照；取消 Run 不提交 TurnEntry，因此不存在合法 cancelled 历史快照。v1/v2 或缺少 presentation 继续显示 `tool edit · recorded`。
 - **安全与兼容边界**：渲染和 `repr` 不包含 call ID、Run ID、绝对路径、原始参数、凭据或 traceback；read/write 和既有滚动、离底新输出、窄终端及无颜色降级保持兼容。P6-05D 尚未开始。
 - **最终验收结论**：edit 生命周期、实时取消、Run 隔离、差异行样式与行号、空白行、unmatched 降级、二十条变化折叠、焦点展开、历史 success/failed 恢复和安全边界通过验证。
+
+# P6-05D bash 卡片
+
+- **卡片结构**：新增 `BashToolCard`，只接收已清洗的 Bash `ToolPresentationSnapshot` 与 `ToolOutputDelta.text`。命令区以 `$ ` 加安全命令纯文本显示，输出区保存安全动态缓冲；卡片复用基础生命周期、状态颜色和 `(run_id, call_id)` 稳定身份，不保存原始请求、工具结果、进程或管道对象。
+- **动态输出投影**：`ToolPrepared` 创建 pending 卡片，`ToolStarted` 原地切换 running，匹配 running Bash 卡片按 Engine seq 顺序追加 `ToolOutputDelta`。非 Bash、未知卡片、错误 Run、迟到事件和终态卡片均被拒绝；不重新清洗、排序、持久化或创建后台输出任务。`ToolFinished` 用最终安全 output 覆盖动态缓冲，最终快照因此不会重复显示。
+- **命令与输出折叠**：命令按当前卡片宽度计算真实硬换行和软换行，默认保留前三条显示行，超出部分显示固定剩余数量；详情 `Ctrl+O` 展开完整命令。运行期间输出视口最多显示最近八条逻辑行；终态默认保留最后八条，更早内容显示固定 earlier lines 提示，展开后显示完整最终输出。LF/CRLF、空白逻辑行、Unicode、尾部无换行文本和 `[REDACTED]` 均保留可读语义。
+- **输出跟随与内部浏览**：运行期间卡片自动跟随最新八条输出，但不会改变 transcript 自身的离底状态。卡片获得焦点后，Up/Down/PageUp/PageDown 在已保留逻辑行范围内移动内部视口；离开最新位置后停止卡片跟随，新增内容追加到缓冲并在卡片内唯一显示 `↓ N new lines`。End 返回最新视口、清除未读数量并恢复跟随；不使用 Timer、Worker、线程或后台 Task。
+- **终态显示**：成功使用绿色状态，空输出只显示一次 `(no output)`；非零退出使用红色状态并在输出后显示 `exit N`；取消、启动失败、超时、输出限制或 Run 失败不伪造退出码，保留已接收安全输出并显示固定安全原因。失败、取消和中断同时依靠文字与颜色表达。
+- **Run 与历史边界**：`RunFailed`/`RunCancelled` 只收口对应 Run 中 pending/running 的 Bash 卡片，已完成卡片不重染。v3 合法 success/failed Bash presentation 恢复为默认折叠的最终卡片，不播放动态输出、不重跑命令、不读取工作区；取消 Run 不提交 TurnEntry，不构造 cancelled 历史。v1/v2 或缺少 Bash presentation 的历史继续显示 `tool bash · recorded`，read/write/edit 正式卡片保持不变。
+- **安全与兼容边界**：render 与固定 `repr` 不包含 call ID、Run ID、绝对路径、Shell 可执行文件路径、原始异常、参数或凭据；命令和输出只来自安全 presentation/事件。现有 transcript 跟随、离底提示、唯一工作状态条、模型输出、read/write/edit 卡片、窄终端和无颜色文字识别保持兼容。P6-05E、P6-06 尚未开始。
+- **最终验收结论**：Bash 生命周期、动态输出顺序与最终校准、命令三显示行折叠、八行输出视口、内部浏览与未读提示、CRLF/空白行、成功无输出、非零退出、无退出码失败/取消、Run 收口、v3/旧历史恢复、安全边界及 wheel 导入覆盖通过验证。

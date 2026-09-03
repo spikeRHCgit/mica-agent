@@ -6,6 +6,7 @@ from .models import StartupResourceSnapshot
 from .output import AssistantResponseView, ReasoningDisplayMode, ReasoningView
 from .status import WorkPhase, WorkStatus, WorkStatusView
 from .tool_cards import (
+    BashToolCard,
     EditToolCard,
     ReadToolCard,
     ToolCard,
@@ -21,6 +22,7 @@ from .transcript import (
 
 __all__ = [
     "AssistantResponseView",
+    "BashToolCard",
     "ConversationTranscript",
     "EditToolCard",
     "HistoricalToolRecordView",

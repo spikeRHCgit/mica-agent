@@ -23,6 +23,7 @@ from mica_agent.tool_presentation import (
 )
 from mica_agent.tui import (
     AssistantResponseView,
+    BashToolCard,
     ConversationTranscript,
     HistoricalToolRecordView,
     MicaTuiApp,
@@ -181,7 +182,7 @@ def test_historical_tool_records_keep_call_order_without_exposing_details(
                 [
                     UserMessageCard,
                     ReadToolCard,
-                    HistoricalToolRecordView,
+                    BashToolCard,
                     AssistantResponseView,
                 ]
                 if has_presentations
@@ -200,13 +201,14 @@ def test_historical_tool_records_keep_call_order_without_exposing_details(
                     (
                         UserMessageCard,
                         ReadToolCard,
+                        BashToolCard,
                         HistoricalToolRecordView,
                         AssistantResponseView,
                     ),
                 )
             ]
             assert [type(child) for child in visible] == expected_types
-            expected_records = ["tool bash · failed"] if has_presentations else expected
+            expected_records = [] if has_presentations else expected
             assert [str(record.render()) for record in records] == expected_records
             safe = "\n".join(str(record.render()) + repr(record) for record in records)
             for hidden in (
@@ -222,9 +224,10 @@ def test_historical_tool_records_keep_call_order_without_exposing_details(
                 card = app.query_one(ReadToolCard)
                 assert card.snapshot is turn.tool_presentations[0]
                 assert card.render().plain == "read  private.md"
-                assert [record.presentation for record in records] == [
-                    turn.tool_presentations[1]
-                ]
+                bash_card = app.query_one(BashToolCard)
+                assert bash_card.snapshot is turn.tool_presentations[1]
+                assert "secret result" in bash_card.render().plain
+                assert not records
             else:
                 assert all(record.presentation is None for record in records)
 

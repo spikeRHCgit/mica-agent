@@ -35,6 +35,7 @@ from .startup import StartupResourcesView
 from .status import WorkPhase, WorkStatus, WorkStatusView
 from .theme import MICA_THEME, SHELL_CSS
 from .tool_cards import (
+    BashToolCard,
     EditToolCard,
     ReadToolCard,
     ToolCard,
@@ -208,6 +209,7 @@ class MicaTuiApp(App[None]):
                 ToolPresentationKind.READ: ReadToolCard,
                 ToolPresentationKind.WRITE: WriteToolCard,
                 ToolPresentationKind.EDIT: EditToolCard,
+                ToolPresentationKind.BASH: BashToolCard,
             }.get(event.presentation.kind)
             if card_type is None or event.tool_name != event.presentation.tool_name:
                 return False
@@ -225,6 +227,17 @@ class MicaTuiApp(App[None]):
             if card is None or card.tool_name != event.tool_name:
                 return False
             card.start()
+            return True
+        if isinstance(event, ToolOutputDelta):
+            card = self._tool_cards.get((event.run_id, event.call_id))
+            if (
+                not isinstance(card, BashToolCard)
+                or event.tool_name != "bash"
+                or card.state is not ToolCardState.RUNNING
+            ):
+                return False
+            card.append_output(event.text)
+            self.query_one(ConversationTranscript).content_added()
             return True
         if isinstance(event, ToolFinished):
             card = self._tool_cards.get((event.run_id, event.call_id))
