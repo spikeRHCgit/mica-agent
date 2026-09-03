@@ -9,7 +9,7 @@ from mica_agent.session_contracts import TurnEntry
 from mica_agent.tool_presentation import ToolPresentationKind
 
 from .output import AssistantResponseView
-from .tool_cards import ReadToolCard, WriteToolCard
+from .tool_cards import EditToolCard, ReadToolCard, WriteToolCard
 from .transcript import HistoricalToolRecordView, UserMessageCard
 
 RECORDED_STATUS = "recorded"
@@ -19,6 +19,7 @@ HistoryView = (
     | HistoricalToolRecordView
     | ReadToolCard
     | WriteToolCard
+    | EditToolCard
     | AssistantResponseView
 )
 
@@ -50,6 +51,12 @@ def _iter_turn_views(turn: TurnEntry) -> Iterator[HistoryView]:
                 and presentation.kind is ToolPresentationKind.WRITE
             ):
                 yield WriteToolCard(presentation)
+                continue
+            if (
+                presentation is not None
+                and presentation.kind is ToolPresentationKind.EDIT
+            ):
+                yield EditToolCard(presentation)
                 continue
             status = (
                 presentation.status.value

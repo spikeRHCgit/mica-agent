@@ -34,7 +34,13 @@ from .output import AssistantResponseView, ReasoningDisplayMode, ReasoningView
 from .startup import StartupResourcesView
 from .status import WorkPhase, WorkStatus, WorkStatusView
 from .theme import MICA_THEME, SHELL_CSS
-from .tool_cards import ReadToolCard, ToolCard, ToolCardState, WriteToolCard
+from .tool_cards import (
+    EditToolCard,
+    ReadToolCard,
+    ToolCard,
+    ToolCardState,
+    WriteToolCard,
+)
 from .transcript import (
     ConversationTranscript,
     UserMessageCard,
@@ -201,6 +207,7 @@ class MicaTuiApp(App[None]):
             card_type = {
                 ToolPresentationKind.READ: ReadToolCard,
                 ToolPresentationKind.WRITE: WriteToolCard,
+                ToolPresentationKind.EDIT: EditToolCard,
             }.get(event.presentation.kind)
             if card_type is None or event.tool_name != event.presentation.tool_name:
                 return False

@@ -31,6 +31,8 @@ from mica_agent.tool_presentation import (
     ToolPresentationStatus,
 )
 from mica_agent.tui import (
+    EditToolCard,
+    HistoricalToolRecordView,
     MicaTuiApp,
     ReadToolCard,
     ToolCardState,
@@ -626,5 +628,387 @@ def test_write_v3_history_restores_final_card_and_old_history_stays_recorded() -
             assert card.render().plain == "write  docs/tui_design.md\n\n# safe\n正文"
             assert card.logical_line_count == 2
             assert app.query_one("#work-status").render().plain == "Mica · ready"
+
+    asyncio.run(scenario())
+
+
+def edit_snapshot(
+    call_id: str,
+    status: ToolPresentationStatus,
+    *,
+    matched: bool | None,
+    lines: tuple[dict[str, object], ...],
+    path: str = "docs/tui_design.md",
+    message: str | None = None,
+) -> ToolPresentationSnapshot:
+    return ToolPresentationSnapshot(
+        call_id,
+        "edit",
+        ToolPresentationKind.EDIT,
+        status,
+        {"path": path, "matched": matched, "lines": lines},
+        message,
+    )
+
+
+def make_recorded_edit_session() -> StoredSession:
+    call = ToolCall("legacy-edit", "edit", {})
+    turn = TurnEntry(
+        "legacy-edit-turn",
+        "legacy-edit-run",
+        Message(MessageRole.USER, "edit legacy file"),
+        Message(MessageRole.ASSISTANT, "done"),
+        NOW,
+        (
+            Message(MessageRole.ASSISTANT, "", (call,)),
+            Message(MessageRole.TOOL, "{}", tool_call_id=call.call_id),
+        ),
+    )
+    return StoredSession(
+        SessionMeta(
+            "legacy-edit-session",
+            CURRENT_SESSION_FORMAT_VERSION,
+            "workspace-tool-cards",
+            "C:/fictional/mica",
+            "legacy edit",
+            NOW,
+            NOW,
+        ),
+        (turn,),
+    )
+
+
+def test_edit_lifecycle_renders_diff_in_place_with_real_line_numbers() -> None:
+    lines = (
+        {"kind": "context", "text": "before", "old_line": 18, "new_line": 18},
+        {"kind": "removed", "text": "old", "old_line": 19, "new_line": None},
+        {"kind": "added", "text": "new", "old_line": None, "new_line": 19},
+        {"kind": "context", "text": "after", "old_line": 20, "new_line": 20},
+    )
+
+    async def scenario() -> None:
+        app = MicaTuiApp()
+        async with app.run_test(size=(80, 20)) as pilot:
+            await pilot.pause()
+            await app.project_engine_event(RunStarted("edit-run"))
+            pending = edit_snapshot(
+                "edit-call", ToolPresentationStatus.PENDING, matched=None, lines=lines
+            )
+            assert await app.project_engine_event(ToolPrepared("edit-run", 1, pending))
+            await pilot.pause()
+            card = app.query_one(EditToolCard)
+            assert card.state is ToolCardState.PENDING
+            assert "- old" in card.render().plain
+            assert "+ new" in card.render().plain
+            assert "19" not in card.render().plain
+            await app.project_engine_event(
+                ToolStarted("edit-run", 2, "edit-call", "edit")
+            )
+            final = edit_snapshot(
+                "edit-call", ToolPresentationStatus.SUCCESS, matched=True, lines=lines
+            )
+            await app.project_engine_event(
+                ToolFinished(
+                    "edit-run", 3, "edit-call", "edit", ToolResultStatus.SUCCESS, final
+                )
+            )
+            assert app.query_one(EditToolCard) is card
+            assert card.state is ToolCardState.SUCCESS
+            assert card.snapshot is final
+            rendered = card.render()
+            assert "- 19  old" in rendered.plain
+            assert "+ 19  new" in rendered.plain
+            assert "  20  after" in rendered.plain
+            styles = {str(span.style) for span in rendered.spans}
+            assert {"#e2e8f0", "#fca5a5", "#bef264"} <= styles
+
+    asyncio.run(scenario())
+
+
+def test_edit_unmatched_and_large_diff_fold_are_safe_and_isolated() -> None:
+    unmatched_lines = (
+        {"kind": "removed", "text": "old", "old_line": None, "new_line": None},
+        {"kind": "added", "text": "new", "old_line": None, "new_line": None},
+    )
+    many_lines = tuple(
+        {"kind": "added", "text": f"line {i}", "old_line": None, "new_line": i}
+        for i in range(1, 23)
+    )
+
+    async def scenario() -> None:
+        app = MicaTuiApp()
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            await app.project_engine_event(RunStarted("edit-a"))
+            await app.project_engine_event(
+                ToolPrepared(
+                    "edit-a",
+                    1,
+                    edit_snapshot(
+                        "same",
+                        ToolPresentationStatus.PENDING,
+                        matched=None,
+                        lines=many_lines,
+                    ),
+                )
+            )
+            await app.project_engine_event(RunStarted("edit-b"))
+            await app.project_engine_event(
+                ToolPrepared(
+                    "edit-b",
+                    1,
+                    edit_snapshot(
+                        "same",
+                        ToolPresentationStatus.PENDING,
+                        matched=None,
+                        lines=unmatched_lines,
+                    ),
+                )
+            )
+            large, unmatched = list(app.query(EditToolCard))
+            assert large.change_line_count == 22
+            assert "line 1" in large.render().plain
+            assert "line 11" not in large.render().plain
+            assert "change lines hidden" in large.render().plain
+            assert "- old" in unmatched.render().plain
+            assert "+ new" in unmatched.render().plain
+            assert "file was not changed" not in unmatched.render().plain
+            large.focus()
+            await pilot.press("ctrl+o")
+            await pilot.pause()
+            assert large.expanded is True
+            assert "line 22" in large.render().plain
+            assert unmatched.expanded is False
+
+            final = edit_snapshot(
+                "same",
+                ToolPresentationStatus.FAILED,
+                matched=False,
+                lines=unmatched_lines,
+                message="file was not changed",
+            )
+            await app.project_engine_event(
+                ToolFinished(
+                    "edit-b",
+                    2,
+                    "same",
+                    "edit",
+                    ToolResultStatus.EXECUTION_FAILED,
+                    final,
+                )
+            )
+            assert unmatched.state is ToolCardState.FAILED
+            assert unmatched.render().plain.endswith("file was not changed")
+            assert unmatched.render().plain.count("file was not changed") == 1
+            assert large.expanded is True
+
+    asyncio.run(scenario())
+
+
+def test_edit_cancelled_finish_and_run_terminal_keep_isolation_and_reason() -> None:
+    lines = (
+        {"kind": "removed", "text": "old line", "old_line": None, "new_line": None},
+        {"kind": "added", "text": "new line", "old_line": None, "new_line": None},
+        {"kind": "added", "text": "", "old_line": None, "new_line": None},
+    )
+
+    async def scenario() -> None:
+        app = MicaTuiApp()
+        async with app.run_test(size=(72, 22)) as pilot:
+            await pilot.pause()
+            await app.project_engine_event(RunStarted("cancel-run"))
+            await app.project_engine_event(
+                ToolPrepared(
+                    "cancel-run",
+                    1,
+                    edit_snapshot(
+                        "same-call",
+                        ToolPresentationStatus.PENDING,
+                        matched=None,
+                        lines=lines,
+                    ),
+                )
+            )
+            await app.project_engine_event(RunStarted("other-run"))
+            await app.project_engine_event(
+                ToolPrepared(
+                    "other-run",
+                    1,
+                    edit_snapshot(
+                        "same-call",
+                        ToolPresentationStatus.PENDING,
+                        matched=None,
+                        lines=lines,
+                    ),
+                )
+            )
+            cancelled, pending = list(app.query(EditToolCard))
+            final = edit_snapshot(
+                "same-call",
+                ToolPresentationStatus.CANCELLED,
+                matched=False,
+                lines=lines,
+                message="operation cancelled",
+            )
+            await app.project_engine_event(
+                ToolFinished(
+                    "cancel-run",
+                    2,
+                    "same-call",
+                    "edit",
+                    ToolResultStatus.CANCELLED,
+                    final,
+                )
+            )
+            assert cancelled.state is ToolCardState.CANCELLED
+            assert cancelled.styles.background.hex.casefold() == "#450a0a"
+            assert "- old line" in cancelled.render().plain
+            assert "+ new line" in cancelled.render().plain
+            assert cancelled.render().plain.endswith(
+                "operation cancelled · file was not changed"
+            )
+            assert pending.state is ToolCardState.PENDING
+            await app.project_engine_event(RunCancelled("other-run", 2))
+            assert pending.state is ToolCardState.CANCELLED
+            assert cancelled.state is ToolCardState.CANCELLED
+
+    asyncio.run(scenario())
+
+
+def test_edit_fold_counts_only_changes_and_preserves_the_first_and_last_ten() -> None:
+    lines = tuple(
+        [{"kind": "context", "text": "context", "old_line": 1, "new_line": 1}]
+        + [
+            {
+                "kind": "added",
+                "text": f"change {i}",
+                "old_line": None,
+                "new_line": i + 2,
+            }
+            for i in range(21)
+        ]
+        + [{"kind": "context", "text": "tail", "old_line": 23, "new_line": 23}]
+    )
+    card = EditToolCard(
+        edit_snapshot(
+            "fold-call",
+            ToolPresentationStatus.SUCCESS,
+            matched=True,
+            lines=lines,
+        )
+    )
+    assert card.change_line_count == 21
+    collapsed = card.render().plain
+    assert "change 0" in collapsed and "change 9" in collapsed
+    assert "change 10" not in collapsed
+    assert "change 20" in collapsed
+    assert "tail" in collapsed
+    assert "1 change lines hidden" in collapsed
+
+
+def test_edit_failed_run_closes_only_unfinished_cards() -> None:
+    lines = (
+        {"kind": "removed", "text": "old", "old_line": 3, "new_line": None},
+        {"kind": "added", "text": "new", "old_line": None, "new_line": 3},
+    )
+
+    async def scenario() -> None:
+        app = MicaTuiApp()
+        async with app.run_test(size=(72, 20)) as pilot:
+            await pilot.pause()
+            await app.project_engine_event(RunStarted("failed-run"))
+            await app.project_engine_event(
+                ToolPrepared(
+                    "failed-run",
+                    1,
+                    edit_snapshot(
+                        "finished",
+                        ToolPresentationStatus.PENDING,
+                        matched=None,
+                        lines=lines,
+                    ),
+                )
+            )
+            await app.project_engine_event(
+                ToolFinished(
+                    "failed-run",
+                    2,
+                    "finished",
+                    "edit",
+                    ToolResultStatus.EXECUTION_FAILED,
+                    edit_snapshot(
+                        "finished",
+                        ToolPresentationStatus.FAILED,
+                        matched=True,
+                        lines=lines,
+                        message="tool execution failed",
+                    ),
+                )
+            )
+            await app.project_engine_event(
+                ToolPrepared(
+                    "failed-run",
+                    3,
+                    edit_snapshot(
+                        "unfinished",
+                        ToolPresentationStatus.PENDING,
+                        matched=None,
+                        lines=lines,
+                    ),
+                )
+            )
+            finished, unfinished = list(app.query(EditToolCard))
+            await app.project_engine_event(
+                RunFailed("failed-run", "safe failure", ErrorCategory.UNKNOWN, 4)
+            )
+            assert finished.state is ToolCardState.FAILED
+            assert finished.render().plain.endswith("tool execution failed")
+            assert unfinished.state is ToolCardState.FAILED
+            assert unfinished.render().plain.endswith(
+                "tool execution failed · file was not changed"
+            )
+
+    asyncio.run(scenario())
+
+
+def test_edit_failed_history_restores_and_missing_history_is_recorded() -> None:
+    lines = (
+        {"kind": "removed", "text": "old", "old_line": 4, "new_line": None},
+        {"kind": "added", "text": "new", "old_line": None, "new_line": 4},
+    )
+    success = edit_snapshot(
+        "success-edit",
+        ToolPresentationStatus.SUCCESS,
+        matched=True,
+        lines=lines,
+    )
+    failed = edit_snapshot(
+        "failed-edit",
+        ToolPresentationStatus.FAILED,
+        matched=True,
+        lines=lines,
+        message="tool execution failed",
+    )
+    session = make_history_session((success, failed))
+
+    async def scenario() -> None:
+        app = MicaTuiApp(stored_session=session)
+        async with app.run_test(size=(72, 18)) as pilot:
+            await pilot.pause()
+            success_card, failed_card = list(app.query(EditToolCard))
+            assert success_card.state is ToolCardState.SUCCESS
+            assert "- 4  old" in success_card.render().plain
+            assert failed_card.state is ToolCardState.FAILED
+            assert "- 4  old" in failed_card.render().plain
+            assert failed_card.render().plain.endswith("tool execution failed")
+
+        old_app = MicaTuiApp(stored_session=make_recorded_edit_session())
+        async with old_app.run_test(size=(72, 18)) as pilot:
+            await pilot.pause()
+            assert list(old_app.query(EditToolCard)) == []
+            records = list(old_app.query(HistoricalToolRecordView))
+            assert [record.render().plain for record in records] == [
+                "tool edit · recorded"
+            ]
 
     asyncio.run(scenario())

@@ -151,3 +151,13 @@ Composer 仍是 Screen 的第三个直接子节点并保持底部焦点；本切
 - **生命周期和历史恢复**：实时 `ToolPrepared → ToolStarted → ToolFinished` 始终更新同一 `(run_id, call_id)` 卡片；Run 失败或取消只收口对应 Run 的未完成卡片，已完成卡片不被重染。v3 write 快照恢复为最终卡片，旧版本或缺失快照继续使用中性记录，不重放工具、不读取工作区、不建立实时映射。
 - **安全与兼容边界**：卡片只接收 `ToolPresentationSnapshot`，拒绝不匹配的工具/快照类型；失败或取消保留内容并追加固定安全原因，`repr` 不包含路径、内容、Run ID 或 call ID。read 行为、其他工具中性历史记录和既有滚动/颜色降级保持兼容。
 - **最终验收结论**：write 生命周期、状态颜色、纯文本内容、逻辑行折叠、焦点展开、窄终端软换行、历史恢复、安全边界和 wheel 分发测试通过；P6-05C 尚未开始。
+
+# P6-05C edit 卡片
+
+- **差异展示**：新增 `EditToolCard`，只消费 EDIT presentation 中已经生成并清洗的 `matched` 与 `lines`，按 snapshot 原始顺序展示 context、removed、added 行，不读取文件、不重新计算 diff、不进行逐字符高亮。工具名加粗，工作区相对路径使用下划线浅青色，正文为纯文本。
+- **行号与颜色**：matched 为 true 时，context 使用 `new_line`，removed 使用 `old_line`，added 使用 `new_line`；当前可见行号列统一宽度。上下文使用灰白色，删除使用浅红色 `-`，新增使用黄绿色 `+`。pending 的 `matched=None` 和 unmatched 不显示伪造行号，空白增删行仍保留标记与行号（若快照提供）。
+- **matched/unmatched**：matched 为 false 时展示快照提供的无行号尝试差异，并固定显示 `file was not changed`；已有相同安全文案不会重复，其他安全原因与其组合显示。没有最终 presentation 的失败或取消仍保留尝试差异并生成固定安全原因。
+- **折叠与展开**：只按 removed/added 变化行计数；不超过 20 条完整显示，超过 20 条保留原始顺序中的前 10 条和后 10 条变化，并允许相邻 context 一并显示，中间使用灰色省略提示。聚焦卡片后 `Ctrl+O` 展开完整快照，再次按下恢复折叠；卡片状态更新不重建组件且保持展开状态，尺寸变化复用 transcript 跟随逻辑。
+- **生命周期与历史边界**：实时 `ToolPrepared → ToolStarted → ToolFinished` 原地更新同一 `(run_id, call_id)` 卡片；实时 `CANCELLED` 显示红色取消状态并保留差异。`RunFailed`/`RunCancelled` 只收口对应 Run 的未完成卡片，已完成卡片不重染。v3 历史只恢复合法的 success/failed edit 快照；取消 Run 不提交 TurnEntry，因此不存在合法 cancelled 历史快照。v1/v2 或缺少 presentation 继续显示 `tool edit · recorded`。
+- **安全与兼容边界**：渲染和 `repr` 不包含 call ID、Run ID、绝对路径、原始参数、凭据或 traceback；read/write 和既有滚动、离底新输出、窄终端及无颜色降级保持兼容。P6-05D 尚未开始。
+- **最终验收结论**：edit 生命周期、实时取消、Run 隔离、差异行样式与行号、空白行、unmatched 降级、二十条变化折叠、焦点展开、历史 success/failed 恢复和安全边界通过验证。

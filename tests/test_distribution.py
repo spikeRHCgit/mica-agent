@@ -519,7 +519,7 @@ def test_installed_wheel_explicitly_imports_tui(
                 "from mica_agent.context_builder import AgentFileSource\n"
                 "from mica_agent.tui import (\n"
                 " ConversationTranscript, MicaComposer, MicaTuiApp,\n"
-                " NewOutputIndicator, ReadToolCard, StartupResourceSnapshot,\n"
+                " NewOutputIndicator, EditToolCard, ReadToolCard, StartupResourceSnapshot,\n"
                 " WriteToolCard,\n"
                 ")\n"
                 "snapshot = StartupResourceSnapshot(\n"
@@ -541,6 +541,7 @@ def test_installed_wheel_explicitly_imports_tui(
                 "  assert len(app.query(NewOutputIndicator)) == 0\n"
                 "  assert ReadToolCard.__name__ == 'ReadToolCard'\n"
                 "  assert WriteToolCard.__name__ == 'WriteToolCard'\n"
+                "  assert EditToolCard.__name__ == 'EditToolCard'\n"
                 "asyncio.run(main())"
             ),
         ],
