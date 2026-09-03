@@ -23,6 +23,8 @@ from mica_agent.events import (
     UserInputRequested,
 )
 from mica_agent.jsonl_store import StoredSession
+from mica_agent.tool_contracts import ToolResultStatus
+from mica_agent.tool_presentation import ToolPresentationKind
 
 from .composer import MicaComposer
 from .history import iter_history_views
@@ -32,6 +34,7 @@ from .output import AssistantResponseView, ReasoningDisplayMode, ReasoningView
 from .startup import StartupResourcesView
 from .status import WorkPhase, WorkStatus, WorkStatusView
 from .theme import MICA_THEME, SHELL_CSS
+from .tool_cards import ReadToolCard, ToolCard, ToolCardState
 from .transcript import (
     ConversationTranscript,
     UserMessageCard,
@@ -72,6 +75,7 @@ class MicaTuiApp(App[None]):
         self._terminated_run_ids: set[str] = set()
         self._response_views: dict[str, AssistantResponseView] = {}
         self._reasoning_views: dict[str, ReasoningView] = {}
+        self._tool_cards: dict[tuple[str, str], ToolCard] = {}
         self._active_status_run_id: str | None = None
         super().__init__(ansi_color=ansi_color)
         self.register_theme(MICA_THEME)
@@ -147,6 +151,22 @@ class MicaTuiApp(App[None]):
                 self.query_one(WorkStatusView).observe_progress(WorkPhase.WAITING)
         if terminal:
             self._terminated_run_ids.add(event.run_id)
+            if isinstance(event, (RunFailed, RunCancelled)):
+                terminal_status = (
+                    ToolResultStatus.CANCELLED
+                    if isinstance(event, RunCancelled)
+                    else ToolResultStatus.EXECUTION_FAILED
+                )
+                closed_card = False
+                for (run_id, _call_id), card in tuple(self._tool_cards.items()):
+                    if run_id == event.run_id and card.state in {
+                        ToolCardState.PENDING,
+                        ToolCardState.RUNNING,
+                    }:
+                        card.finish(terminal_status)
+                        closed_card = True
+                if closed_card:
+                    self.query_one(ConversationTranscript).content_added()
             if event.run_id == self._active_status_run_id:
                 status = (
                     WorkStatus.DONE
@@ -175,6 +195,41 @@ class MicaTuiApp(App[None]):
                 self._reasoning_views[event.run_id] = view
             else:
                 view.append_text(event.text)
+            self.query_one(ConversationTranscript).content_added()
+            return True
+        if isinstance(event, ToolPrepared):
+            if (
+                event.tool_name != "read"
+                or event.presentation.kind is not ToolPresentationKind.READ
+            ):
+                return False
+            key = (event.run_id, event.call_id)
+            if key in self._tool_cards:
+                return False
+            card = ReadToolCard(event.presentation)
+            self._tool_cards[key] = card
+            await self.query_one("#transcript").mount(card)
+            await card.wait_for_refresh()
+            self.query_one(ConversationTranscript).content_added()
+            return True
+        if isinstance(event, ToolStarted):
+            card = self._tool_cards.get((event.run_id, event.call_id))
+            if card is None or card.tool_name != event.tool_name:
+                return False
+            card.start()
+            return True
+        if isinstance(event, ToolFinished):
+            card = self._tool_cards.get((event.run_id, event.call_id))
+            if (
+                card is None
+                or card.tool_name != event.tool_name
+                or (
+                    event.presentation is not None
+                    and event.presentation.kind is not card.snapshot.kind
+                )
+            ):
+                return False
+            card.finish(event.status, event.presentation)
             self.query_one(ConversationTranscript).content_added()
             return True
         if not isinstance(event, TextDelta):

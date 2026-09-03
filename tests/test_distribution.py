@@ -456,6 +456,7 @@ def test_wheel_contains_only_mica_package_and_metadata(
         "mica_agent/tui/startup.py",
         "mica_agent/tui/status.py",
         "mica_agent/tui/theme.py",
+        "mica_agent/tui/tool_cards.py",
         "mica_agent/tui/transcript.py",
     } <= members
     assert 'name="ls"' not in file_tools_source

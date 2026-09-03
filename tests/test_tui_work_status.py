@@ -228,7 +228,8 @@ def test_tool_and_interaction_progress_switches_to_waiting_without_placeholder(
             )
             clock.advance(2.0)
 
-            assert await app.project_engine_event(event) is False
+            projected = await app.project_engine_event(event)
+            assert projected is isinstance(event, ToolPrepared)
             assert view.status is WorkStatus.WORKING
             assert view.phase is WorkPhase.WAITING
             assert view.render().plain.endswith("(waiting 0.0s)")

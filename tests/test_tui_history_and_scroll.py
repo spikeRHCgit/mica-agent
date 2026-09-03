@@ -27,6 +27,7 @@ from mica_agent.tui import (
     HistoricalToolRecordView,
     MicaTuiApp,
     NewOutputIndicator,
+    ReadToolCard,
     ReasoningDisplayMode,
     ReasoningView,
 )
@@ -176,21 +177,37 @@ def test_historical_tool_records_keep_call_order_without_exposing_details(
             await pilot.pause()
             transcript = app.query_one(ConversationTranscript)
             records = list(app.query(HistoricalToolRecordView))
+            expected_types = (
+                [
+                    UserMessageCard,
+                    ReadToolCard,
+                    HistoricalToolRecordView,
+                    AssistantResponseView,
+                ]
+                if has_presentations
+                else [
+                    UserMessageCard,
+                    HistoricalToolRecordView,
+                    HistoricalToolRecordView,
+                    AssistantResponseView,
+                ]
+            )
             visible = [
                 child
                 for child in transcript.children
                 if isinstance(
                     child,
-                    (UserMessageCard, HistoricalToolRecordView, AssistantResponseView),
+                    (
+                        UserMessageCard,
+                        ReadToolCard,
+                        HistoricalToolRecordView,
+                        AssistantResponseView,
+                    ),
                 )
             ]
-            assert [type(child) for child in visible] == [
-                UserMessageCard,
-                HistoricalToolRecordView,
-                HistoricalToolRecordView,
-                AssistantResponseView,
-            ]
-            assert [str(record.render()) for record in records] == expected
+            assert [type(child) for child in visible] == expected_types
+            expected_records = ["tool bash · failed"] if has_presentations else expected
+            assert [str(record.render()) for record in records] == expected_records
             safe = "\n".join(str(record.render()) + repr(record) for record in records)
             for hidden in (
                 "call-read",
@@ -202,9 +219,12 @@ def test_historical_tool_records_keep_call_order_without_exposing_details(
             ):
                 assert hidden not in safe
             if has_presentations:
-                assert [record.presentation for record in records] == list(
-                    turn.tool_presentations
-                )
+                card = app.query_one(ReadToolCard)
+                assert card.snapshot is turn.tool_presentations[0]
+                assert card.render().plain == "read  private.md"
+                assert [record.presentation for record in records] == [
+                    turn.tool_presentations[1]
+                ]
             else:
                 assert all(record.presentation is None for record in records)
 

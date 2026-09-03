@@ -49,6 +49,7 @@
 | `src/mica_agent/tui/startup.py` | transcript 内的只读启动资源组件；把注入快照安全渲染为紧凑文本，不读取或推断业务状态。 |
 | `src/mica_agent/tui/status.py` | 唯一工作状态条视图；公开 Run 工作状态和阶段类型，消费已校验事件投影提供的时钟，负责阶段/总耗时、进展颜色和确定性点号动画，不显示敏感运行标识或正文。 |
 | `src/mica_agent/tui/theme.py` | TUI 外壳的深色语义主题令牌与基础布局样式；依靠 Textual/Rich 完成颜色能力协商和外壳级降级。 |
+| `src/mica_agent/tui/tool_cards.py` | 工具卡片基础组件与 `read` 单行卡片；按 `(run_id, call_id)` 由外壳维护稳定组件身份，消费安全展示快照并原地更新 pending/running/success/failed/cancelled 状态。 |
 | `src/mica_agent/workspace.py` | 工作区身份与数据根边界；优先识别 Git 根目录，否则使用启动目录，并生成规范路径、slug、SHA-256 ID 和会话目录。 |
 | `src/mica_agent/workspace_paths.py` | 文件工具共享的工作区路径解析器；拒绝绝对/越界路径、重解析点、Windows 别名、ADS 和集中定义的敏感文件。 |
 | `src/mica_agent/providers/__init__.py` | Provider 子包的公共出口；只重导出供应商无关契约和错误，不执行网络请求。 |

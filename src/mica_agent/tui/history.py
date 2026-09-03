@@ -6,13 +6,17 @@ from collections.abc import Iterator
 
 from mica_agent.jsonl_store import StoredSession
 from mica_agent.session_contracts import TurnEntry
+from mica_agent.tool_presentation import ToolPresentationKind
 
 from .output import AssistantResponseView
+from .tool_cards import ReadToolCard
 from .transcript import HistoricalToolRecordView, UserMessageCard
 
 RECORDED_STATUS = "recorded"
 
-HistoryView = UserMessageCard | HistoricalToolRecordView | AssistantResponseView
+HistoryView = (
+    UserMessageCard | HistoricalToolRecordView | ReadToolCard | AssistantResponseView
+)
 
 
 def iter_history_views(stored_session: StoredSession | None) -> Iterator[HistoryView]:
@@ -31,6 +35,12 @@ def _iter_turn_views(turn: TurnEntry) -> Iterator[HistoryView]:
     for message in turn.intermediate_messages:
         for call in message.tool_calls:
             presentation = presentations.get(call.call_id)
+            if (
+                presentation is not None
+                and presentation.kind is ToolPresentationKind.READ
+            ):
+                yield ReadToolCard(presentation)
+                continue
             status = (
                 presentation.status.value
                 if presentation is not None
