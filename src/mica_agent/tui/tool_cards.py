@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from enum import Enum
 from typing import ClassVar, Self
@@ -13,7 +13,10 @@ from textual.binding import Binding
 from textual.events import Key
 from textual.widgets import Static
 
-from mica_agent.tool_contracts import ToolResultStatus
+from mica_agent.tool_contracts import (
+    ToolResultStatus,
+    _validate_tool_name,
+)
 from mica_agent.tool_presentation import (
     ToolPresentationKind,
     ToolPresentationSnapshot,
@@ -794,14 +797,170 @@ class ReadToolCard(ToolCard):
         return "<ReadToolCard>"
 
 
+class GenericToolCard(ToolCard):
+    """Compact safe fallback card for generic tool presentations."""
+
+    DEFAULT_CSS = """
+    GenericToolCard {
+        height: 2;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+    }
+    """
+
+    def __init__(
+        self,
+        snapshot: ToolPresentationSnapshot,
+        *,
+        id: str | None = None,
+    ) -> None:
+        if snapshot.kind is not ToolPresentationKind.GENERIC:
+            raise ValueError("GenericToolCard requires a generic presentation")
+        self._failure_message: str | None = None
+        super().__init__(snapshot, id=id)
+
+    def finish(
+        self,
+        status: ToolResultStatus,
+        presentation: ToolPresentationSnapshot | None = None,
+        *,
+        message: str | None = None,
+    ) -> Self:
+        """Finalize with a status-specific, safe terminal explanation."""
+        if self.state in {
+            ToolCardState.SUCCESS,
+            ToolCardState.FAILED,
+            ToolCardState.CANCELLED,
+        }:
+            return self
+        if status is ToolResultStatus.CANCELLED:
+            self._failure_message = "operation cancelled"
+        elif status is ToolResultStatus.PERMISSION_DENIED:
+            self._failure_message = "permission denied"
+        elif status is ToolResultStatus.INVALID_ARGUMENTS:
+            self._failure_message = "tool arguments are invalid"
+        elif status is not ToolResultStatus.SUCCESS:
+            self._failure_message = "tool execution failed"
+        return super().finish(status, presentation, message=message)
+
+    def _status_text(self) -> str:
+        if self.state is ToolCardState.PENDING:
+            return "waiting"
+        if self.state is ToolCardState.RUNNING:
+            return "running…"
+        if self.state is ToolCardState.SUCCESS:
+            return "completed"
+        if self.state is ToolCardState.CANCELLED:
+            return "operation cancelled"
+        return self._failure_message or "tool execution failed"
+
+    def render(self) -> Text:
+        text = Text()
+        text.append(self.tool_name, style="bold")
+        text.append("\n")
+        text.append(self._status_text(), style="#94a3b8")
+        return text
+
+    def __repr__(self) -> str:
+        return "<GenericToolCard>"
+
+
+ToolCardFactory = Callable[[ToolPresentationSnapshot], ToolCard]
+
+
+def copy_tool_card_factories(
+    factories: Mapping[str, ToolCardFactory] | None,
+) -> dict[str, ToolCardFactory]:
+    """Validate and copy injected factories without exposing input details."""
+    if factories is None:
+        return {}
+    if not isinstance(factories, Mapping):
+        raise TypeError("tool_card_factories must be a Mapping or None")
+    copied: dict[str, ToolCardFactory] = {}
+    for name, factory in factories.items():
+        if not isinstance(name, str) or not name.strip():
+            raise TypeError("tool_card_factories keys must be valid tool names")
+        try:
+            _validate_tool_name(name)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "tool_card_factories keys must be valid tool names"
+            ) from None
+        if not callable(factory):
+            raise TypeError("tool_card_factories values must be callable")
+        copied[name] = factory
+    return copied
+
+
+def create_tool_card(
+    snapshot: ToolPresentationSnapshot,
+    *,
+    tool_card_factories: Mapping[str, ToolCardFactory] | None = None,
+    id: str | None = None,
+) -> ToolCard | None:
+    """Resolve one safe presentation through the shared TUI card boundary.
+
+    Built-in presentation kinds always win. ASK is deliberately left to its
+    future interaction panel and therefore never becomes a regular card.
+    """
+    if not isinstance(snapshot, ToolPresentationSnapshot):
+        raise TypeError("snapshot must be a ToolPresentationSnapshot")
+    builtin_types = {
+        ToolPresentationKind.READ: ("read", ReadToolCard),
+        ToolPresentationKind.WRITE: ("write", WriteToolCard),
+        ToolPresentationKind.EDIT: ("edit", EditToolCard),
+        ToolPresentationKind.BASH: ("bash", BashToolCard),
+    }
+    builtin = builtin_types.get(snapshot.kind)
+    reserved_names = {
+        "read": ToolPresentationKind.READ,
+        "write": ToolPresentationKind.WRITE,
+        "edit": ToolPresentationKind.EDIT,
+        "bash": ToolPresentationKind.BASH,
+        "ask": ToolPresentationKind.ASK,
+    }
+    reserved_kind = reserved_names.get(snapshot.tool_name)
+    if reserved_kind is not None:
+        if snapshot.kind is not reserved_kind:
+            return None
+        if snapshot.kind is ToolPresentationKind.ASK:
+            return None
+    if builtin is not None:
+        expected_name, card_type = builtin
+        if snapshot.tool_name != expected_name:
+            return None
+        return card_type(snapshot, id=id)
+    if snapshot.kind is ToolPresentationKind.ASK:
+        return None
+    factories = copy_tool_card_factories(tool_card_factories)
+    factory = factories.get(snapshot.tool_name)
+    if factory is not None:
+        try:
+            card = factory(snapshot)
+            if (
+                isinstance(card, ToolCard)
+                and card.call_id == snapshot.call_id
+                and card.tool_name == snapshot.tool_name
+                and card.snapshot == snapshot
+            ):
+                return card
+        except Exception:  # noqa: BLE001, S110
+            pass
+    return GenericToolCard(snapshot, id=id)
+
+
 __all__ = [
     "BashToolCard",
     "EditToolCard",
+    "GenericToolCard",
     "ReadToolCard",
     "ToolCard",
+    "ToolCardFactory",
     "ToolCardState",
     "ToolCardStatus",
     "WriteToolCard",
+    "copy_tool_card_factories",
+    "create_tool_card",
 ]
 
 # Stable descriptive alias for callers that prefer the status terminology.

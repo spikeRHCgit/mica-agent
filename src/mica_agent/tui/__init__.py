@@ -8,11 +8,14 @@ from .status import WorkPhase, WorkStatus, WorkStatusView
 from .tool_cards import (
     BashToolCard,
     EditToolCard,
+    GenericToolCard,
     ReadToolCard,
     ToolCard,
+    ToolCardFactory,
     ToolCardState,
     ToolCardStatus,
     WriteToolCard,
+    create_tool_card,
 )
 from .transcript import (
     ConversationTranscript,
@@ -25,6 +28,7 @@ __all__ = [
     "BashToolCard",
     "ConversationTranscript",
     "EditToolCard",
+    "GenericToolCard",
     "HistoricalToolRecordView",
     "MicaComposer",
     "MicaTuiApp",
@@ -34,10 +38,12 @@ __all__ = [
     "ReasoningView",
     "StartupResourceSnapshot",
     "ToolCard",
+    "ToolCardFactory",
     "ToolCardState",
     "ToolCardStatus",
     "WorkPhase",
     "WorkStatus",
     "WorkStatusView",
     "WriteToolCard",
+    "create_tool_card",
 ]

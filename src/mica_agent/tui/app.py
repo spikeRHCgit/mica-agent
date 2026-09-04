@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from time import monotonic
 
 from textual.app import App, ComposeResult
@@ -24,7 +24,6 @@ from mica_agent.events import (
 )
 from mica_agent.jsonl_store import StoredSession
 from mica_agent.tool_contracts import ToolResultStatus
-from mica_agent.tool_presentation import ToolPresentationKind
 
 from .composer import MicaComposer
 from .history import iter_history_views
@@ -36,11 +35,11 @@ from .status import WorkPhase, WorkStatus, WorkStatusView
 from .theme import MICA_THEME, SHELL_CSS
 from .tool_cards import (
     BashToolCard,
-    EditToolCard,
-    ReadToolCard,
     ToolCard,
+    ToolCardFactory,
     ToolCardState,
-    WriteToolCard,
+    copy_tool_card_factories,
+    create_tool_card,
 )
 from .transcript import (
     ConversationTranscript,
@@ -61,6 +60,7 @@ class MicaTuiApp(App[None]):
         reasoning_display_mode: ReasoningDisplayMode = ReasoningDisplayMode.COLLAPSED,
         clock: Callable[[], float] = monotonic,
         stored_session: StoredSession | None = None,
+        tool_card_factories: Mapping[str, ToolCardFactory] | None = None,
     ) -> None:
         if startup_resources is not None and not isinstance(
             startup_resources, StartupResourceSnapshot
@@ -78,6 +78,7 @@ class MicaTuiApp(App[None]):
             raise TypeError("stored_session must be a StoredSession or None")
         self._clock = clock
         self.stored_session = stored_session
+        self._tool_card_factories = copy_tool_card_factories(tool_card_factories)
         self._last_seq: dict[str, int] = {}
         self._terminated_run_ids: set[str] = set()
         self._response_views: dict[str, AssistantResponseView] = {}
@@ -95,7 +96,10 @@ class MicaTuiApp(App[None]):
                 self.startup_resources,
                 id="startup-resources",
             )
-            yield from iter_history_views(self.stored_session)
+            yield from iter_history_views(
+                self.stored_session,
+                tool_card_factories=self._tool_card_factories,
+            )
         yield WorkStatusView(
             clock=self._clock,
             auto_animate=self._clock is monotonic,
@@ -205,18 +209,17 @@ class MicaTuiApp(App[None]):
             self.query_one(ConversationTranscript).content_added()
             return True
         if isinstance(event, ToolPrepared):
-            card_type = {
-                ToolPresentationKind.READ: ReadToolCard,
-                ToolPresentationKind.WRITE: WriteToolCard,
-                ToolPresentationKind.EDIT: EditToolCard,
-                ToolPresentationKind.BASH: BashToolCard,
-            }.get(event.presentation.kind)
-            if card_type is None or event.tool_name != event.presentation.tool_name:
+            if event.tool_name != event.presentation.tool_name:
                 return False
             key = (event.run_id, event.call_id)
             if key in self._tool_cards:
                 return False
-            card = card_type(event.presentation)
+            card = create_tool_card(
+                event.presentation,
+                tool_card_factories=self._tool_card_factories,
+            )
+            if card is None:
+                return False
             self._tool_cards[key] = card
             await self.query_one("#transcript").mount(card)
             await card.wait_for_refresh()

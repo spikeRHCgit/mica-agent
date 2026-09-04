@@ -171,4 +171,13 @@ Composer 仍是 Screen 的第三个直接子节点并保持底部焦点；本切
 - **终态显示**：成功使用绿色状态，空输出只显示一次 `(no output)`；非零退出使用红色状态并在输出后显示 `exit N`；取消、启动失败、超时、输出限制或 Run 失败不伪造退出码，保留已接收安全输出并显示固定安全原因。失败、取消和中断同时依靠文字与颜色表达。
 - **Run 与历史边界**：`RunFailed`/`RunCancelled` 只收口对应 Run 中 pending/running 的 Bash 卡片，已完成卡片不重染。v3 合法 success/failed Bash presentation 恢复为默认折叠的最终卡片，不播放动态输出、不重跑命令、不读取工作区；取消 Run 不提交 TurnEntry，不构造 cancelled 历史。v1/v2 或缺少 Bash presentation 的历史继续显示 `tool bash · recorded`，read/write/edit 正式卡片保持不变。
 - **安全与兼容边界**：render 与固定 `repr` 不包含 call ID、Run ID、绝对路径、Shell 可执行文件路径、原始异常、参数或凭据；命令和输出只来自安全 presentation/事件。现有 transcript 跟随、离底提示、唯一工作状态条、模型输出、read/write/edit 卡片、窄终端和无颜色文字识别保持兼容。P6-05E、P6-06 尚未开始。
-- **最终验收结论**：Bash 生命周期、动态输出顺序与最终校准、命令三显示行折叠、八行输出视口、内部浏览与未读提示、CRLF/空白行、成功无输出、非零退出、无退出码失败/取消、Run 收口、v3/旧历史恢复、安全边界及 wheel 导入覆盖通过验证。
+- **最终验收结论**：Bash 生命周期、动态输出顺序与最终校准、命令三显示行折叠、八行输出视口、内部浏览与未读提示、CRLF/空白行、成功无输出、非零退出、无退出码失败/取消、Run 收口、v3/旧历史恢复、安全边界及 wheel 导入覆盖通过验证。P6-05E、P6-06 尚未开始。
+
+# P6-05E 通用工具卡片
+
+- **目标与结构**：新增 `GenericToolCard` 作为没有专用展示实现的扩展/未知工具安全兜底。卡片继承统一 `ToolCard` 状态、语义背景和稳定组件身份，固定为两行紧凑布局；第一行只显示 snapshot 的工具名，第二行显示生命周期状态，不创建参数区、结果区或空详情面板。
+- **状态与安全文案**：pending 显示 `waiting`，running 显示 `running…`，success 显示 `completed`，失败显示 `tool execution failed`，取消显示 `operation cancelled`。实时失败状态额外映射为 `permission denied` 或 `tool arguments are invalid`；历史 GENERIC failed 无具体结果状态时统一使用 `tool execution failed`。卡片不显示 `tool details are unavailable`、原始 message、参数、结果、异常或 traceback，`repr` 固定为 `<GenericToolCard>`。
+- **统一解析接缝**：`create_tool_card()` 同时服务实时 `ToolPrepared` 和 v3 历史恢复，顺序为内置专用 kind、匹配 GENERIC 工厂、Generic 兜底；ASK 返回 `None` 留给 P6-06。`ToolCardFactory` 仅接收 `ToolPresentationSnapshot`，`MicaTuiApp` 构造时校验并复制 `Mapping[str, ToolCardFactory]`，调用方后续修改不会影响 App。非 Mapping、非法键和非 callable 值使用固定安全诊断。
+- **工厂回退**：内置 read/write/edit/bash 路由优先且不可覆盖。自定义工厂异常、返回非 `ToolCard` 或返回 call/tool/kind 身份不一致的卡片时，静默回退 Generic，不捕获 `BaseException`，不向用户或历史写入错误信息；实时与历史使用同一解析规则。
+- **生命周期与兼容**：GENERIC 按 `(run_id, call_id)` 创建并原地处理 `ToolPrepared → ToolStarted → ToolFinished`；RunFailed/RunCancelled 只收口对应 Run 的 pending/running 卡片。Generic 不接收 `ToolOutputDelta`。合法 v3 success/failed 快照恢复为终态卡片，不重放 Run；v1/v2 或缺失快照继续显示 `tool <name> · recorded`。既有 read、write、edit、bash 卡片和滚动、窄终端、无颜色降级保持不变。
+- **验收结论**：新增代表性测试覆盖五种可见状态、原地生命周期、Run 隔离与收口、动态输出拒绝、v3/旧历史、工厂优先级/快照复制/异常回退、ASK 边界和安全不泄漏；P6-06 及后续任务未开始。
