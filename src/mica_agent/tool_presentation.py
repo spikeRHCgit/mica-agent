@@ -527,11 +527,7 @@ def _prepared_payload(
             return {"command": ""}, "command is not available"
         return {"command": sanitize_presentation_text(command)}, None
     question = arguments.get("question")
-    if (
-        set(arguments) != {"question"}
-        or not isinstance(question, str)
-        or not question.strip()
-    ):
+    if not isinstance(question, str) or not question.strip():
         return {"question": ""}, "question is not available"
     return {"question": _bounded_text(question)}, None
 
@@ -618,7 +614,14 @@ def complete_tool_presentation(
         payload["output"] = output
         payload["exit_code"] = exit_code
     elif pending.kind is ToolPresentationKind.ASK:
-        answer = result.data if isinstance(result.data, str) else ""
+        data = result.data
+        answer = ""
+        if isinstance(data, Mapping):
+            raw_answer = data.get("answer")
+            if isinstance(raw_answer, str):
+                answer = raw_answer
+        elif isinstance(data, str):
+            answer = data
         payload["answer"] = _bounded_text(answer)
     if result.status is ToolResultStatus.SUCCESS:
         final_message = None

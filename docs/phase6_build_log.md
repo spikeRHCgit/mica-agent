@@ -181,3 +181,21 @@ Composer 仍是 Screen 的第三个直接子节点并保持底部焦点；本切
 - **工厂回退**：内置 read/write/edit/bash 路由优先且不可覆盖。自定义工厂异常、返回非 `ToolCard` 或返回 call/tool/kind 身份不一致的卡片时，静默回退 Generic，不捕获 `BaseException`，不向用户或历史写入错误信息；实时与历史使用同一解析规则。
 - **生命周期与兼容**：GENERIC 按 `(run_id, call_id)` 创建并原地处理 `ToolPrepared → ToolStarted → ToolFinished`；RunFailed/RunCancelled 只收口对应 Run 的 pending/running 卡片。Generic 不接收 `ToolOutputDelta`。合法 v3 success/failed 快照恢复为终态卡片，不重放 Run；v1/v2 或缺失快照继续显示 `tool <name> · recorded`。既有 read、write、edit、bash 卡片和滚动、窄终端、无颜色降级保持不变。
 - **验收结论**：新增代表性测试覆盖五种可见状态、原地生命周期、Run 隔离与收口、动态输出拒绝、v3/旧历史、工厂优先级/快照复制/异常回退、ASK 边界和安全不泄漏；P6-06 及后续任务未开始。
+
+# P6-06 结构化 ask 面板
+
+## 稳定设计
+
+- `AskInteractionView` 是 transcript 中唯一的 ask 生命周期组件，接收公开 `AskPrompt`、run/interaction 身份和前端无关的同步响应/取消回调；不持有 Broker、Engine、Provider、Store、ToolRequest 或 ToolResult。
+- 结构化选项从第一项开始选择，支持边界内 Up/Down、ASCII 数字定位、明确的 recommended/description、`allow_custom` 自定义回答和 `n` 备注编辑。无选项时直接使用面板内单行自由文本输入，所有 ask 回答都不进入普通 composer 或 UserMessageCard。
+- responder 返回精确 `True` 后面板锁定等待真实 ToolFinished；Esc 使用相同的安全回调边界请求当前 run 取消，只有回调接受后锁定。回调异常安全吞掉且不泄漏细节，失败返回保持可交互。
+- ToolFinished、RunFailed 和 RunCancelled 都在原组件上收口；成功为绿色只读答案记录，失败/取消为固定安全文案的红色记录。终态组件继续支持 `Ctrl+O`，展开内容只读，尺寸变化复用 transcript 的跟随通知。
+
+## 历史与展示兼容
+
+- v3 ASK presentation 恢复为只读历史 ask 记录，仅显示持久化的安全 question/answer 和终态，不伪造缺失的 title、options、recommended、selected index 或 notes；旧版本或缺少快照继续显示 `tool ask · recorded`。
+- ASK prepared presentation 允许结构化参数存在但只保存经过边界处理的 question；final presentation 同时兼容裸字符串和 runtime 三字段 Mapping 中的 answer，payload 仍只包含 question/answer，原始请求与 ToolResult 不被修改。
+
+## 验收结论
+
+实现保持既有 Run/seq、工具卡片、工作状态、滚动、composer 和安全边界；聚焦 TUI/工具展示兼容测试通过。未连接真实 CLI、Broker、Provider 或 Engine 私有状态，未实现权限窗口和 P6-07。

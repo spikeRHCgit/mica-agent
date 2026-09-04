@@ -8,6 +8,7 @@ from mica_agent.jsonl_store import StoredSession
 from mica_agent.session_contracts import TurnEntry
 from mica_agent.tool_presentation import ToolPresentationStatus
 
+from .interactions import HistoricalAskRecordView
 from .output import AssistantResponseView
 from .tool_cards import (
     ToolCard,
@@ -19,7 +20,11 @@ from .transcript import HistoricalToolRecordView, UserMessageCard
 RECORDED_STATUS = "recorded"
 
 HistoryView = (
-    UserMessageCard | HistoricalToolRecordView | ToolCard | AssistantResponseView
+    UserMessageCard
+    | HistoricalToolRecordView
+    | HistoricalAskRecordView
+    | ToolCard
+    | AssistantResponseView
 )
 
 
@@ -50,6 +55,17 @@ def _iter_turn_views(
     for message in turn.intermediate_messages:
         for call in message.tool_calls:
             presentation = presentations.get(call.call_id)
+            if (
+                presentation is not None
+                and presentation.kind.value == "ask"
+                and presentation.status
+                in {
+                    ToolPresentationStatus.SUCCESS,
+                    ToolPresentationStatus.FAILED,
+                }
+            ):
+                yield HistoricalAskRecordView(presentation)
+                continue
             if presentation is not None and presentation.status in {
                 ToolPresentationStatus.SUCCESS,
                 ToolPresentationStatus.FAILED,

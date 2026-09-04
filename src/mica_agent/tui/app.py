@@ -24,9 +24,16 @@ from mica_agent.events import (
 )
 from mica_agent.jsonl_store import StoredSession
 from mica_agent.tool_contracts import ToolResultStatus
+from mica_agent.tool_presentation import ToolPresentationKind
 
 from .composer import MicaComposer
 from .history import iter_history_views
+from .interactions import (
+    AskInteractionView,
+    RunCancelRequester,
+    UserInputResponder,
+    _is_async_callable,
+)
 from .logo import MicaLogo
 from .models import StartupResourceSnapshot
 from .output import AssistantResponseView, ReasoningDisplayMode, ReasoningView
@@ -61,6 +68,8 @@ class MicaTuiApp(App[None]):
         clock: Callable[[], float] = monotonic,
         stored_session: StoredSession | None = None,
         tool_card_factories: Mapping[str, ToolCardFactory] | None = None,
+        user_input_responder: UserInputResponder | None = None,
+        run_cancel_requester: RunCancelRequester | None = None,
     ) -> None:
         if startup_resources is not None and not isinstance(
             startup_resources, StartupResourceSnapshot
@@ -76,6 +85,20 @@ class MicaTuiApp(App[None]):
             raise TypeError("clock must be callable")
         if stored_session is not None and not isinstance(stored_session, StoredSession):
             raise TypeError("stored_session must be a StoredSession or None")
+        if user_input_responder is not None and (
+            not callable(user_input_responder)
+            or _is_async_callable(user_input_responder)
+        ):
+            raise TypeError(
+                "user_input_responder must be a synchronous callable or None"
+            )
+        if run_cancel_requester is not None and (
+            not callable(run_cancel_requester)
+            or _is_async_callable(run_cancel_requester)
+        ):
+            raise TypeError(
+                "run_cancel_requester must be a synchronous callable or None"
+            )
         self._clock = clock
         self.stored_session = stored_session
         self._tool_card_factories = copy_tool_card_factories(tool_card_factories)
@@ -84,6 +107,11 @@ class MicaTuiApp(App[None]):
         self._response_views: dict[str, AssistantResponseView] = {}
         self._reasoning_views: dict[str, ReasoningView] = {}
         self._tool_cards: dict[tuple[str, str], ToolCard] = {}
+        self._ask_views: dict[tuple[str, str], AskInteractionView] = {}
+        self._ask_calls: dict[tuple[str, str], AskInteractionView] = {}
+        self._pending_ask_calls: dict[str, str] = {}
+        self._user_input_responder = user_input_responder
+        self._run_cancel_requester = run_cancel_requester
         self._active_status_run_id: str | None = None
         super().__init__(ansi_color=ansi_color)
         self.register_theme(MICA_THEME)
@@ -176,8 +204,15 @@ class MicaTuiApp(App[None]):
                     }:
                         card.finish(terminal_status)
                         closed_card = True
-                if closed_card:
+                closed_ask = False
+                for (run_id, _interaction_id), view in tuple(self._ask_views.items()):
+                    if run_id == event.run_id and view.is_active:
+                        view.finish(terminal_status)
+                        closed_ask = True
+                if closed_card or closed_ask:
                     self.query_one(ConversationTranscript).content_added()
+                self._pending_ask_calls.pop(event.run_id, None)
+                self._restore_composer_if_possible()
             if event.run_id == self._active_status_run_id:
                 status = (
                     WorkStatus.DONE
@@ -212,6 +247,11 @@ class MicaTuiApp(App[None]):
             if event.tool_name != event.presentation.tool_name:
                 return False
             key = (event.run_id, event.call_id)
+            if event.presentation.kind is ToolPresentationKind.ASK:
+                if key in self._ask_calls or event.run_id in self._pending_ask_calls:
+                    return False
+                self._pending_ask_calls[event.run_id] = event.call_id
+                return True
             if key in self._tool_cards:
                 return False
             card = create_tool_card(
@@ -226,6 +266,10 @@ class MicaTuiApp(App[None]):
             self.query_one(ConversationTranscript).content_added()
             return True
         if isinstance(event, ToolStarted):
+            if event.tool_name == "ask":
+                return self._pending_ask_calls.get(event.run_id) == event.call_id or (
+                    (event.run_id, event.call_id) in self._ask_calls
+                )
             card = self._tool_cards.get((event.run_id, event.call_id))
             if card is None or card.tool_name != event.tool_name:
                 return False
@@ -242,7 +286,68 @@ class MicaTuiApp(App[None]):
             card.append_output(event.text)
             self.query_one(ConversationTranscript).content_added()
             return True
+        if isinstance(event, UserInputRequested):
+            if any(
+                run_id == event.run_id and view.is_active
+                for (run_id, _interaction_id), view in self._ask_views.items()
+            ):
+                return False
+            prompt = event.prompt
+            if prompt is None:
+                return False
+            view = AskInteractionView(
+                run_id=event.run_id,
+                interaction_id=event.interaction_id,
+                prompt=prompt,
+                user_input_responder=self._user_input_responder,
+                run_cancel_requester=self._run_cancel_requester,
+            )
+            self._ask_views[(event.run_id, event.interaction_id)] = view
+            call_id = self._pending_ask_calls.get(event.run_id)
+            if call_id is not None:
+                self._ask_calls[(event.run_id, call_id)] = view
+                self._pending_ask_calls.pop(event.run_id, None)
+            await self.query_one("#transcript").mount(view)
+            await view.wait_for_refresh()
+            self._set_composer_disabled(True)
+            view.focus_input()
+            self.query_one(ConversationTranscript).content_added()
+            return False
         if isinstance(event, ToolFinished):
+            if event.tool_name == "ask":
+                if (
+                    event.presentation is not None
+                    and event.presentation.kind is not ToolPresentationKind.ASK
+                ):
+                    return False
+                view = self._ask_calls.get((event.run_id, event.call_id))
+                known_run_ask_calls = {
+                    call_id
+                    for (run_id, call_id) in self._ask_calls
+                    if run_id == event.run_id
+                }
+                if known_run_ask_calls and event.call_id not in known_run_ask_calls:
+                    return False
+                expected_call_id = self._pending_ask_calls.get(event.run_id)
+                if expected_call_id is not None and expected_call_id != event.call_id:
+                    return False
+                if view is None:
+                    active = [
+                        candidate
+                        for (
+                            run_id,
+                            _interaction_id,
+                        ), candidate in self._ask_views.items()
+                        if run_id == event.run_id and candidate.is_active
+                    ]
+                    if len(active) == 1:
+                        view = active[0]
+                if view is None:
+                    return False
+                view.finish(event.status, event.presentation)
+                self.query_one(ConversationTranscript).content_added()
+                self._restore_composer_if_possible()
+                return True
             card = self._tool_cards.get((event.run_id, event.call_id))
             if (
                 card is None
@@ -267,8 +372,22 @@ class MicaTuiApp(App[None]):
         self.query_one(ConversationTranscript).content_added()
         return True
 
+    def _set_composer_disabled(self, disabled: bool) -> None:
+        composer = self.query_one(MicaComposer)
+        composer.disabled = disabled
+
+    def _restore_composer_if_possible(self) -> None:
+        if any(view.is_active for view in self._ask_views.values()):
+            self._set_composer_disabled(True)
+            return
+        composer = self.query_one(MicaComposer)
+        composer.disabled = False
+        composer.focus()
+
     def on_mica_composer_submitted(self, message: MicaComposer.Submitted) -> None:
         """收到有效提交后，在 transcript 中追加用户消息卡片。"""
+        if self.query_one(MicaComposer).disabled:
+            return
         transcript = self.query_one(ConversationTranscript)
         transcript.mount(UserMessageCard(message))
         transcript.content_added()

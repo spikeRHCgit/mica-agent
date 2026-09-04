@@ -2,6 +2,12 @@
 
 from .app import MicaTuiApp
 from .composer import MicaComposer
+from .interactions import (
+    AskInteractionView,
+    HistoricalAskRecordView,
+    RunCancelRequester,
+    UserInputResponder,
+)
 from .models import StartupResourceSnapshot
 from .output import AssistantResponseView, ReasoningDisplayMode, ReasoningView
 from .status import WorkPhase, WorkStatus, WorkStatusView
@@ -24,11 +30,13 @@ from .transcript import (
 )
 
 __all__ = [
+    "AskInteractionView",
     "AssistantResponseView",
     "BashToolCard",
     "ConversationTranscript",
     "EditToolCard",
     "GenericToolCard",
+    "HistoricalAskRecordView",
     "HistoricalToolRecordView",
     "MicaComposer",
     "MicaTuiApp",
@@ -36,11 +44,13 @@ __all__ = [
     "ReadToolCard",
     "ReasoningDisplayMode",
     "ReasoningView",
+    "RunCancelRequester",
     "StartupResourceSnapshot",
     "ToolCard",
     "ToolCardFactory",
     "ToolCardState",
     "ToolCardStatus",
+    "UserInputResponder",
     "WorkPhase",
     "WorkStatus",
     "WorkStatusView",

@@ -41,8 +41,9 @@
 | `src/mica_agent/tui/app.py` | Textual 外壳与 Engine 公共事件投影边界；建立 transcript、唯一 work-status 和可编辑 composer 三段稳定布局，接收已加载的 `StoredSession` 恢复历史，按 Run/seq 隔离并追加模型思考与正式回复视图，同时驱动唯一工作状态条和 read/write/edit/bash 工具卡片生命周期及 Bash 动态输出投影；不连接真实业务运行时。 |
 | `src/mica_agent/tui/composer.py` | TUI 专用的可编辑输入组件；负责软换行、真实换行、按显示行数 1～8 行自动增高与内部滚动、溢出提示、长粘贴折叠原子片段、原文还原提交消息与安全展示快照。 |
 | `src/mica_agent/tui/logo.py` | transcript 顶部的只读响应式 Mica Logo；按可用宽度切换完整、紧凑与纯文本形态。 |
+| `src/mica_agent/tui/interactions.py` | ask 结构化交互面板与只读历史 ask 记录；消费公开 AskPrompt，提供可注入的响应/取消接缝、选项导航、自定义回答、备注、终态原地收口和安全展开，不连接 Broker、Engine、Provider 或 Store。 |
 | `src/mica_agent/tui/paste.py` | TUI 内长粘贴折叠片段的模型与源文本判定；按逻辑行阈值决定是否折叠，并提供不可展开的紧凑摘要与真实原文快照。 |
-| `src/mica_agent/tui/history.py` | `StoredSession` 到 TUI 历史视图的只读投影；按持久化顺序产出历史用户卡片、read/write/edit/bash 正式卡片和紧凑工具记录，不重放 Run、不重新执行工具、不读取会话存储。 |
+| `src/mica_agent/tui/history.py` | `StoredSession` 到 TUI 历史视图的只读投影；按持久化顺序产出历史用户卡片、ask、read/write/edit/bash 正式卡片和紧凑工具记录，不重放 Run、不重新执行工具、不读取会话存储。 |
 | `src/mica_agent/tui/transcript.py` | transcript 容器、用户消息卡片与历史工具记录；提供底部自动跟随、用户上滚离底检测、唯一 `↓ new output` 提示与返回底部动作，展示提交时保存的紧凑显示快照，不把用户原始文本解释为 Markdown，也不展开工具细节。 |
 | `src/mica_agent/tui/output.py` | TUI 模型正式回复与独立思考视图；使用 Textual Markdown、流式光标、完整/折叠/隐藏思考模式及当前焦点的 `Ctrl+O` 切换，支持从历史正文构造非流式回复，不持久化事件内容。 |
 | `src/mica_agent/tui/models.py` | TUI 专用的不可变启动资源视图快照；保存系统提示词名称、AGENTS 来源以及工具、Skill 和扩展名称。 |
