@@ -156,10 +156,12 @@ def test_invalid_argument_reports_diagnostic(command: tuple[str, ...]) -> None:
     "command",
     [("mica",), (sys.executable, "-m", "mica_agent")],
 )
+@pytest.mark.parametrize("mode", ["unsafe", "accept-edits", "accept_edits"])
 def test_invalid_permission_mode_is_rejected_by_argument_parsing(
     command: tuple[str, ...],
+    mode: str,
 ) -> None:
-    result = run_command(command, "cli", "--permission-mode", "unsafe")
+    result = run_command(command, "cli", "--permission-mode", mode)
 
     assert result.returncode == 2
     assert "invalid choice" in result.stderr

@@ -7,13 +7,20 @@ from collections.abc import Callable
 from typing import TypeAlias
 
 from .cancellation import CancellationRequested, CancellationToken
+from .command_risk import analyze_command
 from .interactions import InteractionBroker, PermissionAnswer
-from .permissions import PolicyDecision
+from .permissions import PermissionMode, PolicyDecision
 from .policy import PolicyEngine, PolicyInput, PolicyOperation
 from .runtime_tools import ToolOutputReporter
 from .schema_validation import ToolArgumentsValidationError, validate_tool_arguments
 from .tool_contracts import ToolRequest, ToolResult, ToolResultStatus, ToolSpec
 from .tool_registry import ToolNotFoundError, ToolRegistry
+from .workspace import WorkspaceIdentity
+from .workspace_paths import (
+    WorkspacePathError,
+    WorkspacePathResolver,
+    is_sensitive_path_text,
+)
 
 PolicyFactFactory: TypeAlias = Callable[[ToolRequest, ToolSpec], PolicyInput]
 LifecycleCallback: TypeAlias = Callable[[ToolRequest | ToolResult], None]
@@ -27,12 +34,37 @@ _OPERATION_BY_NAME = {
 }
 
 
-def _default_policy_input(request: ToolRequest, spec: ToolSpec) -> PolicyInput:
+def _default_policy_input(
+    request: ToolRequest,
+    spec: ToolSpec,
+    workspace: WorkspaceIdentity | None = None,
+) -> PolicyInput:
+    operation = _OPERATION_BY_NAME.get(request.name, PolicyOperation.OTHER)
+    protected_resource = False
+    command_risk = False
+    if request.name in {"read", "write", "edit"}:
+        path = request.arguments.get("path")
+        if isinstance(path, str):
+            protected_resource = is_sensitive_path_text(path)
+            if workspace is not None:
+                resolver = WorkspacePathResolver(workspace)
+                try:
+                    protected_resource = resolver.is_sensitive(resolver.resolve(path))
+                except WorkspacePathError:
+                    pass  # The handler retains all capability validation.
+    if request.name == "bash":
+        command = request.arguments.get("command")
+        if isinstance(command, str):
+            risk = analyze_command(command)
+            command_risk = risk.requires_confirmation
+
     return PolicyInput(
         tool_name=request.name,
-        operation=_OPERATION_BY_NAME.get(request.name, PolicyOperation.OTHER),
+        operation=operation,
         hard_denied=False,
         authorized_once=False,
+        protected_resource=protected_resource,
+        command_risk=command_risk,
     )
 
 
@@ -55,6 +87,7 @@ class ToolExecutor:
         *,
         policy_input_factory: PolicyFactFactory | None = None,
         interaction_broker: InteractionBroker | None = None,
+        workspace: WorkspaceIdentity | None = None,
     ) -> None:
         if not isinstance(registry, ToolRegistry):
             raise TypeError("registry must be a ToolRegistry")
@@ -66,9 +99,13 @@ class ToolExecutor:
             interaction_broker, InteractionBroker
         ):
             raise TypeError("interaction_broker must be an InteractionBroker")
+        if workspace is not None and not isinstance(workspace, WorkspaceIdentity):
+            raise TypeError("workspace must be a WorkspaceIdentity or None")
         self._registry = registry
         self._policy = policy
-        self._policy_input_factory = policy_input_factory or _default_policy_input
+        self._policy_input_factory = policy_input_factory or (
+            lambda request, spec: _default_policy_input(request, spec, workspace)
+        )
         self._interaction_broker = interaction_broker or InteractionBroker()
         self._output_routes: dict[tuple[str, str], ToolOutputReporter] = {}
 
@@ -157,8 +194,11 @@ class ToolExecutor:
 
         try:
             cancellation.raise_if_cancelled()
-            policy_input = self._policy_input_factory(request, registered.spec)
-            decision = self._policy.decide(policy_input)
+            if self._policy.mode is PermissionMode.SOLO:
+                decision = PolicyDecision.ALLOW
+            else:
+                policy_input = self._policy_input_factory(request, registered.spec)
+                decision = self._policy.decide(policy_input)
         except CancellationRequested:
             return finish(
                 _result(request, ToolResultStatus.CANCELLED, "operation cancelled")

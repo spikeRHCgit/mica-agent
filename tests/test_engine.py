@@ -176,7 +176,7 @@ def _runtime_bash_executor(workspace: Path) -> ToolExecutor:
     registry = ToolRegistry()
     executor = ToolExecutor(
         registry,
-        PolicyEngine(PermissionMode.DEFAULT, allow_rules=[lambda _: True]),
+        PolicyEngine(PermissionMode.SOLO),
     )
 
     async def requester(
@@ -475,7 +475,7 @@ def test_provider_failure_after_side_effect_tool_warns_to_check_workspace() -> N
         provider,
         tool_executor=ToolExecutor(
             registry,
-            PolicyEngine(PermissionMode.ACCEPT_EDITS),
+            PolicyEngine(PermissionMode.SOLO),
             policy_input_factory=lambda request, spec: PolicyInput(
                 request.name, PolicyOperation.WRITE, False, False
             ),
@@ -586,7 +586,12 @@ def test_engine_waits_for_permission_response_before_starting_handler() -> None:
         "test-model", (Message(MessageRole.USER, "save"),), (spec,)
     )
     executor = ToolExecutor(
-        registry, PolicyEngine(PermissionMode.DEFAULT), interaction_broker=broker
+        registry,
+        PolicyEngine(PermissionMode.DEFAULT),
+        interaction_broker=broker,
+        policy_input_factory=lambda request, spec: PolicyInput(
+            request.name, PolicyOperation.OTHER, False, False
+        ),
     )
     engine = AgentEngine(
         provider, tool_executor=executor, run_id_factory=lambda: "run-permission"
@@ -1412,7 +1417,12 @@ def test_permission_wait_cancellation_does_not_start_handler() -> None:
     engine = AgentEngine(
         provider,
         tool_executor=ToolExecutor(
-            registry, PolicyEngine(PermissionMode.DEFAULT), interaction_broker=broker
+            registry,
+            PolicyEngine(PermissionMode.DEFAULT),
+            interaction_broker=broker,
+            policy_input_factory=lambda request, spec: PolicyInput(
+                request.name, PolicyOperation.OTHER, False, False
+            ),
         ),
         run_id_factory=lambda: "run-permission-cancel",
     )
@@ -2175,7 +2185,7 @@ def test_engine_real_git_bash_output_closes_loop_before_next_model_request(
     registry = ToolRegistry()
     executor = ToolExecutor(
         registry,
-        PolicyEngine(PermissionMode.DEFAULT, allow_rules=[lambda policy_input: True]),
+        PolicyEngine(PermissionMode.SOLO),
     )
 
     async def requester(
@@ -2248,7 +2258,7 @@ def test_engine_real_bash_output_events_are_clean_and_not_persisted_as_deltas(
     registry = ToolRegistry()
     executor = ToolExecutor(
         registry,
-        PolicyEngine(PermissionMode.DEFAULT, allow_rules=[lambda policy_input: True]),
+        PolicyEngine(PermissionMode.SOLO),
     )
 
     async def requester(

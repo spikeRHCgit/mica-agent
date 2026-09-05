@@ -35,9 +35,9 @@ Mica 是一个面向个人开发者的轻量 Agent 基座。
   ```
 
 - 支持 OpenAI-compatible Chat Completions 的流式输出（SSE），文本增量实时写出；基础 CLI 也会实时显示经过清洗的 Bash 输出。
-- 基础 CLI 已装配五个工具：`read`、`write`、`edit`、`bash` 和 `ask`。Mica 不再提供独立 `ls`；目录查看通过需要权限确认的 `bash` 完成。`read` 读取工作区文件，`write`/`edit` 修改工作区，`ask` 在当前 Run 中暂停并询问用户。
-- 可用权限模式：`--permission-mode default`（修改和 Bash 询问）、`--permission-mode accept-edits`（自动允许 `write`/`edit`，Bash 仍询问）和 `--permission-mode solo`（自动允许文件工具，Bash 仍询问）。当前三种模式下所有 Bash 调用都需要确认；工作区越界、敏感路径和工具硬性边界始终拒绝。
-- `write`、`edit` 和 `bash` 可能需要输入 ASCII `y`/`yes` 确认；`n`/`no` 或空回答拒绝本次调用，其他输入会提示后重新询问。`ask` 的回答可以为空，并只作为当前工具结果返回模型；结构化 ask 会在 stderr 显示带编号的 2—4 个选项，输入选项编号提交该选项，允许自定义回答时还会显示 `Type something.` 入口。
+- 基础 CLI 已装配五个工具：`read`、`write`、`edit`、`bash` 和 `ask`。Mica 不再提供独立 `ls`；目录查看通过 `bash` 完成。`read` 读取工作区文件，`write`/`edit` 修改工作区，`ask` 在当前 Run 中暂停并询问用户。
+- 权限模式只保留 `--permission-mode default` 和 `--permission-mode solo`，旧 `accept-edits` / `accept_edits` 参数会被拒绝。default 自动允许普通文件操作、日常 Bash 和普通网络访问；受保护文件、危险命令、无法可靠分类的 Shell 结构及自定义工具需要一次确认。solo 跳过权限策略，但保留参数校验、工具失败、取消和 ask 需求交互。new/continue/resume 使用相同装配。
+- `read`、`write`、`edit`、`bash` 和自定义工具可能需要输入 ASCII `y`/`yes` 确认；`n`/`no` 或空回答拒绝本次调用，其他输入会提示后重新询问。`ask` 的回答可以为空，并只作为当前工具结果返回模型；结构化 ask 会在 stderr 显示带编号的 2—4 个选项，输入选项编号提交该选项，允许自定义回答时还会显示 `Type something.` 入口。
 - 持久化多轮历史：完整成功的轮次写入当前工作区的 JSONL 会话，后续请求携带完整前文和工具历史。
 - 默认 `mica cli` 创建当前工作区的新会话；`mica cli --continue` 恢复该工作区最后活跃的健康会话；`mica cli --resume` 展示并选择该工作区的健康会话。
 - 当前恢复会话会把旧消息和完整工具历史加入后续模型请求，但基础 CLI 不会在启动时重新显示旧对话；历史回放属于后续完整 TUI。
@@ -49,9 +49,15 @@ Mica 是一个面向个人开发者的轻量 Agent 基座。
 `~/.mica/sessions/<workspace-slug>-<path-hash>/`。工作区移动后视为新的工作区；自动化使用的
 数据根目录可以注入，不会依赖真实用户目录。
 
-文件工具遵守工作区路径边界、敏感文件拒绝和 UTF-8 文件大小限制；`edit` 要求旧文本
+文件工具仍只支持工作区相对路径、普通 UTF-8 文件和大小限制，不支持父跳转、链接跟随或设备；敏感文件由 ToolExecutor 授权，default 批准后可实际访问，solo 不询问。`edit` 要求旧文本
 唯一匹配；Bash 具有清理后的环境、超时、输出限制和取消后的进程树回收，当前优先支持
 Windows Git Bash。
+
+命令分析仅提供有限防误操作提示：识别删除、格式化、提权、权限修改、危险 Git 操作、
+内联解释器和组合命令；解析失败、动态扩展、未知包装语义和工作目录变化保守询问。
+普通脚本和未知普通程序不读取内容审查，“未命中规则”不代表安全。
+**没有 OS 级文件或网络沙箱**：工作区 cwd 不是隔离，Bash 仍可访问工作区外；
+规则不能保证拦截间接副作用、编码执行或数据外传。
 
 当前 **没有** 配置文件、Textual TUI、历史回放、斜杠命令或扩展系统；也不包含会话命令界面、摘要压缩、云同步、加密能力、npm 启动器或正式发布。它也不保证兼容所有 OpenAI-compatible 服务（协议差异限定在 Provider 适配边界内处理）。
 

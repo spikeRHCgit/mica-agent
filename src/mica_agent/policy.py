@@ -30,6 +30,8 @@ class PolicyInput:
     operation: PolicyOperation
     hard_denied: bool
     authorized_once: bool
+    protected_resource: bool = False
+    command_risk: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.tool_name, str):
@@ -42,23 +44,18 @@ class PolicyInput:
             raise TypeError("hard_denied must be a bool")
         if not isinstance(self.authorized_once, bool):
             raise TypeError("authorized_once must be a bool")
+        if not isinstance(self.protected_resource, bool):
+            raise TypeError("protected_resource must be a bool")
+        if not isinstance(self.command_risk, bool):
+            raise TypeError("command_risk must be a bool")
 
 
 _DEFAULT_MATRIX: dict[PermissionMode, dict[PolicyOperation, PolicyDecision]] = {
     PermissionMode.DEFAULT: {
         PolicyOperation.READ: PolicyDecision.ALLOW,
-        PolicyOperation.WRITE: PolicyDecision.ASK,
-        PolicyOperation.EDIT: PolicyDecision.ASK,
-        PolicyOperation.SAFE_READ_ONLY_COMMAND: PolicyDecision.ASK,
-        PolicyOperation.COMMAND: PolicyDecision.ASK,
-        PolicyOperation.ASK: PolicyDecision.ALLOW,
-        PolicyOperation.OTHER: PolicyDecision.ASK,
-    },
-    PermissionMode.ACCEPT_EDITS: {
-        PolicyOperation.READ: PolicyDecision.ALLOW,
         PolicyOperation.WRITE: PolicyDecision.ALLOW,
         PolicyOperation.EDIT: PolicyDecision.ALLOW,
-        PolicyOperation.SAFE_READ_ONLY_COMMAND: PolicyDecision.ASK,
+        PolicyOperation.SAFE_READ_ONLY_COMMAND: PolicyDecision.ALLOW,
         PolicyOperation.COMMAND: PolicyDecision.ASK,
         PolicyOperation.ASK: PolicyDecision.ALLOW,
         PolicyOperation.OTHER: PolicyDecision.ASK,
@@ -68,9 +65,9 @@ _DEFAULT_MATRIX: dict[PermissionMode, dict[PolicyOperation, PolicyDecision]] = {
         PolicyOperation.WRITE: PolicyDecision.ALLOW,
         PolicyOperation.EDIT: PolicyDecision.ALLOW,
         PolicyOperation.SAFE_READ_ONLY_COMMAND: PolicyDecision.ALLOW,
-        PolicyOperation.COMMAND: PolicyDecision.ASK,
+        PolicyOperation.COMMAND: PolicyDecision.ALLOW,
         PolicyOperation.ASK: PolicyDecision.ALLOW,
-        PolicyOperation.OTHER: PolicyDecision.ASK,
+        PolicyOperation.OTHER: PolicyDecision.ALLOW,
     },
 }
 
@@ -97,14 +94,22 @@ class PolicyEngine:
         self._mode = mode
         self._allow_rules = rules
 
+    @property
+    def mode(self) -> PermissionMode:
+        return self._mode
+
     def decide(self, policy_input: PolicyInput) -> PolicyDecision:
-        """按硬拒绝、一次授权、允许规则、默认矩阵依次决定。"""
+        """solo 绕过策略；default 按事实、规则和默认矩阵决定。"""
         if not isinstance(policy_input, PolicyInput):
             raise TypeError("policy_input must be a PolicyInput")
+        if self._mode is PermissionMode.SOLO:
+            return PolicyDecision.ALLOW
         if policy_input.hard_denied:
             return PolicyDecision.DENY
         if policy_input.authorized_once:
             return PolicyDecision.ALLOW
+        if policy_input.protected_resource or policy_input.command_risk:
+            return PolicyDecision.ASK
         for rule in self._allow_rules:
             try:
                 matched = rule(policy_input)
@@ -112,4 +117,6 @@ class PolicyEngine:
                 continue
             if matched is True:
                 return PolicyDecision.ALLOW
+        if policy_input.operation is PolicyOperation.COMMAND:
+            return PolicyDecision.ALLOW
         return _DEFAULT_MATRIX[self._mode][policy_input.operation]

@@ -199,3 +199,26 @@ Composer 仍是 Screen 的第三个直接子节点并保持底部焦点；本切
 ## 验收结论
 
 实现保持既有 Run/seq、工具卡片、工作状态、滚动、composer 和安全边界；聚焦 TUI/工具展示兼容测试通过。未连接真实 CLI、Broker、Provider 或 Engine 私有状态，未实现权限窗口和 P6-07。
+
+# P6-07A 两模式权限后端与基础 CLI
+
+## 目标与实现
+
+- 删除 ACCEPT_EDITS；公开枚举与 CLI 只保留 default/solo，旧连字符及下划线参数均拒绝，不保留别名。
+- default 的普通文件操作和未命中风险规则的 Bash 自动允许；受保护文件、危险命令、无法理解的 Shell 和自定义工具通过现有 Broker 一次确认。拒绝不调用 handler，批准仅作用于当前调用。
+- solo 在注册查询、Schema 校验之后跳过事实工厂、风险规则、allow_rules 与 hard_denied；保留取消、工具失败与 ask 的需求交互，不新增 PermissionResponse。
+- 文件 handler 只负责执行能力，不再永久拒绝敏感路径；集中敏感分类同时提供工作区路径与纯词法入口，默认 Executor 即使未注入 workspace 也会识别敏感文件名。相对路径、链接、设备、UTF-8、大小与唯一匹配限制不变。
+
+## 取舍与边界
+
+- 独立 command_risk 只分析文本，不执行探测或读取脚本。支持引号、转义、组合命令、常见 env/command 包装及危险命令 basename/.exe；任一命中只对原始调用询问一次，不改写命令。
+- 动态扩展、复杂结构、文件描述符语法、不支持的包装选项和 Git 工作目录/配置选项保守询问；普通 Git status/diff/log/show/add/commit、脚本和网络命令未命中规则即可执行。此处未建立完整 Shell 解释器。
+- 没有 OS 文件/网络隔离；脚本、未知程序与间接副作用不作安全证明。`PolicyOperation.SAFE_READ_ONLY_COMMAND` 仅作为历史兼容枚举保留，Bash 默认事实始终使用 `COMMAND`，普通命令是否自动执行由风险事实决定。
+- 事件、会话版本、展示过滤、五工具顺序和 CLI 生命周期未修改；未实施 P6-07B TUI 权限面板。
+
+## 验证与学习入口
+
+- 新测试覆盖纯分类、组合命令一次授权/拒绝、solo 策略跳过、受保护文件实际读写编辑、普通网络假 handler、参数/能力限制和取消清理。真实文件只使用临时目录与虚构内容，危险命令仅分类或交给记录调用的假 handler。
+- 旧授权测试改为显式询问操作或受保护路径，保留生命周期和副作用断言；动态 Bash 输出测试区分默认自动执行与保守询问。安装态覆盖两模式的 Unicode 工作区写入与 continue 历史恢复。
+- 学习入口：command_risk → ToolExecutor → InteractionBroker；文件执行能力与授权策略分离；Schema 校验、权限策略和 ask 需求交互的不同职责。
+- 验收状态：返工聚焦组 192 通过；最终全量 1457 通过、2 跳过，Ruff、格式检查、离线构建和两项 diff check 通过。待 master 审查；未提交或推送 Git。

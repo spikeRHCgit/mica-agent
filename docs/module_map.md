@@ -26,8 +26,9 @@
 | `src/mica_agent/jsonl_store.py` | 一个会话一个 JSONL 文件的存储层；负责严格解析、锁内创建/读取/重写/删除、原子替换、扫描损坏和 v1/v2 到 v3 升级。 |
 | `src/mica_agent/message_sanitizer.py` | 工具消息和工具展示进入 Provider、会话或诊断前的集中凭据清洗；隐藏敏感键、常见 Key 和 Bearer 凭据。 |
 | `src/mica_agent/models.py` | 供应商无关的标准 `Message` 与角色定义，包含普通文本、工具调用和工具结果关联字段。 |
-| `src/mica_agent/permissions.py` | 权限模式和策略决定的基础枚举：`default`、`accept_edits`、`solo` 以及 `ALLOW`、`ASK`、`DENY`。 |
-| `src/mica_agent/policy.py` | 内存权限决策引擎；根据规范化操作、硬性拒绝、一次性授权、允许规则和权限模式给出策略决定。 |
+| `src/mica_agent/permissions.py` | 权限模式和策略决定的基础枚举：`default`、`solo` 以及 `ALLOW`、`ASK`、`DENY`。 |
+| `src/mica_agent/policy.py` | 两模式内存权限决策：default 使用受保护资源/命令风险事实、一次授权与规则；solo 跳过权限策略。 |
+| `src/mica_agent/command_risk.py` | 纯词法命令风险分类；分析组合命令、包装、危险命令和受保护路径，不执行命令或读取脚本，不提供安全证明。 |
 | `src/mica_agent/runtime_tools.py` | 运行时工具实现与注册入口；提供 Windows 优先的受限 `bash`，以及自由文本或结构化选择的 `ask`，管理环境清理、输出上限、超时、进程树与等待取消。 |
 | `src/mica_agent/schema_validation.py` | 使用固定 JSON Schema Draft 2020-12 校验 ToolSpec Schema 和实际工具参数，拒绝远程引用并返回安全错误。 |
 | `src/mica_agent/session_contracts.py` | 会话公共数据和 JSON wire 契约；定义 SessionMeta、带工具展示的 v3 TurnEntry、v1/v2 严格兼容读取、消息角色顺序和格式错误边界。 |
@@ -52,7 +53,7 @@
 | `src/mica_agent/tui/theme.py` | TUI 外壳的深色语义主题令牌与基础布局样式；依靠 Textual/Rich 完成颜色能力协商和外壳级降级。 |
 | `src/mica_agent/tui/tool_cards.py` | 工具卡片基础组件、`read`、`write`、`edit`、`bash` 和 Generic 兜底卡片；按 `(run_id, call_id)` 由外壳维护稳定组件身份，消费安全展示快照并原地更新生命周期状态，write 支持纯文本十行折叠与焦点展开，edit 支持逐行差异、行号与二十条变化折叠，bash 支持三行命令折叠、动态输出、八行视口、内部浏览与终态输出校准，并提供统一的安全卡片解析及可注入专用工厂接缝。 |
 | `src/mica_agent/workspace.py` | 工作区身份与数据根边界；优先识别 Git 根目录，否则使用启动目录，并生成规范路径、slug、SHA-256 ID 和会话目录。 |
-| `src/mica_agent/workspace_paths.py` | 文件工具共享的工作区路径解析器；拒绝绝对/越界路径、重解析点、Windows 别名、ADS 和集中定义的敏感文件。 |
+| `src/mica_agent/workspace_paths.py` | 文件工具共享的工作区路径解析器；拒绝绝对/越界路径、重解析点、Windows 别名和 ADS；另提供文件授权与命令分析共用的敏感路径分类，不自行授权。 |
 | `src/mica_agent/providers/__init__.py` | Provider 子包的公共出口；只重导出供应商无关契约和错误，不执行网络请求。 |
 | `src/mica_agent/providers/base.py` | Provider 公共协议；定义 ProviderRequest、思考/文本/结束/错误事件、错误分类和 Provider 生命周期接口。 |
 | `src/mica_agent/providers/openai_compatible.py` | OpenAI-compatible Chat Completions 适配器；构造含可选思考强度的 HTTP 请求、解析 SSE 思考/文本增量、组装工具调用、分类错误并执行有限网络重试。 |

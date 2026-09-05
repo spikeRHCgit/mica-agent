@@ -104,7 +104,7 @@ def test_real_write_tool_emits_safe_snapshots_and_persists_v3(tmp_path: Path) ->
     workspace_path.mkdir()
     registry = ToolRegistry()
     register_file_tools(registry, resolve_workspace(workspace_path))
-    executor = ToolExecutor(registry, PolicyEngine(PermissionMode.ACCEPT_EDITS))
+    executor = ToolExecutor(registry, PolicyEngine(PermissionMode.SOLO))
     app, service, session_id, workspace_path = _make_app(
         tmp_path,
         provider,
@@ -185,7 +185,7 @@ def test_real_edit_tool_persists_minimal_numbered_diff(tmp_path: Path) -> None:
     app, service, session_id, _ = _make_app(
         tmp_path,
         provider,
-        tool_executor=ToolExecutor(registry, PolicyEngine(PermissionMode.ACCEPT_EDITS)),
+        tool_executor=ToolExecutor(registry, PolicyEngine(PermissionMode.SOLO)),
         workspace_path=workspace_path,
     )
 

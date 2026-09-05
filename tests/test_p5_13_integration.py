@@ -72,6 +72,8 @@ def _run(
     tmp_path: Path,
     command: str,
     response: str = "final answer",
+    *,
+    confirm: bool = False,
 ) -> tuple[int, Recorder, Recorder, ScriptedProvider, Path, SessionService]:
     service, builder, workspace_path = _dependencies(tmp_path)
     provider = ScriptedProvider(
@@ -98,7 +100,7 @@ def _run(
             "sk-test-only",
             "test-model",
             provider_factory=lambda _url, _key: provider,
-            read_line=InputScript("run command", "y"),
+            read_line=InputScript("run command", *(["y"] if confirm else [])),
             write_out=out,
             write_err=err,
             session_service=service,
@@ -117,6 +119,7 @@ def test_cli_displays_cleaned_bash_deltas_between_status_lines(
         "printf 'first output\\n'; "
         "printf 'api_key=%s\\n' '" + secret + "'; "
         "printf 'second output\\n' >&2",
+        confirm=True,
     )
 
     assert code == 0
@@ -162,12 +165,7 @@ def test_cli_adds_one_separator_for_unterminated_bash_delta(
 
     assert code == 0
     assert out.text == "final answer\n"
-    assert err.text == (
-        "permission required for tool bash [y/N]: "
-        "tool bash: started\n"
-        "unterminated output\n"
-        "tool bash: success\n"
-    )
+    assert err.text == ("tool bash: started\nunterminated output\ntool bash: success\n")
     assert err.text.count("unterminated output") == 1
 
 
@@ -178,9 +176,5 @@ def test_cli_keeps_no_output_tool_status_without_extra_blank_line(
 
     assert code == 0
     assert out.text == "final answer\n"
-    assert err.text == (
-        "permission required for tool bash [y/N]: "
-        "tool bash: started\n"
-        "tool bash: success\n"
-    )
+    assert err.text == ("tool bash: started\ntool bash: success\n")
     assert "started\n\n" not in err.text

@@ -100,7 +100,7 @@ def main() -> None:
     )
     cli_parser.add_argument(
         "--permission-mode",
-        choices=("default", "accept-edits", "solo"),
+        choices=("default", "solo"),
         default="default",
         help="select tool permission behavior",
     )
@@ -111,7 +111,6 @@ def main() -> None:
         return
     permission_mode = {
         "default": PermissionMode.DEFAULT,
-        "accept-edits": PermissionMode.ACCEPT_EDITS,
         "solo": PermissionMode.SOLO,
     }[args.permission_mode]
     sys.exit(_main_cli(args.session_mode, permission_mode))
@@ -284,7 +283,9 @@ async def _run_selected_session(
             registry,
             PolicyEngine(permission_mode),
             interaction_broker=broker,
+            workspace=workspace,
         )
+
         register_file_tools(registry, workspace)
         register_runtime_tools(
             registry,

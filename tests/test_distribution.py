@@ -1141,11 +1141,13 @@ def test_installed_wheel_structured_ask_and_continue_restore_tool_history(
     assert server._thread.is_alive() is False
 
 
+@pytest.mark.parametrize("mode", ["default", "solo"])
 def test_installed_wheel_write_and_continue_restore_complete_tool_history(
     full_distribution: InstalledDistribution,
+    mode: str,
 ) -> None:
     dist = full_distribution
-    workspace = dist.outside_repository / "工具 工作区"
+    workspace = dist.outside_repository / f"工具 工作区 {mode}"
     workspace.mkdir()
     data_root = dist.home / ".mica"
     workspace_identity = resolve_workspace(workspace)
@@ -1158,13 +1160,13 @@ def test_installed_wheel_write_and_continue_restore_complete_tool_history(
     with LoopbackToolSSEServer() as server:
         environment["MICA_API_URL"] = server.base_url
         first = run_command(
-            [dist.mica, "cli", "--permission-mode", "default"],
+            [dist.mica, "cli", "--permission-mode", mode],
             cwd=workspace,
             environment=environment,
-            input_text="create the target\ny\n",
+            input_text="create the target\n",
         )
         second = run_command(
-            [dist.mica, "cli", "--continue", "--permission-mode", "default"],
+            [dist.mica, "cli", "--continue", "--permission-mode", mode],
             cwd=workspace,
             environment=environment,
             input_text="continue without rewriting\n",
@@ -1172,11 +1174,7 @@ def test_installed_wheel_write_and_continue_restore_complete_tool_history(
 
     assert first.returncode == 0, first.stderr
     assert first.stdout == "first tool answer\n"
-    assert first.stderr == (
-        "permission required for tool write [y/N]: "
-        "tool write: started\n"
-        "tool write: success\n"
-    )
+    assert first.stderr == ("tool write: started\ntool write: success\n")
     assert second.returncode == 0, second.stderr
     assert second.stdout == "continued answer\n"
     assert second.stderr == ""

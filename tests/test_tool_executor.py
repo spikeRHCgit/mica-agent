@@ -240,6 +240,81 @@ def test_deny_returns_permission_denied_without_handler_call() -> None:
     assert calls == 0
 
 
+def test_default_bash_uses_command_operation_and_allows_non_risky_call() -> None:
+    observed: list[PolicyInput] = []
+    registry = ToolRegistry()
+
+    async def handler(
+        request: ToolRequest, cancellation: CancellationToken
+    ) -> ToolResult:
+        return ToolResult(request.call_id, request.name, ToolResultStatus.SUCCESS, "ok")
+
+    registry.register(_spec("bash"), handler)
+    executor = ToolExecutor(
+        registry,
+        PolicyEngine(PermissionMode.DEFAULT),
+        policy_input_factory=lambda request, spec: (
+            observed.append(
+                PolicyInput(request.name, PolicyOperation.COMMAND, False, False)
+            )
+            or observed[-1]
+        ),
+    )
+    result = asyncio.run(
+        executor.execute(
+            ToolRequest("bash-call", "bash", {"value": "touch output.txt"}),
+            CancellationToken(),
+        )
+    )
+
+    assert result.status is ToolResultStatus.SUCCESS
+    assert [item.operation for item in observed] == [PolicyOperation.COMMAND]
+
+
+def test_default_policy_callback_sees_command_for_touch_without_prompt() -> None:
+    observed: list[PolicyInput] = []
+    registry = ToolRegistry()
+
+    async def handler(
+        request: ToolRequest, cancellation: CancellationToken
+    ) -> ToolResult:
+        return ToolResult(request.call_id, request.name, ToolResultStatus.SUCCESS, "ok")
+
+    registry.register(
+        ToolSpec(
+            "bash",
+            "Fake Bash",
+            {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+                "additionalProperties": False,
+            },
+        ),
+        handler,
+    )
+
+    def observe(policy_input: PolicyInput) -> bool:
+        observed.append(policy_input)
+        return False
+
+    executor = ToolExecutor(
+        registry,
+        PolicyEngine(PermissionMode.DEFAULT, allow_rules=[observe]),
+    )
+    result = asyncio.run(
+        executor.execute(
+            ToolRequest("bash-call", "bash", {"command": "touch output.txt"}),
+            CancellationToken(),
+        )
+    )
+
+    assert result.status is ToolResultStatus.SUCCESS
+    assert len(observed) == 1
+    assert observed[0].operation is PolicyOperation.COMMAND
+    assert observed[0].command_risk is False
+
+
 def test_ask_allows_once_for_only_the_current_call() -> None:
     broker = InteractionBroker(
         interaction_id_factory=iter(["permission-1", "permission-2"]).__next__
@@ -259,7 +334,7 @@ def test_ask_allows_once_for_only_the_current_call() -> None:
     registry.register(_spec(), handler)
     executor = _executor(
         registry,
-        operation=PolicyOperation.WRITE,
+        operation=PolicyOperation.OTHER,
         broker=broker,
     )
 
@@ -267,7 +342,7 @@ def test_ask_allows_once_for_only_the_current_call() -> None:
         first_task = asyncio.create_task(
             executor.execute(_request(), CancellationToken())
         )
-        first_request = await broker.next_request()
+        first_request = await asyncio.wait_for(broker.next_request(), timeout=1)
         assert broker.respond(
             PermissionResponse(
                 first_request.interaction_id, PermissionAnswer.ALLOW_ONCE
@@ -280,7 +355,7 @@ def test_ask_allows_once_for_only_the_current_call() -> None:
                 ToolRequest("call-2", "read", {"value": "again"}), CancellationToken()
             )
         )
-        second_request = await broker.next_request()
+        second_request = await asyncio.wait_for(broker.next_request(), timeout=1)
         assert broker.respond(
             PermissionResponse(second_request.interaction_id, PermissionAnswer.DENY)
         )
@@ -400,11 +475,11 @@ def test_permission_wait_does_not_execute_after_invalid_or_denied_response(
         )
 
     registry.register(_spec(), handler)
-    executor = _executor(registry, operation=PolicyOperation.WRITE, broker=broker)
+    executor = _executor(registry, operation=PolicyOperation.OTHER, broker=broker)
 
     async def scenario() -> ToolResult:
         task = asyncio.create_task(executor.execute(_request(), CancellationToken()))
-        request = await broker.next_request()
+        request = await asyncio.wait_for(broker.next_request(), timeout=1)
         if response.interaction_id == request.interaction_id:
             broker.respond(response)
         else:

@@ -11,7 +11,6 @@ from mica_agent.permissions import PermissionMode, PolicyDecision
     ("mode", "wire_value"),
     [
         (PermissionMode.DEFAULT, "default"),
-        (PermissionMode.ACCEPT_EDITS, "accept_edits"),
         (PermissionMode.SOLO, "solo"),
     ],
 )

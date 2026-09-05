@@ -302,7 +302,7 @@ def test_registered_edit_replaces_one_unique_match_without_changing_crlf(
     }
 
 
-def test_file_tools_deny_sensitive_paths_but_allow_explicit_env_example(
+def test_file_handlers_preserve_sensitive_capability_and_allow_env_example(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "workspace"
@@ -325,8 +325,8 @@ def test_file_tools_deny_sensitive_paths_but_allow_explicit_env_example(
         )
     )
 
-    assert denied.status is ToolResultStatus.PERMISSION_DENIED
-    assert secret not in denied.message
+    assert denied.status is ToolResultStatus.SUCCESS
+    assert denied.data == secret
     assert allowed.status is ToolResultStatus.SUCCESS
     assert allowed.data == "KEY=example"
 

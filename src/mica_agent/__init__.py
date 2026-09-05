@@ -7,6 +7,7 @@ AgentEngine 与 MicaApp 装配入口。Engine/App 通过模块级
 """
 
 from .cancellation import CancellationRequested, CancellationToken
+from .command_risk import CommandRisk, CommandRiskResult, analyze_command
 from .context_builder import (
     MAX_AGENTS_FILE_BYTES,
     AgentFileSource,
@@ -116,6 +117,8 @@ __all__ = [
     "CancellationRequested",
     "CancellationToken",
     "CleanupResult",
+    "CommandRisk",
+    "CommandRiskResult",
     "ContextBuildResult",
     "ContextBuilder",
     "ContextDiagnostic",
@@ -195,6 +198,7 @@ __all__ = [
     "WorkspacePathError",
     "WorkspacePathResolver",
     "WorkspaceResolutionError",
+    "analyze_command",
     "complete_tool_presentation",
     "default_data_root",
     "deserialize_session_record",

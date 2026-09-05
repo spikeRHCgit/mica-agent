@@ -450,7 +450,7 @@ def test_storage_failure_after_side_effect_warns_and_keeps_session_unchanged(
     registry.register(spec, handler)
     executor = ToolExecutor(
         registry,
-        PolicyEngine(PermissionMode.ACCEPT_EDITS),
+        PolicyEngine(PermissionMode.SOLO),
         policy_input_factory=lambda request, spec: PolicyInput(
             request.name, PolicyOperation.WRITE, False, False
         ),
@@ -501,7 +501,13 @@ def test_respond_interaction_forwards_only_current_matching_response() -> None:
         )
 
     registry.register(spec, handler)
-    executor = ToolExecutor(registry, PolicyEngine(PermissionMode.DEFAULT))
+    executor = ToolExecutor(
+        registry,
+        PolicyEngine(PermissionMode.DEFAULT),
+        policy_input_factory=lambda request, spec: PolicyInput(
+            request.name, PolicyOperation.OTHER, False, False
+        ),
+    )
     provider = _ScriptedProvider(
         [
             [Finish(tool_calls=(ToolCall("call-write", "write", {}),))],

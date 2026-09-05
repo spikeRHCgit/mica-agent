@@ -41,7 +41,12 @@ def is_sensitive_workspace_path(path: Path, workspace: WorkspaceIdentity) -> boo
         parts = path.relative_to(workspace.workspace_path).parts
     except ValueError:
         return True
-    folded = tuple(part.casefold() for part in parts)
+    return is_sensitive_path_text("/".join(parts))
+
+
+def is_sensitive_path_text(path: str) -> bool:
+    """纯词法敏感路径分类，供文件授权与命令分析共用。"""
+    folded = tuple(part.casefold() for part in path.replace("\\", "/").split("/"))
     if ".git" in folded or "credentials" in folded:
         return True
     if not folded:
@@ -96,5 +101,6 @@ class WorkspacePathResolver:
 __all__ = [
     "WorkspacePathError",
     "WorkspacePathResolver",
+    "is_sensitive_path_text",
     "is_sensitive_workspace_path",
 ]

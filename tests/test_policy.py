@@ -55,49 +55,44 @@ def test_policy_input_is_immutable_and_strictly_typed() -> None:
 
 
 @pytest.mark.parametrize(
-    ("mode", "operation", "expected"),
+    ("mode", "operation", "command_risk", "expected"),
     [
-        (PermissionMode.DEFAULT, PolicyOperation.READ, PolicyDecision.ALLOW),
-        (PermissionMode.DEFAULT, PolicyOperation.WRITE, PolicyDecision.ASK),
-        (PermissionMode.DEFAULT, PolicyOperation.EDIT, PolicyDecision.ASK),
+        (PermissionMode.DEFAULT, PolicyOperation.READ, False, PolicyDecision.ALLOW),
+        (PermissionMode.DEFAULT, PolicyOperation.WRITE, False, PolicyDecision.ALLOW),
+        (PermissionMode.DEFAULT, PolicyOperation.EDIT, False, PolicyDecision.ALLOW),
         (
             PermissionMode.DEFAULT,
             PolicyOperation.SAFE_READ_ONLY_COMMAND,
-            PolicyDecision.ASK,
+            False,
+            PolicyDecision.ALLOW,
         ),
-        (PermissionMode.DEFAULT, PolicyOperation.COMMAND, PolicyDecision.ASK),
-        (PermissionMode.DEFAULT, PolicyOperation.ASK, PolicyDecision.ALLOW),
-        (PermissionMode.DEFAULT, PolicyOperation.OTHER, PolicyDecision.ASK),
-        (PermissionMode.ACCEPT_EDITS, PolicyOperation.READ, PolicyDecision.ALLOW),
-        (PermissionMode.ACCEPT_EDITS, PolicyOperation.WRITE, PolicyDecision.ALLOW),
-        (PermissionMode.ACCEPT_EDITS, PolicyOperation.EDIT, PolicyDecision.ALLOW),
-        (
-            PermissionMode.ACCEPT_EDITS,
-            PolicyOperation.SAFE_READ_ONLY_COMMAND,
-            PolicyDecision.ASK,
-        ),
-        (PermissionMode.ACCEPT_EDITS, PolicyOperation.COMMAND, PolicyDecision.ASK),
-        (PermissionMode.ACCEPT_EDITS, PolicyOperation.ASK, PolicyDecision.ALLOW),
-        (PermissionMode.ACCEPT_EDITS, PolicyOperation.OTHER, PolicyDecision.ASK),
-        (PermissionMode.SOLO, PolicyOperation.READ, PolicyDecision.ALLOW),
-        (PermissionMode.SOLO, PolicyOperation.WRITE, PolicyDecision.ALLOW),
-        (PermissionMode.SOLO, PolicyOperation.EDIT, PolicyDecision.ALLOW),
+        (PermissionMode.DEFAULT, PolicyOperation.COMMAND, False, PolicyDecision.ALLOW),
+        (PermissionMode.DEFAULT, PolicyOperation.COMMAND, True, PolicyDecision.ASK),
+        (PermissionMode.DEFAULT, PolicyOperation.ASK, False, PolicyDecision.ALLOW),
+        (PermissionMode.DEFAULT, PolicyOperation.OTHER, False, PolicyDecision.ASK),
+        (PermissionMode.SOLO, PolicyOperation.READ, False, PolicyDecision.ALLOW),
+        (PermissionMode.SOLO, PolicyOperation.WRITE, False, PolicyDecision.ALLOW),
+        (PermissionMode.SOLO, PolicyOperation.EDIT, False, PolicyDecision.ALLOW),
         (
             PermissionMode.SOLO,
             PolicyOperation.SAFE_READ_ONLY_COMMAND,
+            False,
             PolicyDecision.ALLOW,
         ),
-        (PermissionMode.SOLO, PolicyOperation.COMMAND, PolicyDecision.ASK),
-        (PermissionMode.SOLO, PolicyOperation.ASK, PolicyDecision.ALLOW),
-        (PermissionMode.SOLO, PolicyOperation.OTHER, PolicyDecision.ASK),
+        (PermissionMode.SOLO, PolicyOperation.COMMAND, True, PolicyDecision.ALLOW),
+        (PermissionMode.SOLO, PolicyOperation.ASK, False, PolicyDecision.ALLOW),
+        (PermissionMode.SOLO, PolicyOperation.OTHER, False, PolicyDecision.ALLOW),
     ],
 )
 def test_policy_engine_default_matrix(
     mode: PermissionMode,
     operation: PolicyOperation,
+    command_risk: bool,
     expected: PolicyDecision,
 ) -> None:
-    policy_input = PolicyInput("tool", operation, False, False)
+    policy_input = PolicyInput(
+        "tool", operation, False, False, command_risk=command_risk
+    )
 
     assert PolicyEngine(mode).decide(policy_input) is expected
 
@@ -121,7 +116,7 @@ def test_hard_deny_overrides_authorization_and_does_not_run_rules() -> None:
         rule_calls += 1
         return True
 
-    engine = PolicyEngine(PermissionMode.SOLO, allow_rules=[allowing_rule])
+    engine = PolicyEngine(PermissionMode.DEFAULT, allow_rules=[allowing_rule])
     policy_input = PolicyInput("write", PolicyOperation.WRITE, True, True)
 
     assert engine.decide(policy_input) is PolicyDecision.DENY
@@ -133,8 +128,8 @@ def test_authorized_once_precedes_rules_and_is_not_cached() -> None:
         raise RuntimeError("credential-like-rule-failure")
 
     engine = PolicyEngine(PermissionMode.DEFAULT, allow_rules=[exploding_rule])
-    authorized = PolicyInput("write", PolicyOperation.WRITE, False, True)
-    next_call = PolicyInput("write", PolicyOperation.WRITE, False, False)
+    authorized = PolicyInput("write", PolicyOperation.OTHER, False, True)
+    next_call = PolicyInput("write", PolicyOperation.OTHER, False, False)
 
     assert engine.decide(authorized) is PolicyDecision.ALLOW
     assert engine.decide(next_call) is PolicyDecision.ASK
@@ -148,8 +143,8 @@ def test_allow_rule_receives_policy_input_and_can_allow_current_call() -> None:
         return policy_input.tool_name == "approved"
 
     engine = PolicyEngine(PermissionMode.DEFAULT, allow_rules=[matching_rule])
-    approved = PolicyInput("approved", PolicyOperation.WRITE, False, False)
-    unmatched = PolicyInput("other", PolicyOperation.WRITE, False, False)
+    approved = PolicyInput("approved", PolicyOperation.OTHER, False, False)
+    unmatched = PolicyInput("other", PolicyOperation.OTHER, False, False)
 
     assert engine.decide(approved) is PolicyDecision.ALLOW
     assert engine.decide(unmatched) is PolicyDecision.ASK
@@ -163,7 +158,7 @@ def test_allow_rule_exception_and_non_bool_result_do_not_grant_access() -> None:
     def unsafe_truthy_rule(policy_input: PolicyInput) -> bool:
         return "allow"  # type: ignore[return-value]
 
-    policy_input = PolicyInput("write", PolicyOperation.WRITE, False, False)
+    policy_input = PolicyInput("write", PolicyOperation.OTHER, False, False)
 
     assert (
         PolicyEngine(PermissionMode.DEFAULT, [exploding_rule]).decide(policy_input)

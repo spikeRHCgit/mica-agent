@@ -103,9 +103,10 @@ def make_dependencies(
     return service, builder, workspace_path
 
 
+@pytest.mark.parametrize("mode", list(PermissionMode))
 @pytest.mark.parametrize("answer", ["extra detail", ""])
 def test_ask_answers_are_tool_results_including_empty_answer(
-    tmp_path: Path, answer: str
+    tmp_path: Path, answer: str, mode: PermissionMode
 ) -> None:
     service, builder, _workspace_path = make_dependencies(tmp_path)
     provider = ScriptedProvider(
@@ -130,6 +131,7 @@ def test_ask_answers_are_tool_results_including_empty_answer(
             "test-model",
             provider_factory=lambda url, key: provider,
             read_line=InputScript("ask me", answer),
+            permission_mode=mode,
             write_out=out,
             write_err=err,
             session_service=service,
@@ -152,10 +154,9 @@ def test_ask_answers_are_tool_results_including_empty_answer(
 
 
 @pytest.mark.parametrize(
-    "permission_mode",
-    [PermissionMode.ACCEPT_EDITS, PermissionMode.SOLO],
+    "permission_mode", [PermissionMode.DEFAULT, PermissionMode.SOLO]
 )
-def test_edit_modes_allow_write_but_still_prompt_for_bash(
+def test_modes_allow_write_edit_and_bash_without_permission_prompt(
     tmp_path: Path, permission_mode: PermissionMode
 ) -> None:
     service, builder, workspace_path = make_dependencies(tmp_path)
@@ -207,7 +208,7 @@ def test_edit_modes_allow_write_but_still_prompt_for_bash(
             "test-model",
             permission_mode=permission_mode,
             provider_factory=lambda url, key: provider,
-            read_line=InputScript("perform task", "n"),
+            read_line=InputScript("perform task"),
             write_out=out,
             write_err=err,
             session_service=service,
@@ -217,14 +218,11 @@ def test_edit_modes_allow_write_but_still_prompt_for_bash(
 
     assert code == 0
     assert (workspace_path / "direct.txt").read_text(encoding="utf-8") == "edited"
-    assert err.text == (
-        "tool write: started\n"
-        "tool write: success\n"
-        "tool edit: started\n"
-        "tool edit: success\n"
-        "permission required for tool bash [y/N]: "
-        "tool bash: permission_denied\n"
-    )
+    assert "permission required" not in err.text
+    assert "tool write: started\n" in err.text
+    assert "tool edit: started\n" in err.text
+    assert "tool bash: started\n" in err.text
+    assert "tool bash: success\n" in err.text
     assert out.text == "finished safely\n"
 
 
@@ -241,7 +239,7 @@ def test_default_cli_denies_write_and_returns_result_to_model(
                         ToolCall(
                             "write-denied",
                             "write",
-                            {"path": "denied.txt", "content": "must not exist"},
+                            {"path": ".env", "content": "must not exist"},
                         ),
                     )
                 )
@@ -267,7 +265,7 @@ def test_default_cli_denies_write_and_returns_result_to_model(
     )
 
     assert code == 0
-    assert not (workspace_path / "denied.txt").exists()
+    assert not (workspace_path / ".env").exists()
     assert len(provider.requests) == 2
     result_message = provider.requests[1].messages[-1]
     assert result_message.role is MessageRole.TOOL
@@ -292,7 +290,7 @@ def test_default_cli_prompts_once_then_writes_with_safe_status_output(
                         ToolCall(
                             "private-call-id",
                             "write",
-                            {"path": "created.txt", "content": sensitive},
+                            {"path": ".env", "content": sensitive},
                         ),
                     )
                 )
@@ -322,7 +320,7 @@ def test_default_cli_prompts_once_then_writes_with_safe_status_output(
     code = asyncio.run(scenario())
 
     assert code == 0
-    assert (workspace_path / "created.txt").read_text(encoding="utf-8") == sensitive
+    assert (workspace_path / ".env").read_text(encoding="utf-8") == sensitive
     assert out.text == "write complete\n"
     assert err.text == (
         "permission required for tool write [y/N]: "
@@ -331,7 +329,7 @@ def test_default_cli_prompts_once_then_writes_with_safe_status_output(
     )
     observed = out.text + err.text
     assert "private-call-id" not in observed
-    assert "created.txt" not in observed
+    assert ".env" not in observed
     assert sensitive not in observed
 
 
@@ -422,7 +420,7 @@ def test_successful_tool_run_persists_complete_v2_history_for_next_run(
             "sk-test-only",
             "test-model",
             provider_factory=lambda url, key: provider,
-            read_line=InputScript("save it", "y", "continue"),
+            read_line=InputScript("save it", "continue"),
             write_out=out,
             write_err=err,
             session_service=service,
@@ -480,7 +478,7 @@ def test_side_effect_failure_does_not_commit_and_warns_to_check_workspace(
             "sk-test-only",
             "test-model",
             provider_factory=lambda url, key: provider,
-            read_line=InputScript("write then fail", "y"),
+            read_line=InputScript("write then fail"),
             write_out=out,
             write_err=err,
             session_service=service,
@@ -507,7 +505,7 @@ def test_permission_prompt_retries_non_ascii_or_unknown_answers(
                         ToolCall(
                             "retry-write",
                             "write",
-                            {"path": "retry.txt", "content": "ok"},
+                            {"path": ".env", "content": "ok"},
                         ),
                     )
                 )
@@ -532,7 +530,7 @@ def test_permission_prompt_retries_non_ascii_or_unknown_answers(
     )
 
     assert code == 0
-    assert (workspace_path / "retry.txt").read_text(encoding="utf-8") == "ok"
+    assert (workspace_path / ".env").read_text(encoding="utf-8") == "ok"
     assert err.text.count("permission required for tool write") == 2
     assert "please answer y or n\n" in err.text
 
@@ -542,9 +540,9 @@ def test_permission_prompt_retries_non_ascii_or_unknown_answers(
     [
         (
             "write",
-            {"path": "consumer-closed.txt", "content": "must not be written"},
+            {"path": ".env", "content": "must not be written"},
             PermissionRequested,
-            "consumer-closed.txt",
+            ".env",
         ),
         (
             "ask",
@@ -629,7 +627,7 @@ def test_external_task_cancellation_during_interaction_closes_cleanly(
 ) -> None:
     service, builder, workspace_path = make_dependencies(tmp_path)
     arguments = (
-        {"path": "cancelled.txt", "content": "not written"}
+        {"path": ".env", "content": "not written"}
         if tool_name == "write"
         else {"question": "Wait here?"}
     )
@@ -662,14 +660,14 @@ def test_external_task_cancellation_during_interaction_closes_cleanly(
     assert code == 0
     assert provider.aclose_calls == 1
     assert service.list_sessions().sessions[0].turns == ()
-    assert not (workspace_path / "cancelled.txt").exists()
+    assert not (workspace_path / ".env").exists()
 
 
 @pytest.mark.parametrize("interruption", [EOFError(), KeyboardInterrupt()])
 @pytest.mark.parametrize(
     ("tool_name", "arguments"),
     [
-        ("write", {"path": "interrupted.txt", "content": "not written"}),
+        ("write", {"path": ".env", "content": "not written"}),
         ("ask", {"question": "Continue?"}),
     ],
 )
@@ -703,4 +701,4 @@ def test_interaction_eof_or_ctrl_c_closes_without_partial_turn(
     sessions = service.list_sessions().sessions
     assert len(sessions) == 1
     assert sessions[0].turns == ()
-    assert not (workspace_path / "interrupted.txt").exists()
+    assert not (workspace_path / ".env").exists()

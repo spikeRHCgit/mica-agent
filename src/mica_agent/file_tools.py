@@ -130,10 +130,6 @@ async def _read_handler(
                 request, ToolResultStatus.INVALID_ARGUMENTS, "invalid file arguments"
             )
         target = resolver.resolve(path)
-        if resolver.is_sensitive(target):
-            return _result(
-                request, ToolResultStatus.PERMISSION_DENIED, "file access denied"
-            )
         if not _is_regular_file(target):
             return _result(
                 request, ToolResultStatus.EXECUTION_FAILED, "file operation failed"
@@ -207,10 +203,6 @@ async def _write_handler(
                 request, ToolResultStatus.EXECUTION_FAILED, "file operation failed"
             )
         target = resolver.resolve(path)
-        if resolver.is_sensitive(target):
-            return _result(
-                request, ToolResultStatus.PERMISSION_DENIED, "file access denied"
-            )
         if not target.parent.is_dir() or not _is_regular_or_missing(target):
             return _result(
                 request, ToolResultStatus.EXECUTION_FAILED, "file operation failed"
@@ -262,10 +254,6 @@ async def _edit_handler(
             )
         path, old_text, new_text = arguments
         target = resolver.resolve(path)
-        if resolver.is_sensitive(target):
-            return _result(
-                request, ToolResultStatus.PERMISSION_DENIED, "file access denied"
-            )
         if not _is_regular_file(target):
             return _result(
                 request, ToolResultStatus.EXECUTION_FAILED, "file operation failed"
