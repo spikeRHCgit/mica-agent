@@ -10,6 +10,7 @@ from .interactions import (
 )
 from .models import StartupResourceSnapshot
 from .output import AssistantResponseView, ReasoningDisplayMode, ReasoningView
+from .permissions import PermissionInteractionView, PermissionResponder
 from .status import WorkPhase, WorkStatus, WorkStatusView
 from .tool_cards import (
     BashToolCard,
@@ -41,6 +42,8 @@ __all__ = [
     "MicaComposer",
     "MicaTuiApp",
     "NewOutputIndicator",
+    "PermissionInteractionView",
+    "PermissionResponder",
     "ReadToolCard",
     "ReasoningDisplayMode",
     "ReasoningView",

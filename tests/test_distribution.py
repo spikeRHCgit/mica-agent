@@ -453,6 +453,7 @@ def test_wheel_contains_only_mica_package_and_metadata(
         "mica_agent/tui/logo.py",
         "mica_agent/tui/models.py",
         "mica_agent/tui/output.py",
+        "mica_agent/tui/permissions.py",
         "mica_agent/tui/startup.py",
         "mica_agent/tui/status.py",
         "mica_agent/tui/theme.py",
@@ -519,7 +520,7 @@ def test_installed_wheel_explicitly_imports_tui(
                 "from mica_agent.context_builder import AgentFileSource\n"
                 "from mica_agent.tui import (\n"
                 " ConversationTranscript, MicaComposer, MicaTuiApp,\n"
-                " NewOutputIndicator, BashToolCard, EditToolCard, ReadToolCard, StartupResourceSnapshot,\n"
+                " NewOutputIndicator, BashToolCard, EditToolCard, PermissionInteractionView, ReadToolCard, StartupResourceSnapshot,\n"
                 " WriteToolCard,\n"
                 ")\n"
                 "snapshot = StartupResourceSnapshot(\n"
@@ -543,6 +544,7 @@ def test_installed_wheel_explicitly_imports_tui(
                 "  assert WriteToolCard.__name__ == 'WriteToolCard'\n"
                 "  assert BashToolCard.__name__ == 'BashToolCard'\n"
                 "  assert EditToolCard.__name__ == 'EditToolCard'\n"
+                "  assert PermissionInteractionView.__name__ == 'PermissionInteractionView'\n"
                 "asyncio.run(main())"
             ),
         ],

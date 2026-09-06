@@ -22,9 +22,13 @@ from mica_agent.events import (
     ToolStarted,
     UserInputRequested,
 )
+from mica_agent.interactions import PermissionResponse
 from mica_agent.jsonl_store import StoredSession
 from mica_agent.tool_contracts import ToolResultStatus
-from mica_agent.tool_presentation import ToolPresentationKind
+from mica_agent.tool_presentation import (
+    ToolPresentationKind,
+    ToolPresentationSnapshot,
+)
 
 from .composer import MicaComposer
 from .history import iter_history_views
@@ -32,11 +36,16 @@ from .interactions import (
     AskInteractionView,
     RunCancelRequester,
     UserInputResponder,
+    _call_sync,
     _is_async_callable,
 )
 from .logo import MicaLogo
 from .models import StartupResourceSnapshot
 from .output import AssistantResponseView, ReasoningDisplayMode, ReasoningView
+from .permissions import (
+    PermissionInteractionView,
+    PermissionResponder,
+)
 from .startup import StartupResourcesView
 from .status import WorkPhase, WorkStatus, WorkStatusView
 from .theme import MICA_THEME, SHELL_CSS
@@ -70,6 +79,7 @@ class MicaTuiApp(App[None]):
         tool_card_factories: Mapping[str, ToolCardFactory] | None = None,
         user_input_responder: UserInputResponder | None = None,
         run_cancel_requester: RunCancelRequester | None = None,
+        permission_responder: PermissionResponder | None = None,
     ) -> None:
         if startup_resources is not None and not isinstance(
             startup_resources, StartupResourceSnapshot
@@ -99,6 +109,13 @@ class MicaTuiApp(App[None]):
             raise TypeError(
                 "run_cancel_requester must be a synchronous callable or None"
             )
+        if permission_responder is not None and (
+            not callable(permission_responder)
+            or _is_async_callable(permission_responder)
+        ):
+            raise TypeError(
+                "permission_responder must be a synchronous callable or None"
+            )
         self._clock = clock
         self.stored_session = stored_session
         self._tool_card_factories = copy_tool_card_factories(tool_card_factories)
@@ -107,11 +124,20 @@ class MicaTuiApp(App[None]):
         self._response_views: dict[str, AssistantResponseView] = {}
         self._reasoning_views: dict[str, ReasoningView] = {}
         self._tool_cards: dict[tuple[str, str], ToolCard] = {}
+        self._prepared_presentations: dict[
+            tuple[str, str], ToolPresentationSnapshot
+        ] = {}
+        self._permission_views: dict[tuple[str, str], PermissionInteractionView] = {}
+        self._permission_interactions: dict[str, tuple[str, str]] = {}
+        self._permission_response_ids: set[str] = set()
+        self._completed_permission_interactions: set[str] = set()
+        self._active_permission_key: tuple[str, str] | None = None
         self._ask_views: dict[tuple[str, str], AskInteractionView] = {}
         self._ask_calls: dict[tuple[str, str], AskInteractionView] = {}
         self._pending_ask_calls: dict[str, str] = {}
         self._user_input_responder = user_input_responder
         self._run_cancel_requester = run_cancel_requester
+        self._permission_responder = permission_responder
         self._active_status_run_id: str | None = None
         super().__init__(ansi_color=ansi_color)
         self.register_theme(MICA_THEME)
@@ -212,6 +238,10 @@ class MicaTuiApp(App[None]):
                 if closed_card or closed_ask:
                     self.query_one(ConversationTranscript).content_added()
                 self._pending_ask_calls.pop(event.run_id, None)
+                self._clear_permission_interactions_for_run(event.run_id)
+                self._restore_composer_if_possible()
+            else:
+                self._clear_permission_interactions_for_run(event.run_id)
                 self._restore_composer_if_possible()
             if event.run_id == self._active_status_run_id:
                 status = (
@@ -247,9 +277,12 @@ class MicaTuiApp(App[None]):
             if event.tool_name != event.presentation.tool_name:
                 return False
             key = (event.run_id, event.call_id)
+            if key in self._prepared_presentations:
+                return False
             if event.presentation.kind is ToolPresentationKind.ASK:
                 if key in self._ask_calls or event.run_id in self._pending_ask_calls:
                     return False
+                self._prepared_presentations[key] = event.presentation
                 self._pending_ask_calls[event.run_id] = event.call_id
                 return True
             if key in self._tool_cards:
@@ -260,6 +293,7 @@ class MicaTuiApp(App[None]):
             )
             if card is None:
                 return False
+            self._prepared_presentations[key] = event.presentation
             self._tool_cards[key] = card
             await self.query_one("#transcript").mount(card)
             await card.wait_for_refresh()
@@ -267,13 +301,21 @@ class MicaTuiApp(App[None]):
             return True
         if isinstance(event, ToolStarted):
             if event.tool_name == "ask":
-                return self._pending_ask_calls.get(event.run_id) == event.call_id or (
-                    (event.run_id, event.call_id) in self._ask_calls
-                )
+                accepted = self._pending_ask_calls.get(
+                    event.run_id
+                ) == event.call_id or ((event.run_id, event.call_id) in self._ask_calls)
+                if accepted:
+                    self._clear_permission_for_call(
+                        event.run_id, event.call_id, event.tool_name
+                    )
+                return accepted
             card = self._tool_cards.get((event.run_id, event.call_id))
             if card is None or card.tool_name != event.tool_name:
                 return False
             card.start()
+            self._clear_permission_for_call(
+                event.run_id, event.call_id, event.tool_name
+            )
             return True
         if isinstance(event, ToolOutputDelta):
             card = self._tool_cards.get((event.run_id, event.call_id))
@@ -286,10 +328,51 @@ class MicaTuiApp(App[None]):
             card.append_output(event.text)
             self.query_one(ConversationTranscript).content_added()
             return True
+        if isinstance(event, PermissionRequested):
+            key = (event.run_id, event.call_id)
+            if self._active_permission_key is not None:
+                return False
+            if self._has_active_ask():
+                return False
+            if (
+                event.interaction_id in self._completed_permission_interactions
+                or event.interaction_id in self._permission_interactions
+            ):
+                return False
+            presentation = self._prepared_presentations.get(key)
+            if presentation is None or presentation.tool_name != event.tool_name:
+                return False
+            if presentation.kind is ToolPresentationKind.ASK:
+                if self._pending_ask_calls.get(event.run_id) != event.call_id:
+                    return False
+            else:
+                card = self._tool_cards.get(key)
+                if (
+                    card is None
+                    or card.tool_name != event.tool_name
+                    or card.state not in {ToolCardState.PENDING, ToolCardState.RUNNING}
+                ):
+                    return False
+            view = PermissionInteractionView(
+                run_id=event.run_id,
+                interaction_id=event.interaction_id,
+                presentation=presentation,
+                permission_responder=self._respond_permission,
+                run_cancel_requester=self._request_permission_cancel,
+                on_accepted=self._on_permission_accepted,
+            )
+            self._active_permission_key = key
+            self._permission_interactions[event.interaction_id] = key
+            self._permission_views[key] = view
+            await self.screen.mount(view, before="#work-status")
+            await view.wait_for_refresh()
+            self._set_composer_disabled(True)
+            view.focus()
+            self.query_one(ConversationTranscript).content_added()
+            return False
         if isinstance(event, UserInputRequested):
-            if any(
-                run_id == event.run_id and view.is_active
-                for (run_id, _interaction_id), view in self._ask_views.items()
+            if self._active_permission_key is not None or any(
+                view.is_active for view in self._ask_views.values()
             ):
                 return False
             prompt = event.prompt
@@ -345,6 +428,10 @@ class MicaTuiApp(App[None]):
                 if view is None:
                     return False
                 view.finish(event.status, event.presentation)
+                self._prepared_presentations.pop((event.run_id, event.call_id), None)
+                self._clear_permission_for_call(
+                    event.run_id, event.call_id, event.tool_name
+                )
                 self.query_one(ConversationTranscript).content_added()
                 self._restore_composer_if_possible()
                 return True
@@ -359,6 +446,10 @@ class MicaTuiApp(App[None]):
             ):
                 return False
             card.finish(event.status, event.presentation)
+            self._prepared_presentations.pop((event.run_id, event.call_id), None)
+            self._clear_permission_for_call(
+                event.run_id, event.call_id, event.tool_name
+            )
             self.query_one(ConversationTranscript).content_added()
             return True
         if not isinstance(event, TextDelta):
@@ -372,12 +463,137 @@ class MicaTuiApp(App[None]):
         self.query_one(ConversationTranscript).content_added()
         return True
 
+    def _has_active_ask(self) -> bool:
+        return bool(self._pending_ask_calls) or any(
+            view.is_active for view in self._ask_views.values()
+        )
+
+    def _respond_permission(self, response: PermissionResponse) -> bool:
+        if not isinstance(response, PermissionResponse):
+            return False
+        key = self._permission_interactions.get(response.interaction_id)
+        if (
+            key is None
+            or key != self._active_permission_key
+            or response.interaction_id in self._permission_response_ids
+            or key[0] in self._terminated_run_ids
+        ):
+            return False
+        accepted = _call_sync(self._permission_responder, response)
+        if accepted:
+            self._permission_response_ids.add(response.interaction_id)
+        return accepted
+
+    def _request_permission_cancel(self, run_id: str) -> bool:
+        key = self._active_permission_key
+        if (
+            key is None
+            or key[0] != run_id
+            or self._permission_views.get(key) is None
+            or run_id in self._terminated_run_ids
+        ):
+            return False
+        return _call_sync(self._run_cancel_requester, run_id)
+
+    def _on_permission_accepted(self, view: PermissionInteractionView) -> bool:
+        key = (view.run_id, view.presentation.call_id)
+        if self._permission_views.get(key) is not view:
+            return True
+        self._permission_views.pop(key, None)
+        interaction_id = next(
+            (
+                interaction_id
+                for interaction_id, interaction_key in self._permission_interactions.items()
+                if interaction_key == key
+            ),
+            None,
+        )
+        if interaction_id is not None:
+            self._permission_interactions.pop(interaction_id, None)
+            self._completed_permission_interactions.add(interaction_id)
+        self._active_permission_key = None
+        view.deactivate()
+        if view.parent is not None:
+            view.remove()
+        self._restore_composer_if_possible()
+        return True
+
+    def _clear_permission_for_call(
+        self, run_id: str, call_id: str, tool_name: str
+    ) -> None:
+        key = (run_id, call_id)
+        presentation = self._prepared_presentations.get(key)
+        if presentation is not None and presentation.tool_name != tool_name:
+            return
+        interaction_id = next(
+            (
+                interaction_id
+                for interaction_id, interaction_key in self._permission_interactions.items()
+                if interaction_key == key
+            ),
+            None,
+        )
+        view = self._permission_views.get(key)
+        if interaction_id is None and view is None:
+            self._prepared_presentations.pop(key, None)
+            if self._active_permission_key == key:
+                self._active_permission_key = None
+            return
+        if interaction_id is not None:
+            self._permission_interactions.pop(interaction_id, None)
+            self._permission_response_ids.discard(interaction_id)
+            self._completed_permission_interactions.add(interaction_id)
+        view = self._permission_views.pop(key, None)
+        if view is not None:
+            view.deactivate()
+            if view.parent is not None:
+                view.remove()
+        if self._active_permission_key == key:
+            self._active_permission_key = None
+        self._prepared_presentations.pop(key, None)
+        self._restore_composer_if_possible()
+
+    def _clear_permission_interactions_for_run(self, run_id: str) -> None:
+        keys = {
+            key for key in self._permission_interactions.values() if key[0] == run_id
+        }
+        for key in keys:
+            self._clear_permission_for_call(
+                key[0],
+                key[1],
+                self._prepared_presentations.get(key).tool_name
+                if self._prepared_presentations.get(key) is not None
+                else "__unknown__",
+            )
+        for key in tuple(self._prepared_presentations):
+            if key[0] == run_id:
+                self._prepared_presentations.pop(key, None)
+
+    def exit(
+        self,
+        result=None,
+        return_code: int = 0,
+        message=None,
+    ) -> None:
+        for view in tuple(self._permission_views.values()):
+            view.deactivate()
+            if view.parent is not None:
+                view.remove()
+        self._permission_views.clear()
+        self._permission_interactions.clear()
+        self._permission_response_ids.clear()
+        self._prepared_presentations.clear()
+        self._active_permission_key = None
+        super().exit(result, return_code, message)
+
     def _set_composer_disabled(self, disabled: bool) -> None:
         composer = self.query_one(MicaComposer)
         composer.disabled = disabled
 
     def _restore_composer_if_possible(self) -> None:
-        if any(view.is_active for view in self._ask_views.values()):
+        if self._has_active_ask() or any(
+            view.is_active for view in self._permission_views.values()
+        ):
             self._set_composer_disabled(True)
             return
         composer = self.query_one(MicaComposer)

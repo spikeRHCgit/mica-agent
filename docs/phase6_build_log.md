@@ -222,3 +222,18 @@ Composer 仍是 Screen 的第三个直接子节点并保持底部焦点；本切
 - 旧授权测试改为显式询问操作或受保护路径，保留生命周期和副作用断言；动态 Bash 输出测试区分默认自动执行与保守询问。安装态覆盖两模式的 Unicode 工作区写入与 continue 历史恢复。
 - 学习入口：command_risk → ToolExecutor → InteractionBroker；文件执行能力与授权策略分离；Schema 校验、权限策略和 ask 需求交互的不同职责。
 - 验收状态：返工聚焦组 192 通过；最终全量 1457 通过、2 跳过，Ruff、格式检查、离线构建和两项 diff check 通过。待 master 审查；未提交或推送 Git。
+
+# P6-07B 权限确认面板
+
+## 目标与实现
+
+- 新增独立 `PermissionInteractionView`，把权限请求作为 transcript 外的底部临时面板展示；安全详情只读取匹配 `ToolPrepared` 的 `ToolPresentationSnapshot`，Bash、文件工具和 Generic 工具分别使用固定的纯文本降级路径。
+- TUI 通过公共 `PermissionResponder` 接收一次性的 `PermissionResponse`，初始选择 Yes，ASCII 数字只定位、Enter 才提交，Esc 只调用既有 `RunCancelRequester`。严格同步回调、意外 awaitable、异常和缺失回调均在固定安全边界内处理。
+- `MicaTuiApp` 按 `(run_id, call_id)` 与 `interaction_id` 维护准备记录、活动面板和完成去重；重复、倒序、迟到、错误工具身份、错误 Run 和没有合法准备记录的权限事件不会创建可批准面板。ToolStarted、ToolFinished 和 Run 终态只收口匹配权限状态，不伪造工具生命周期。
+- 面板动态挂在唯一 work-status 与 composer 之间，composer 草稿保留并在活动 ask 或权限交互仍有效时继续禁用；面板退出后按既有焦点规则恢复，不进入 transcript、历史或会话格式。
+
+## 取舍与边界
+
+- 复用 ask 面板已有的同步回调检测、严格 `True` 判断和 awaitable 清理逻辑，不引入第二套权限策略，也不读取原始工具参数、ToolResult、工作区或 Shell 状态。
+- 权限请求的公共 `message` 仅作为事件语义，不直接渲染；异常、repr、interaction ID、call ID 和 Run ID 不进入面板文本。没有安全展示细节时使用固定说明，并保留有界滚动和纯文本换行能力。
+- 未连接真实 Provider、Broker、Engine 或 CLI，未修改事件、会话和后端权限策略；P6-08 尚未开始。
