@@ -470,6 +470,7 @@ class MicaTuiApp(App[None]):
         if view is None:
             view = AssistantResponseView()
             await self.query_one("#transcript").mount(view)
+            await view.wait_for_refresh()
             self._response_views[event.run_id] = view
         await view.append_text(event.text)
         self.query_one(ConversationTranscript).content_added()
@@ -595,6 +596,8 @@ class MicaTuiApp(App[None]):
     def stop_runtime_input(self) -> None:
         """Stop input synchronously; resource cleanup belongs to the runtime."""
         self._runtime_closed = True
+        if not self.is_running:
+            return
         for composer in self.query(MicaComposer):
             composer.disabled = True
 

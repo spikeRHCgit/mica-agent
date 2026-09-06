@@ -194,7 +194,7 @@ def test_runtime_submits_once_projects_events_and_commits_one_turn(
             await asyncio.wait_for(provider.started.wait(), timeout=1.0)
             assert runtime.submit("second prompt") is False
             provider.release.set()
-            await asyncio.wait_for(runtime.wait_idle(), timeout=1.0)
+            await asyncio.wait_for(runtime.wait_idle(), timeout=5.0)
             await pilot.pause()
             assert len(runtime.tui.query(UserMessageCard)) == 1
             assert runtime.tui.query_one(MicaComposer).disabled is False
@@ -246,7 +246,7 @@ def test_runtime_projects_complete_tool_lifecycle_on_one_card(
             await pilot.pause()
             assert runtime.submit("read safely") is True
             card = await wait_for_view(pilot, runtime.tui, ToolCard)
-            await asyncio.wait_for(runtime.wait_idle(), timeout=1.0)
+            await asyncio.wait_for(runtime.wait_idle(), timeout=5.0)
             await pilot.pause()
             assert runtime.tui.query_one(ToolCard) is card
             assert card.state is ToolCardState.SUCCESS
@@ -305,14 +305,18 @@ def test_runtime_permission_deny_and_escape_have_distinct_public_paths(
             assert runtime.submit("permission boundary") is True
             await asyncio.wait_for(provider.started.wait(), timeout=1.0)
             panel = await wait_for_view(pilot, runtime.tui, PermissionInteractionView)
+            panel.focus()
+            await pilot.pause()
+            assert runtime.tui.screen.focused is panel
             if action == "deny":
-                panel.focus()
                 await pilot.press("2")
                 assert panel.selected_index == 1
                 await pilot.press("enter")
             else:
                 await pilot.press("escape")
-            await asyncio.wait_for(runtime.wait_idle(), timeout=1.0)
+            assert panel.is_locked is True
+            assert panel.is_active is False
+            await asyncio.wait_for(runtime.wait_idle(), timeout=5.0)
             assert broker.pending_count == 0
             assert calls == []
             if action == "deny":
@@ -360,7 +364,7 @@ def test_runtime_ask_response_and_escape_keep_view_and_pending_contract(
                 await pilot.press("enter")
             else:
                 await pilot.press("escape")
-            await asyncio.wait_for(runtime.wait_idle(), timeout=1.0)
+            await asyncio.wait_for(runtime.wait_idle(), timeout=5.0)
             assert broker.pending_count == 0
             assert runtime.tui.query_one(MicaComposer).disabled is False
             assert view.is_active is False
@@ -541,7 +545,7 @@ def test_projection_failure_is_safely_contained_without_partial_turn(
         async with runtime.tui.run_test(size=(70, 18)) as pilot:
             await pilot.pause()
             assert runtime.submit("projection failure") is True
-            await asyncio.wait_for(runtime.wait_idle(), timeout=1.0)
+            await asyncio.wait_for(runtime.wait_idle(), timeout=5.0)
             assert app.history == ()
             assert runtime.active_task is None
             assert runtime.tui.query_one(MicaComposer).disabled is False

@@ -7,7 +7,8 @@
 
 ``run_interactive`` 是注入式交互核心：测试通过替身驱动
 （Provider 工厂、stdin 读取、stdout/stderr 写入），产品默认值
-分别构造真实 Provider、读取标准输入并写入标准输出。
+分别构造真实 Provider、读取标准输入并写入标准输出；正式
+``mica cli`` 默认进入 Textual TUI，``--plain`` 保留基础文字界面。
 """
 
 from __future__ import annotations
@@ -56,10 +57,12 @@ from .workspace import (
 if TYPE_CHECKING:
     from .app import MicaApp
     from .providers import Provider
+    from .tui.runtime import MicaTuiRuntime
 
 ReadLine: TypeAlias = Callable[[], Awaitable[str]]
 Write: TypeAlias = Callable[[str], None]
 ProviderFactory: TypeAlias = Callable[[str, str], "Provider"]
+TuiRunner: TypeAlias = Callable[["MicaTuiRuntime"], Awaitable[None]]
 TurnIdFactory: TypeAlias = Callable[[], str]
 Clock: TypeAlias = Callable[[], datetime]
 SessionMode: TypeAlias = Literal["new", "continue", "resume"]
@@ -80,8 +83,11 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
     cli_parser = subparsers.add_parser(
         "cli",
-        help="start the interactive chat CLI",
-        description="Interactive text chat with an OpenAI-compatible provider.",
+        help="start the interactive chat CLI (Textual TUI by default)",
+        description=(
+            "Interactive chat with an OpenAI-compatible provider. "
+            "Starts the Textual TUI by default; use --plain for the basic text interface."
+        ),
     )
     selection = cli_parser.add_mutually_exclusive_group()
     selection.add_argument(
@@ -99,6 +105,11 @@ def main() -> None:
         help="choose a healthy session from the current workspace",
     )
     cli_parser.add_argument(
+        "--plain",
+        action="store_true",
+        help="use the basic text interface instead of the default Textual TUI",
+    )
+    cli_parser.add_argument(
         "--permission-mode",
         choices=("default", "solo"),
         default="default",
@@ -113,7 +124,7 @@ def main() -> None:
         "default": PermissionMode.DEFAULT,
         "solo": PermissionMode.SOLO,
     }[args.permission_mode]
-    sys.exit(_main_cli(args.session_mode, permission_mode))
+    sys.exit(_main_cli(args.session_mode, permission_mode, plain=args.plain))
 
 
 def _load_config() -> tuple[str, str, str] | None:
@@ -132,6 +143,8 @@ def _load_config() -> tuple[str, str, str] | None:
 def _main_cli(
     session_mode: SessionMode = "new",
     permission_mode: PermissionMode = PermissionMode.DEFAULT,
+    *,
+    plain: bool = False,
 ) -> int:
     """mica cli 同步入口：手动事件循环以支持 Ctrl+C 优雅退出。"""
     config = _load_config()
@@ -148,6 +161,7 @@ def _main_cli(
                 model,
                 session_mode=session_mode,
                 permission_mode=permission_mode,
+                plain=plain,
             )
         )
         try:
@@ -179,6 +193,8 @@ async def run_interactive(
     *,
     session_mode: SessionMode = "new",
     permission_mode: PermissionMode = PermissionMode.DEFAULT,
+    plain: bool = True,
+    tui_runner: TuiRunner | None = None,
     provider_factory: ProviderFactory | None = None,
     read_line: ReadLine | None = None,
     write_out: Write | None = None,
@@ -232,6 +248,8 @@ async def run_interactive(
         permission_mode,
         turn_id_factory,
         clock,
+        plain=plain,
+        tui_runner=tui_runner,
     )
 
 
@@ -250,6 +268,9 @@ async def _run_selected_session(
     permission_mode: PermissionMode,
     turn_id_factory: TurnIdFactory | None,
     clock: Clock | None,
+    *,
+    plain: bool,
+    tui_runner: TuiRunner | None,
 ) -> int:
     from .app import MicaApp
 
@@ -320,17 +341,54 @@ async def _run_selected_session(
         err("mica: unable to initialize application\n")
         return 2
 
+    if plain:
+        try:
+            await _interact(app, read, out, err)
+        except asyncio.CancelledError:
+            # Ctrl+C：取消当前 Run 后完成清理并正常退出。
+            pass
+        except Exception:  # noqa: BLE001 - do not expose session details
+            err("error: session unavailable\n")
+            return 2
+        finally:
+            await app.aclose()
+        return 0
+
     try:
-        await _interact(app, read, out, err)
+        from .tui.models import StartupResourceSnapshot
+        from .tui.runtime import MicaTuiRuntime
+
+        startup_resources = StartupResourceSnapshot(
+            system_prompt_name="Mica built-in system prompt",
+            agent_sources=context.loaded_sources,
+            tool_names=tuple(spec.name for spec in executor.tool_specs),
+            skill_names=(),
+            extension_names=(),
+        )
+        runtime = MicaTuiRuntime(
+            app,
+            startup_resources=startup_resources,
+            stored_session=selected,
+        )
+    except Exception:  # noqa: BLE001 - TUI startup diagnostics stay safe
+        await app.aclose()
+        err("mica: unable to start terminal interface\n")
+        return 2
+
+    try:
+        await (tui_runner or _default_tui_runner)(runtime)
     except asyncio.CancelledError:
-        # Ctrl+C：取消当前 Run 后完成清理并正常退出。
-        pass
-    except Exception:  # noqa: BLE001 - do not expose session details
-        err("error: session unavailable\n")
+        raise
+    except Exception:  # noqa: BLE001 - TUI details stay private
+        err("mica: unable to start terminal interface\n")
         return 2
     finally:
-        await app.aclose()
+        await runtime.aclose()
     return 0
+
+
+async def _default_tui_runner(runtime: MicaTuiRuntime) -> None:
+    await runtime.tui.run_async()
 
 
 def _assemble_session(

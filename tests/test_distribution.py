@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import tarfile
+import textwrap
 import threading
 import venv
 import zipfile
@@ -683,8 +684,11 @@ def snapshot_files(root: Path) -> set[Path]:
 @pytest.mark.parametrize(
     "entry",
     [
-        pytest.param(lambda d: [d.mica, "cli"], id="console"),
-        pytest.param(lambda d: [d.python, "-m", "mica_agent", "cli"], id="module"),
+        pytest.param(lambda d: [d.mica, "cli", "--plain"], id="console"),
+        pytest.param(
+            lambda d: [d.python, "-m", "mica_agent", "cli", "--plain"],
+            id="module",
+        ),
     ],
 )
 def test_installed_cli_exits_cleanly_on_blank_input_eof(
@@ -759,7 +763,7 @@ def test_installed_wheel_restores_session_from_unicode_workspace(
     with LoopbackSSEServer(("first model reply", "second model reply")) as server:
         environment["MICA_API_URL"] = server.base_url
         first = run_command(
-            [dist.mica, "cli"],
+            [dist.mica, "cli", "--plain"],
             cwd=workspace,
             environment=environment,
             input_text=first_prompt + "\n",
@@ -790,7 +794,7 @@ def test_installed_wheel_restores_session_from_unicode_workspace(
         assert len(tuple(store.session_directory.glob("*.jsonl"))) == 1
 
         second = run_command(
-            [dist.mica, "cli", "--continue"],
+            [dist.mica, "cli", "--continue", "--plain"],
             cwd=workspace,
             environment=environment,
             input_text=second_prompt + "\n",
@@ -854,7 +858,7 @@ def test_installed_wheel_loads_prompt_and_agents_outside_repository(
     with LoopbackSSEServer(("installed response",)) as server:
         environment["MICA_API_URL"] = server.base_url
         result = run_command(
-            [dist.mica, "cli"],
+            [dist.mica, "cli", "--plain"],
             cwd=workspace,
             environment=environment,
             input_text="installed question\n",
@@ -935,7 +939,7 @@ def test_installed_wheel_runs_bash_with_git_bash_in_unicode_workspace(
     ) as server:
         environment["MICA_API_URL"] = server.base_url
         result = run_command(
-            [dist.mica, "cli", "--permission-mode", "default"],
+            [dist.mica, "cli", "--plain", "--permission-mode", "default"],
             cwd=workspace,
             environment=environment,
             input_text="run the check\ny\n",
@@ -974,8 +978,14 @@ def test_installed_cli_missing_environment_variables_exit_two(
 ) -> None:
     """完整安装态 `mica cli` 缺环境变量：两入口各执行一次，退出码 2、诊断一致。"""
     dist = full_distribution
-    console: EntryFactory = lambda d: [d.mica, "cli"]
-    module: EntryFactory = lambda d: [d.python, "-m", "mica_agent", "cli"]
+    console: EntryFactory = lambda d: [d.mica, "cli", "--plain"]
+    module: EntryFactory = lambda d: [
+        d.python,
+        "-m",
+        "mica_agent",
+        "cli",
+        "--plain",
+    ]
     results = [
         run_command(
             console(dist),
@@ -1026,13 +1036,13 @@ def test_installed_wheel_structured_ask_and_continue_restore_tool_history(
     ) as server:
         environment["MICA_API_URL"] = server.base_url
         first = run_command(
-            [dist.mica, "cli"],
+            [dist.mica, "cli", "--plain"],
             cwd=workspace,
             environment=environment,
             input_text="start\n2\n",
         )
         second = run_command(
-            [dist.mica, "cli", "--continue"],
+            [dist.mica, "cli", "--continue", "--plain"],
             cwd=workspace,
             environment=environment,
             input_text="continue\n",
@@ -1164,13 +1174,13 @@ def test_installed_wheel_write_and_continue_restore_complete_tool_history(
     with LoopbackToolSSEServer() as server:
         environment["MICA_API_URL"] = server.base_url
         first = run_command(
-            [dist.mica, "cli", "--permission-mode", mode],
+            [dist.mica, "cli", "--plain", "--permission-mode", mode],
             cwd=workspace,
             environment=environment,
             input_text="create the target\n",
         )
         second = run_command(
-            [dist.mica, "cli", "--continue", "--permission-mode", mode],
+            [dist.mica, "cli", "--continue", "--plain", "--permission-mode", mode],
             cwd=workspace,
             environment=environment,
             input_text="continue without rewriting\n",
@@ -1220,4 +1230,131 @@ def test_installed_wheel_write_and_continue_restore_complete_tool_history(
     assert sensitive not in observed_output
     assert str(workspace) not in observed_output
     assert '"format_version":3' in raw
+    assert server._thread.is_alive() is False
+
+
+def test_installed_wheel_default_tui_tool_dialog_and_continue_restore(
+    full_distribution: InstalledDistribution,
+) -> None:
+    """Installed wheel: injected Pilot runner covers default TUI and continue."""
+    dist = full_distribution
+    case_root = dist.outside_repository / "P6-09 TUI 工作区"
+    home = case_root / "隔离 HOME"
+    workspace = case_root / "工作区 with spaces"
+    home.mkdir(parents=True)
+    workspace.mkdir(parents=True)
+    data_root = home / ".mica"
+    workspace_identity = resolve_workspace(workspace)
+    service = SessionService(JsonlSessionStore(workspace_identity, data_root))
+    environment = cli_environment(home, fake_credentials=True)
+    fake_key = "sk-p6-09-loopback-key"
+    environment.update(MICA_API_KEY=fake_key, MICA_MODEL="installed-tui-model")
+
+    driver = textwrap.dedent(
+        """
+        import asyncio
+        import os
+
+        from mica_agent.cli import run_interactive
+        from mica_agent.permissions import PermissionMode
+        from mica_agent.tui.output import AssistantResponseView
+        from mica_agent.tui.tool_cards import ToolCard, ToolCardState
+
+        async def runner(runtime):
+            async with runtime.tui.run_test(size=(80, 24)) as pilot:
+                await pilot.pause()
+                assert runtime.submit(PROMPT) is True
+                await runtime.wait_idle()
+                for _ in range(100):
+                    if runtime.tui.query(AssistantResponseView):
+                        break
+                    await pilot.pause()
+                else:
+                    raise AssertionError("TUI response view did not mount")
+                responses = [
+                    view.text for view in runtime.tui.query(AssistantResponseView)
+                ]
+                assert EXPECTED in responses[-1]
+                if CONTINUE:
+                    assert "first tool answer" in responses
+                cards = list(runtime.tui.query(ToolCard))
+                if CONTINUE is False:
+                    assert len(cards) == 1
+                    assert cards[0].state is ToolCardState.SUCCESS
+                assert runtime.tui.query_one("#work-status").render().plain.startswith(
+                    "Mica · done"
+                )
+
+        async def main():
+            code = await run_interactive(
+                os.environ["MICA_API_URL"],
+                os.environ["MICA_API_KEY"],
+                os.environ["MICA_MODEL"],
+                session_mode=SESSION_MODE,
+                permission_mode=PermissionMode.SOLO,
+                plain=False,
+                tui_runner=runner,
+            )
+            assert code == 0
+
+        asyncio.run(main())
+        print("p6-09-tui-driver-ok")
+        """
+    )
+
+    def run_driver(
+        session_mode: str, prompt: str, expected: str, continue_run: bool
+    ) -> subprocess.CompletedProcess[str]:
+        source = (
+            driver.replace("SESSION_MODE", repr(session_mode))
+            .replace("PROMPT", repr(prompt))
+            .replace("EXPECTED", repr(expected))
+            .replace("CONTINUE", repr(continue_run))
+        )
+        return run_command(
+            [dist.python, "-c", source],
+            cwd=workspace,
+            environment=environment,
+        )
+
+    with LoopbackToolSSEServer(
+        arguments={"path": "目标文件.txt", "content": "authorized content"},
+    ) as server:
+        environment["MICA_API_URL"] = server.base_url
+        first = run_driver("new", "installed TUI write", "first tool answer", False)
+        second = run_driver(
+            "continue", "installed TUI continue", "continued answer", True
+        )
+
+    assert first.returncode == 0, first.stderr
+    assert first.stdout == "p6-09-tui-driver-ok\n"
+    assert second.returncode == 0, second.stderr
+    assert second.stdout == "p6-09-tui-driver-ok\n"
+    assert first.stderr == ""
+    assert second.stderr == ""
+    observed = first.stdout + first.stderr + second.stdout + second.stderr
+    assert fake_key not in observed
+    assert str(workspace) not in observed
+    assert (workspace / "目标文件.txt").read_text(encoding="utf-8") == (
+        "authorized content"
+    )
+    listed = service.list_sessions()
+    assert listed.problems == ()
+    assert len(listed.sessions) == 1
+    assert len(listed.sessions[0].turns) == 2
+    assert len(server.requests) == 3
+    assert server.requests[1]["messages"][-1]["role"] == "tool"
+    assert server.requests[2]["messages"][-1] == {
+        "role": "user",
+        "content": "installed TUI continue",
+    }
+    assert server.requests[2]["messages"][1]["content"] == "installed TUI write"
+    assert server.requests[2]["messages"][2]["role"] == "assistant"
+    assert server.requests[2]["messages"][3]["role"] == "tool"
+    raw = next(service.store.session_directory.glob("*.jsonl")).read_text(
+        encoding="utf-8"
+    )
+    assert raw.count('"format_version":3') == 3
+    assert fake_key not in raw
+    assert str(workspace) not in observed
     assert server._thread.is_alive() is False

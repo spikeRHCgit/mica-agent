@@ -252,3 +252,23 @@ Composer 仍是 Screen 的第三个直接子节点并保持底部焦点；本切
 - 正常完成、真实取消、消费者关闭、重复关闭和 Provider 未暴露内部信息的代表测试使用临时会话目录与假 Provider；不连接外部网络、不使用真实凭据、不执行危险命令。
 - 取消和关闭不伪造 `RunCancelled`、工具结果或完成事件；pending 交互交给既有 Broker/Engine 清理，未完成 Run 不写入会话，Provider 由 MicaApp 保持幂等关闭。
 - P6-09 默认 CLI 路由、安装态完整对话和真实 Provider 接入尚未开始。
+
+# P6-09 CLI 路由与安装态闭环
+
+## 目标
+
+将已完成的 Textual TUI 接入正式 `mica cli` 装配链路：默认启动 TUI，`--plain` 保留基础文字界面，并让两种前端共享同一套会话选择、上下文、系统提示词、工具、权限模式、Provider 与 `MicaApp`。
+
+## 关键装配与路由
+
+- CLI 先完成工作区、SessionService、会话选择、过期清理、一次性 ContextBuilder 构建、系统提示词构建、InteractionBroker、固定顺序工具注册、ToolExecutor、Provider 和 MicaApp 装配，再按 `--plain` 选择前端。
+- TUI 路径使用 `MicaTuiRuntime`，注入本次选中的 `StoredSession`、`ContextBuildResult.loaded_sources` 和实际 `ToolExecutor.tool_specs` 生成的 `StartupResourceSnapshot`；Skill/扩展保持空集合。
+- 直接调用 `run_interactive()` 的既有测试/调用方继续默认使用 plain，正式 `mica cli` 明确传入默认 TUI 路由。
+
+## 安装态闭环
+
+安装态验证使用仓库外、隔离 HOME、包含 Unicode 与空格的工作区、loopback SSE 和虚构凭据；TUI 通过最小 runner 接缝使用 Textual Pilot 验证工具对话、退出和 `--continue` 恢复，不通过源码工作树冒充安装态。
+
+## 安全与生命周期边界
+
+TUI runner 只接收已装配的 `MicaTuiRuntime`，不接收 Provider、Engine、Broker、Store 或凭据。TUI 正常退出、runner 异常、主任务取消和未挂载 Screen 的构造失败路径均最终调用 runtime/App/Provider 清理；启动失败使用固定安全诊断，不回显凭据、URL、绝对路径、原始异常或 traceback。P6-10 尚未开始。
