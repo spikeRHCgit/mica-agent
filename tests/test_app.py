@@ -146,16 +146,23 @@ async def _collect(
     app: MicaApp,
     prompt: str,
     collected: list[EngineEvent] | None = None,
+    *,
+    cancellation: CancellationToken | None = None,
 ) -> list[EngineEvent]:
     if collected is None:
         collected = []
-    async for event in app.run(prompt):
+    async for event in app.run(prompt, cancellation=cancellation):
         collected.append(event)
     return collected
 
 
-def _run_collect(app: MicaApp, prompt: str) -> list[EngineEvent]:
-    return asyncio.run(_collect(app, prompt))
+def _run_collect(
+    app: MicaApp,
+    prompt: str,
+    *,
+    cancellation: CancellationToken | None = None,
+) -> list[EngineEvent]:
+    return asyncio.run(_collect(app, prompt, cancellation=cancellation))
 
 
 def _user(content: str) -> Message:
@@ -206,6 +213,23 @@ def test_non_str_prompt_is_rejected_before_provider() -> None:
         _run_collect(app, 123)  # type: ignore[arg-type]
 
     assert provider.requests == []
+
+
+def test_run_accepts_the_same_cancellation_token_and_preserves_default_behavior() -> (
+    None
+):
+    provider = _ScriptedProvider([[Finish()]])
+    app = _make_app(provider)
+    token = CancellationToken()
+    token.cancel()
+    events = _run_collect(app, "cancelled", cancellation=token)
+    assert isinstance(events[-1], RunCancelled)
+    assert provider.requests == []
+
+    with pytest.raises(
+        TypeError, match="cancellation must be a CancellationToken or None"
+    ):
+        _run_collect(app, "invalid", cancellation=object())  # type: ignore[arg-type]
 
 
 def test_each_run_selects_reasoning_effort_without_rebuilding_header() -> None:

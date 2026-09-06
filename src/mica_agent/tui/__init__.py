@@ -1,6 +1,8 @@
 """Mica Textual TUI 的显式导入入口。"""
 
-from .app import MicaTuiApp
+from typing import TYPE_CHECKING
+
+from .app import MicaTuiApp, RunRequester
 from .composer import MicaComposer
 from .interactions import (
     AskInteractionView,
@@ -30,6 +32,18 @@ from .transcript import (
     NewOutputIndicator,
 )
 
+if TYPE_CHECKING:
+    from .runtime import MicaTuiRuntime
+
+
+def __getattr__(name: str):
+    if name == "MicaTuiRuntime":
+        from .runtime import MicaTuiRuntime
+
+        return MicaTuiRuntime
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 __all__ = [
     "AskInteractionView",
     "AssistantResponseView",
@@ -41,6 +55,7 @@ __all__ = [
     "HistoricalToolRecordView",
     "MicaComposer",
     "MicaTuiApp",
+    "MicaTuiRuntime",
     "NewOutputIndicator",
     "PermissionInteractionView",
     "PermissionResponder",
@@ -48,6 +63,7 @@ __all__ = [
     "ReasoningDisplayMode",
     "ReasoningView",
     "RunCancelRequester",
+    "RunRequester",
     "StartupResourceSnapshot",
     "ToolCard",
     "ToolCardFactory",

@@ -39,11 +39,12 @@
 | `src/mica_agent/tool_presentation.py` | 工具展示快照和生成边界；提供五个内置工具与未知工具的安全 payload、编辑逐行差异、状态映射和深层不可变快照。 |
 | `src/mica_agent/tool_registry.py` | 进程内工具注册表；保存 ToolSpec 与异步 handler，提供原子注册、确定性列表、重复拒绝和按名解析。 |
 | `src/mica_agent/tui/__init__.py` | Textual TUI 包的显式导入入口；公开 `MicaTuiApp`、Composer、启动资源快照、模型输出视图以及 transcript 滚动与历史记录类型，不扩展 `mica_agent` 顶层公共 API。 |
-| `src/mica_agent/tui/app.py` | Textual 外壳与 Engine 公共事件投影边界；建立 transcript、唯一 work-status 和可编辑 composer 三段稳定布局，接收已加载的 `StoredSession` 恢复历史，按 Run/seq 隔离并追加模型思考与正式回复视图，同时驱动唯一工作状态条和 read/write/edit/bash 工具卡片生命周期及 Bash 动态输出投影；不连接真实业务运行时。 |
+| `src/mica_agent/tui/app.py` | Textual 外壳与 Engine 公共事件投影边界；建立 transcript、唯一 work-status 和可编辑 composer 三段稳定布局，接收已加载的 `StoredSession` 恢复历史，按 Run/seq 隔离并追加模型思考与正式回复视图，同时驱动唯一工作状态条和 read/write/edit/bash 工具卡片生命周期及 Bash 动态输出投影；提供同步 Run 提交与运行期交互清理接缝，不拥有业务 Run。 |
 | `src/mica_agent/tui/composer.py` | TUI 专用的可编辑输入组件；负责软换行、真实换行、按显示行数 1～8 行自动增高与内部滚动、溢出提示、长粘贴折叠原子片段、原文还原提交消息与安全展示快照。 |
 | `src/mica_agent/tui/logo.py` | transcript 顶部的只读响应式 Mica Logo；按可用宽度切换完整、紧凑与纯文本形态。 |
 | `src/mica_agent/tui/interactions.py` | ask 结构化交互面板与只读历史 ask 记录；消费公开 AskPrompt，提供可注入的响应/取消接缝、选项导航、自定义回答、备注、终态原地收口和安全展开，不连接 Broker、Engine、Provider 或 Store。 |
 | `src/mica_agent/tui/permissions.py` | 权限请求底部确认面板；消费 ToolPrepared 的安全展示快照与公共 PermissionResponse 接缝，提供一次性 Yes/No、Esc 取消、严格同步回调和无敏感信息的纯文本降级展示。 |
+| `src/mica_agent/tui/runtime.py` | TUI 运行适配控制器；集中拥有唯一活动 Run 的 CancellationToken、消费任务、真实 run_id 和 `MicaApp.run()` 事件流，顺序投影事件、转发公共交互响应，并在 TUI 退出或 `aclose()` 时按取消、等待流、清理 UI、关闭 MicaApp 的顺序释放资源。 |
 | `src/mica_agent/tui/paste.py` | TUI 内长粘贴折叠片段的模型与源文本判定；按逻辑行阈值决定是否折叠，并提供不可展开的紧凑摘要与真实原文快照。 |
 | `src/mica_agent/tui/history.py` | `StoredSession` 到 TUI 历史视图的只读投影；按持久化顺序产出历史用户卡片、ask、read/write/edit/bash 正式卡片和紧凑工具记录，不重放 Run、不重新执行工具、不读取会话存储。 |
 | `src/mica_agent/tui/transcript.py` | transcript 容器、用户消息卡片与历史工具记录；提供底部自动跟随、用户上滚离底检测、唯一 `↓ new output` 提示与返回底部动作，展示提交时保存的紧凑显示快照，不把用户原始文本解释为 Markdown，也不展开工具细节。 |

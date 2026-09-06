@@ -237,3 +237,18 @@ Composer 仍是 Screen 的第三个直接子节点并保持底部焦点；本切
 - 复用 ask 面板已有的同步回调检测、严格 `True` 判断和 awaitable 清理逻辑，不引入第二套权限策略，也不读取原始工具参数、ToolResult、工作区或 Shell 状态。
 - 权限请求的公共 `message` 仅作为事件语义，不直接渲染；异常、repr、interaction ID、call ID 和 Run ID 不进入面板文本。没有安全展示细节时使用固定说明，并保留有界滚动和纯文本换行能力。
 - 未连接真实 Provider、Broker、Engine 或 CLI，未修改事件、会话和后端权限策略；P6-08 尚未开始。
+
+# P6-08 运行控制器与取消收口
+
+## 目标与实现
+
+- 新增 `MicaTuiRuntime`，公开用法为先用已装配的 `MicaApp` 构造 `runtime = MicaTuiRuntime(app)`，再运行 `await runtime.tui.run_async()` 或在测试中使用 `async with runtime.tui.run_test()`；外层也可直接调用 `await runtime.aclose()`。
+- 控制器集中拥有唯一活动 Run 的 `CancellationToken`、消费任务、真实 `run_id` 和 `MicaApp.run()` 流引用，使用 `async with aclosing(...)` 顺序投影 `EngineEvent`，并通过 `MicaApp.respond_interaction()` 转发权限与 ask 响应。
+- `MicaApp.run()` 增加向后兼容的 `cancellation` 关键字接缝；原有调用保持有效，合法 token 原样传入 Engine，成功提交路径继续只由 MicaApp 写入一个完整 `TurnEntry`。
+- TUI 增加同步 `RunRequester` 提交接缝；运行期间锁定 composer，第二次提交、迟到取消和关闭后的交互均被拒绝。TUI 退出与 runtime `aclose()` 共用停止输入、取消活动 token、等待消费任务、清理临时交互、关闭 MicaApp 的生命周期核心。
+
+## 边界与验证
+
+- 正常完成、真实取消、消费者关闭、重复关闭和 Provider 未暴露内部信息的代表测试使用临时会话目录与假 Provider；不连接外部网络、不使用真实凭据、不执行危险命令。
+- 取消和关闭不伪造 `RunCancelled`、工具结果或完成事件；pending 交互交给既有 Broker/Engine 清理，未完成 Run 不写入会话，Provider 由 MicaApp 保持幂等关闭。
+- P6-09 默认 CLI 路由、安装态完整对话和真实 Provider 接入尚未开始。

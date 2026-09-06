@@ -62,6 +62,8 @@ from .transcript import (
     UserMessageCard,
 )
 
+RunRequester = Callable[[str], bool]
+
 
 class MicaTuiApp(App[None]):
     """Textual 外壳及现有 Engine 公共事件的前端投影边界。"""
@@ -80,6 +82,7 @@ class MicaTuiApp(App[None]):
         user_input_responder: UserInputResponder | None = None,
         run_cancel_requester: RunCancelRequester | None = None,
         permission_responder: PermissionResponder | None = None,
+        run_requester: RunRequester | None = None,
     ) -> None:
         if startup_resources is not None and not isinstance(
             startup_resources, StartupResourceSnapshot
@@ -116,6 +119,13 @@ class MicaTuiApp(App[None]):
             raise TypeError(
                 "permission_responder must be a synchronous callable or None"
             )
+        if run_requester is not None and (
+            not callable(run_requester) or _is_async_callable(run_requester)
+        ):
+            raise TypeError("run_requester must be a synchronous callable or None")
+        self._run_requester = run_requester
+        self._run_active = False
+        self._runtime_closed = False
         self._clock = clock
         self.stored_session = stored_session
         self._tool_card_factories = copy_tool_card_factories(tool_card_factories)
@@ -163,6 +173,8 @@ class MicaTuiApp(App[None]):
 
     async def project_engine_event(self, event: EngineEvent) -> bool:
         """Project one public Engine event into this TUI."""
+        if self._runtime_closed:
+            return False
         if isinstance(event, RunStarted):
             if event.run_id in self._last_seq:
                 return False
@@ -469,7 +481,7 @@ class MicaTuiApp(App[None]):
         )
 
     def _respond_permission(self, response: PermissionResponse) -> bool:
-        if not isinstance(response, PermissionResponse):
+        if not isinstance(response, PermissionResponse) or self._runtime_closed:
             return False
         key = self._permission_interactions.get(response.interaction_id)
         if (
@@ -487,7 +499,8 @@ class MicaTuiApp(App[None]):
     def _request_permission_cancel(self, run_id: str) -> bool:
         key = self._active_permission_key
         if (
-            key is None
+            self._runtime_closed
+            or key is None
             or key[0] != run_id
             or self._permission_views.get(key) is None
             or run_id in self._terminated_run_ids
@@ -575,6 +588,24 @@ class MicaTuiApp(App[None]):
         return_code: int = 0,
         message=None,
     ) -> None:
+        self.stop_runtime_input()
+        self.clear_runtime_interactions()
+        super().exit(result, return_code, message)
+
+    def stop_runtime_input(self) -> None:
+        """Stop input synchronously; resource cleanup belongs to the runtime."""
+        self._runtime_closed = True
+        for composer in self.query(MicaComposer):
+            composer.disabled = True
+
+    def clear_runtime_interactions(self) -> None:
+        """Detach temporary interaction references without inventing events."""
+        for view in self._ask_views.values():
+            if view.is_active:
+                view.finish(ToolResultStatus.CANCELLED)
+        self._ask_views.clear()
+        self._ask_calls.clear()
+        self._pending_ask_calls.clear()
         for view in tuple(self._permission_views.values()):
             view.deactivate()
             if view.parent is not None:
@@ -584,29 +615,65 @@ class MicaTuiApp(App[None]):
         self._permission_response_ids.clear()
         self._prepared_presentations.clear()
         self._active_permission_key = None
-        super().exit(result, return_code, message)
+
+    def hold_run_input(self) -> None:
+        """Lock the composer from synchronous acceptance through stream cleanup."""
+        self._run_active = True
+        self._set_composer_disabled(True)
+
+    def release_run_input(self, run_id: str | None, *, interrupted: bool) -> None:
+        """Finish UI-only cleanup even when no terminal event could be projected."""
+        if run_id is not None:
+            self._terminated_run_ids.add(run_id)
+            self._pending_ask_calls.pop(run_id, None)
+            self._clear_permission_interactions_for_run(run_id)
+            for (owner, _), view in self._ask_views.items():
+                if owner == run_id and view.is_active:
+                    view.finish(ToolResultStatus.CANCELLED)
+        if interrupted:
+            for status in self.query(WorkStatusView):
+                status.finish(WorkStatus.INTERRUPT)
+        self._run_active = False
+        if self.query(MicaComposer):
+            self._restore_composer_if_possible()
+
+    async def finish_interrupted_output(self, run_id: str | None) -> None:
+        """Freeze partial text without marking it as a successful reply."""
+        view = self._response_views.get(run_id) if run_id is not None else None
+        if view is not None and view.is_mounted and not self._runtime_closed:
+            await view.finish(stable_markdown=False)
 
     def _set_composer_disabled(self, disabled: bool) -> None:
         composer = self.query_one(MicaComposer)
         composer.disabled = disabled
 
     def _restore_composer_if_possible(self) -> None:
-        if self._has_active_ask() or any(
-            view.is_active for view in self._permission_views.values()
-        ):
-            self._set_composer_disabled(True)
+        composers = self.query(MicaComposer)
+        if not composers:
             return
-        composer = self.query_one(MicaComposer)
+        composer = composers.first()
+        if (
+            self._runtime_closed
+            or self._run_active
+            or self._has_active_ask()
+            or self._permission_views
+        ):
+            composer.disabled = True
+            return
         composer.disabled = False
         composer.focus()
 
     def on_mica_composer_submitted(self, message: MicaComposer.Submitted) -> None:
         """收到有效提交后，在 transcript 中追加用户消息卡片。"""
-        if self.query_one(MicaComposer).disabled:
+        if self.query_one(MicaComposer).disabled or self._runtime_closed:
             return
+        if self._run_requester is not None:
+            if not _call_sync(self._run_requester, message.text):
+                return
+            self.hold_run_input()
         transcript = self.query_one(ConversationTranscript)
         transcript.mount(UserMessageCard(message))
         transcript.content_added()
 
 
-__all__ = ["MicaTuiApp"]
+__all__ = ["MicaTuiApp", "RunRequester"]

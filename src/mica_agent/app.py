@@ -8,6 +8,7 @@ from contextlib import aclosing
 from datetime import UTC, datetime
 from uuid import uuid4
 
+from .cancellation import CancellationToken
 from .context_builder import ContextBuilder, ContextBuildResult
 from .engine import AgentEngine, RunIdFactory
 from .events import EngineEvent, ErrorCategory, RunCompleted, RunFailed
@@ -145,6 +146,7 @@ class MicaApp:
         prompt: str,
         *,
         reasoning_effort: ReasoningEffort = ReasoningEffort.OFF,
+        cancellation: CancellationToken | None = None,
     ) -> AsyncIterator[EngineEvent]:
         """启动一次 Run，并仅在 RunCompleted 后提交完整 TurnEntry。"""
         if self._closed:
@@ -155,6 +157,8 @@ class MicaApp:
             raise ValueError("prompt must be a non-empty, non-blank string")
         if not isinstance(reasoning_effort, ReasoningEffort):
             raise TypeError("reasoning_effort must be a ReasoningEffort")
+        if cancellation is not None and not isinstance(cancellation, CancellationToken):
+            raise TypeError("cancellation must be a CancellationToken or None")
         if self._active_run:
             raise AppBusyError("another run is already active")
 
@@ -177,6 +181,7 @@ class MicaApp:
             async with aclosing(
                 self._engine.run(
                     request,
+                    cancellation=cancellation,
                     completed_messages_sink=completed_messages.append,
                     completed_tool_presentations_sink=completed_tool_presentations.append,
                 )
