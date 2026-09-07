@@ -82,10 +82,7 @@ def test_rendered_overflow_hint_preserves_counted_hidden_rows() -> None:
             await pilot.pause()
             composer.scroll_y = 0
             await pilot.pause()
-            content_top = composer.content_region.y - composer.region.y
-            rendered = composer.render_line(
-                content_top + composer.content_region.height - 1
-            )
+            rendered = composer.render_line(composer.content_region.height - 1)
             assert composer.hint_below in rendered.text
             assert "x" in rendered.text
             assert (
@@ -136,13 +133,7 @@ def test_overflow_hints_survive_full_render_chain(
             assert composer.hint_above == ""
             assert composer.hint_below == f"\u2193 {hidden} more"
 
-            bottom_y = (
-                composer.content_region.y
-                - composer.region.y
-                + composer.content_region.height
-                - 1
-            )
-            bottom = composer.render_line(bottom_y)
+            bottom = composer.render_line(composer.content_region.height - 1)
             assert composer.hint_below in bottom.text
             assert all(segment.style is not None for segment in bottom)
 
@@ -152,8 +143,7 @@ def test_overflow_hints_survive_full_render_chain(
             assert composer.hint_above == f"\u2191 {hidden} more"
             assert composer.hint_below == ""
 
-            top_y = composer.content_region.y - composer.region.y
-            top = composer.render_line(top_y)
+            top = composer.render_line(0)
             assert composer.hint_above in top.text
             assert all(segment.style is not None for segment in top)
 

@@ -104,14 +104,15 @@ class AssistantResponseView(Static):
         if stable_markdown:
             await self.markdown.update(self._text)
         self._is_streaming = False
-        cursor = self.query(".streaming-cursor").first()
-        if cursor is not None:
-            await cursor.remove()
+        cursors = self.query(".streaming-cursor")
+        if cursors:
+            await cursors.first().remove()
 
     def _position_cursor(self) -> None:
-        cursor = self.query(".streaming-cursor").first()
-        if cursor is None:
+        cursors = self.query(".streaming-cursor")
+        if not cursors:
             return
+        cursor = cursors.first()
         best: tuple[int, int] | None = None
         for widget in self.markdown.query("*"):
             lines = widget.render_lines(

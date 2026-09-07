@@ -241,6 +241,7 @@ def test_empty_session_keeps_startup_only_and_exposes_following_transcript() -> 
             await pilot.pause()
             transcript = app.query_one(ConversationTranscript)
             assert transcript.is_following is True
+            assert transcript.scroll_y == 0
             assert transcript.has_pending_new_output is False
             assert list(app.query(UserMessageCard)) == []
             assert list(app.query(AssistantResponseView)) == []

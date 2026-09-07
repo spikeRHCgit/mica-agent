@@ -30,6 +30,7 @@ from mica_agent.tool_presentation import (
     ToolPresentationSnapshot,
 )
 
+from .bottom import TuiFactsView
 from .composer import MicaComposer
 from .history import iter_history_views
 from .interactions import (
@@ -40,13 +41,13 @@ from .interactions import (
     _is_async_callable,
 )
 from .logo import MicaLogo
-from .models import StartupResourceSnapshot
+from .models import StartupResourceSnapshot, TuiSessionSnapshot
 from .output import AssistantResponseView, ReasoningDisplayMode, ReasoningView
 from .permissions import (
     PermissionInteractionView,
     PermissionResponder,
 )
-from .startup import StartupResourcesView
+from .startup import StartupIntroView, StartupReadyView, StartupResourcesView
 from .status import WorkPhase, WorkStatus, WorkStatusView
 from .theme import MICA_THEME, SHELL_CSS
 from .tool_cards import (
@@ -75,6 +76,7 @@ class MicaTuiApp(App[None]):
         *,
         ansi_color: bool | None = None,
         startup_resources: StartupResourceSnapshot | None = None,
+        session_snapshot: TuiSessionSnapshot | None = None,
         reasoning_display_mode: ReasoningDisplayMode = ReasoningDisplayMode.COLLAPSED,
         clock: Callable[[], float] = monotonic,
         stored_session: StoredSession | None = None,
@@ -91,6 +93,11 @@ class MicaTuiApp(App[None]):
                 "startup_resources must be a StartupResourceSnapshot or None"
             )
         self.startup_resources = startup_resources or StartupResourceSnapshot()
+        if session_snapshot is not None and not isinstance(
+            session_snapshot, TuiSessionSnapshot
+        ):
+            raise TypeError("session_snapshot must be a TuiSessionSnapshot or None")
+        self.session_snapshot = session_snapshot or TuiSessionSnapshot()
         if not isinstance(reasoning_display_mode, ReasoningDisplayMode):
             raise TypeError("reasoning_display_mode must be a ReasoningDisplayMode")
         self.reasoning_display_mode = reasoning_display_mode
@@ -154,12 +161,17 @@ class MicaTuiApp(App[None]):
         self.theme = MICA_THEME.name
 
     def compose(self) -> ComposeResult:
-        with ConversationTranscript(id="transcript"):
+        with ConversationTranscript(
+            id="transcript",
+            has_history=bool(self.stored_session and self.stored_session.turns),
+        ):
             yield MicaLogo(id="mica-logo")
+            yield StartupIntroView(id="startup-intro")
             yield StartupResourcesView(
                 self.startup_resources,
                 id="startup-resources",
             )
+            yield StartupReadyView(id="startup-ready")
             yield from iter_history_views(
                 self.stored_session,
                 tool_card_factories=self._tool_card_factories,
@@ -170,6 +182,7 @@ class MicaTuiApp(App[None]):
             id="work-status",
         )
         yield MicaComposer(id="composer")
+        yield TuiFactsView(self.session_snapshot, id="runtime-facts")
 
     async def project_engine_event(self, event: EngineEvent) -> bool:
         """Project one public Engine event into this TUI."""

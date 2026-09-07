@@ -15,7 +15,7 @@ from textual.strip import Strip
 from textual.widgets import TextArea
 
 from .paste import PasteFragment, make_paste_fragment
-from .theme import MUTED
+from .theme import BACKGROUND, BRAND_LIGHT, MUTED
 
 # TextArea 用 (row, col) 作为光标/选区位置，等价于 `textual.widgets._text_area` 的
 # `Location`；这里用本地别名避免依赖私有模块。
@@ -72,7 +72,12 @@ class MicaComposer(TextArea):
         self._pending_paste: tuple[PasteFragment, int] | None = None
         self._normalizing_selection = False
         self._editing = False
-        super().__init__(id=id, soft_wrap=True, show_line_numbers=False)
+        super().__init__(
+            id=id,
+            soft_wrap=True,
+            show_line_numbers=False,
+            placeholder="Type your request or command...",
+        )
 
     @property
     def display_fragments(self) -> tuple[PasteFragment, ...]:
@@ -96,21 +101,32 @@ class MicaComposer(TextArea):
 
     def on_mount(self) -> None:
         super().on_mount()
-        self._sync_max_height()
+        self._sync_layout()
         self.focus()
 
     def on_resize(self, event: Resize) -> None:
+        self._sync_layout()
+
+    def _sync_layout(self) -> None:
         self._sync_max_height()
+        self.styles.padding = (0, 1)
 
     def _sync_max_height(self) -> None:
         """按可用高度限制内容行，保证 transcript 至少一行可见。"""
         if self.app is None:
             return
-        # 上部保留 work-status 一行和 transcript 至少一行可见区域。
-        max_chrome_height = self.app.size.height - 2
-        target = min(10, max(3, max_chrome_height))
+        # TextArea/Transcript 各自需要稳定的三行最小几何；其余空间
+        # 由 work-status 和事实区占用。
+        screen = self.app.size
+        reserved_height = 1 + 1 + 2
+        target = min(10, max(3, screen.height - reserved_height))
         if self.styles.max_height != target:
             self.styles.max_height = target
+
+    @property
+    def gutter_width(self) -> int:
+        """Reserve two editor cells for the persistent Mica prompt."""
+        return 2
 
     @property
     def _base_hidden_above(self) -> int:
@@ -146,13 +162,30 @@ class MicaComposer(TextArea):
         return f"\u2193 {self.hidden_below} more" if self.hidden_below else ""
 
     def render_line(self, y: int) -> Strip:
-        """在正文行上叠加溢出提示，不整行吞掉正文。"""
+        """在正文行中合成提示符、空草稿快捷提示和溢出提示。"""
         strip = super().render_line(y)
-        content_top = self.content_region.y - self.region.y
         content_height = self.content_region.height
-        relative = y - content_top
+        relative = y
         if not 0 <= relative < content_height:
             return strip
+
+        if relative == 0:
+            prompt_style = Style(color=BRAND_LIGHT, bgcolor=BACKGROUND, bold=True)
+            prompt = Strip([Segment("› ", prompt_style)])
+            strip = Strip.join([prompt, strip]).crop_extend(
+                0, self.content_region.width, prompt_style
+            )
+            if not self.text and self.size.width >= 90:
+                send_hint = "Enter to send · Shift+Enter for new line"
+                hint_style = Style(color=MUTED, bgcolor=BACKGROUND)
+                hint_width = len(send_hint)
+                start = max(2, strip.cell_length - hint_width - 1)
+                strip = Strip.join(
+                    [
+                        strip.crop(0, start),
+                        Strip([Segment(send_hint, hint_style)]),
+                    ]
+                ).crop_extend(0, strip.cell_length, hint_style)
 
         hints: list[str] = []
         if relative == 0 and self.hint_above:

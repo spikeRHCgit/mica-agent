@@ -272,3 +272,20 @@ Composer 仍是 Screen 的第三个直接子节点并保持底部焦点；本切
 ## 安全与生命周期边界
 
 TUI runner 只接收已装配的 `MicaTuiRuntime`，不接收 Provider、Engine、Broker、Store 或凭据。TUI 正常退出、runner 异常、主任务取消和未挂载 Screen 的构造失败路径均最终调用 runtime/App/Provider 清理；启动失败使用固定安全诊断，不回显凭据、URL、绝对路径、原始异常或 traceback。P6-10 尚未开始。
+
+# P6-10A 启动首屏视觉校准
+
+## 目标与实现
+
+- 启动 transcript 现在按无伴随字标的响应式 Logo、定位/ready 文案、Context/Skills/Extensions/Tools 分区资源框和真实就绪说明的顺序从顶部呈现；新会话保持 `scroll_y == 0`，恢复历史仍定位最新内容，启动区不生成模拟模型问候或会话消息。
+- 外壳使用中性纯黑画布和近黑表面色；composer 由单个 TextArea 持有完整四边框，gutter 提供品牌色 `› `，空草稿宽屏在同一内容行显示真实 Enter/Shift+Enter 提示，不引入 ANSI 或第二层边框。
+- composer 下方保留两行低干扰事实区：第一行 workspace 居左、model 居右，第二行使用 `sessions:` 加真实标题或 Session ID；快照只含显示用 workspace、session label、model，使用 cell width 做显示层省略，不显示权限、耗时、工具数或快捷键栏。
+- 用户复审发现的重复小写 `mica`、模拟 `› Mica` 问候、未实现快捷键提示，以及 `W:/P:/M:` 等事实噪声已从对应视图结构中删除。CLI 按 `selected.meta.title.strip() or selected.meta.session_id` 装配会话标签，并为实际加载的 global/workspace `AGENTS.md` 注入安全相对来源路径；未加载或缺少兼容路径时显示 `none`。
+- 首轮截图暴露的 24×8 事实不可读、滚动条过重、资源框过宽以及启动层级偏响的问题仍由既有规则解决：事实区始终固定两行，滚动条为单列低对比度样式，资源框收窄为 68 列并将 Context 融入顶边标题。
+- 返工后的响应式规则在 110×36、100×30、80×24、40×16 和 24×8 保留可用 transcript、唯一状态条、完整 composer 与事实区；删除快捷键栏释放的高度交还 transcript，极窄尺寸保留 Workspace、Model 和 `sessions:` 的可发现性。
+
+## 边界与验证
+
+- 本切片只调整启动首屏和固定底部控件；消息、推理、工具卡片、ask、权限、运行语义以及 Engine/Provider/会话存储均未改变。
+- Textual/Pilot 覆盖顶部初始位置、历史恢复、快照安全、真实注入、完整边框、长 Unicode 事实、固定事实高度、宽屏/约 80 列/40×16/24×8 和 NO_COLOR；真实 Textual 组件树截图已按 110×36、100×30、80×24、40×16、24×8 生成，并与本轮删除目标、负向问题图、Pi 布局参考及正向对照图检查。
+- 使用者已在真实 Windows 终端完成视觉复验；延迟 resize/refresh 回调在流式光标终态移除后安全成为 no-op，终态清理保持幂等。统一自动验证、静态检查和离线构建通过，P6-10A 完成；P6-10B、Phase 7 和 Phase 8 尚未开始。

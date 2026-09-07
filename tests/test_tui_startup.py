@@ -172,10 +172,17 @@ def test_startup_snapshot_consumes_context_loaded_sources_without_other_state() 
     assert tuple(field.name for field in fields(snapshot)) == (
         "system_prompt_name",
         "agent_sources",
+        "global_agent_path",
+        "workspace_agent_path",
         "tool_names",
         "skill_names",
         "extension_names",
     )
+    with pytest.raises(ValueError):
+        StartupResourceSnapshot(
+            agent_sources=(AgentFileSource.GLOBAL,),
+            global_agent_path="C:/Users/private/AGENTS.md",
+        )
 
 
 def test_startup_view_is_second_item_and_renders_only_injected_facts() -> None:
@@ -183,6 +190,8 @@ def test_startup_view_is_second_item_and_renders_only_injected_facts() -> None:
         snapshot = StartupResourceSnapshot(
             system_prompt_name="Mica built-in system prompt",
             agent_sources=(AgentFileSource.GLOBAL, AgentFileSource.WORKSPACE),
+            global_agent_path="~/.mica/AGENTS.md",
+            workspace_agent_path="./AGENTS.md",
             tool_names=("ask", "bash", "edit", "read", "write"),
             skill_names=(),
             extension_names=(),
@@ -196,24 +205,27 @@ def test_startup_view_is_second_item_and_renders_only_injected_facts() -> None:
 
             assert [child.id for child in transcript.children] == [
                 "mica-logo",
+                "startup-intro",
                 "startup-resources",
+                "startup-ready",
             ]
-            assert transcript.children[1] is startup
+            assert transcript.children[2] is startup
             assert startup.parent is transcript
             assert startup.parent is not app.screen
             assert [child.id for child in app.screen.children] == [
                 "transcript",
                 "work-status",
                 "composer",
+                "runtime-facts",
             ]
             assert isinstance(rendered, Text)
             assert rendered.plain == (
-                "Startup resources\n"
-                "System prompt  Mica built-in system prompt\n"
-                "AGENTS.md      global AGENTS.md, workspace AGENTS.md\n"
-                "Tools          ask, bash, edit, read, write\n"
-                "Skills         none\n"
-                "Extensions     none"
+                "  System prompt: Mica built-in system prompt\n"
+                "  Global AGENTS.md: ~/.mica/AGENTS.md\n"
+                "  Workspace AGENTS.md: ./AGENTS.md\n"
+                "Skills ────────\nnone\n"
+                "Extensions ────────\nnone\n"
+                "Tools ────────\n5 available: ask, bash, edit, read, write"
             )
 
     asyncio.run(scenario())
@@ -258,14 +270,13 @@ def test_empty_snapshot_renders_none_without_inventing_capabilities() -> None:
             await pilot.pause()
             startup = app.query_one("#startup-resources", StartupResourcesView)
 
-            assert startup.snapshot is app.startup_resources
             assert startup.render().plain == (
-                "Startup resources\n"
-                "System prompt  none\n"
-                "AGENTS.md      none\n"
-                "Tools          none\n"
-                "Skills         none\n"
-                "Extensions     none"
+                "  System prompt: none\n"
+                "  Global AGENTS.md: none\n"
+                "  Workspace AGENTS.md: none\n"
+                "Skills ────────\nnone\n"
+                "Extensions ────────\nnone\n"
+                "Tools ────────\n0 available: none"
             )
 
     asyncio.run(scenario())
@@ -307,11 +318,15 @@ def test_startup_view_remains_readable_and_composer_visible(
             else:
                 assert app.ansi_color is True
                 assert app.native_ansi_color is True
-            assert "Startup resources" in rendered
-            assert "global AGENTS.md" in rendered
-            assert "ask, bash, edit, read, write" in rendered
+            assert startup.border_title.strip() == "Context"
+            assert "Global AGENTS.md" in rendered
+            assert "Workspace AGENTS.md" in rendered
+            if size == (100, 30):
+                assert "ask, bash, edit, read, write" in rendered
             assert startup.region.width <= transcript.region.width
-            assert app.query_one("#composer").region.bottom == size[1]
+            assert app.query_one("#composer").region.bottom <= size[1]
+            visible_children = [child for child in app.screen.children if child.display]
+            assert visible_children[-1].region.bottom == size[1]
 
     asyncio.run(scenario())
 
@@ -334,7 +349,8 @@ def test_startup_overflow_scrolls_inside_transcript() -> None:
             assert startup.region.height > 0
             assert transcript.max_scroll_y > 0
             assert startup.parent is transcript
-            assert app.query_one("#composer").region.bottom == 8
+            assert app.query_one("#composer").region.bottom <= 8
+            assert app.query_one("#transcript").region.height >= 1
 
     asyncio.run(scenario())
 

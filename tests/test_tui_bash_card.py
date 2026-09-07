@@ -428,6 +428,9 @@ def test_bash_internal_moves_consume_and_boundary_keys_bubble() -> None:
             transcript = app.query_one(ConversationTranscript)
             card.focus()
             await pilot.pause()
+            card.scroll_visible(animate=False)
+            await transcript.stop_animation("scroll_y")
+            await pilot.pause()
 
             for key, expected_start in (
                 ("up", 1),

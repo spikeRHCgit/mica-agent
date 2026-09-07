@@ -378,10 +378,11 @@ def test_status_view_identity_and_bottom_position_survive_resize_and_new_run() -
                 await pilot.pause()
                 assert app.query_one(WorkStatusView) is view
                 assert len(app.query(WorkStatusView)) == 1
-                assert view.region.bottom <= app.query_one("#composer").region.y
-                assert (
-                    app.query_one("#composer").region.bottom == app.screen.size.height
-                )
+                composer = app.query_one("#composer")
+                facts = app.query_one("#runtime-facts")
+                assert view.region.bottom <= composer.region.y
+                assert composer.region.bottom <= facts.region.y
+                assert facts.region.bottom == app.screen.size.height
             assert view.status is WorkStatus.DONE
             assert await app.project_engine_event(RunStarted("run-2")) is True
             assert app.query_one(WorkStatusView) is view
@@ -436,6 +437,9 @@ def test_clock_regression_is_clamped_and_status_repr_is_safe() -> None:
             assert "secret-run" not in repr(view)
             assert "Traceback" not in repr(view)
             assert "Mica · working" in view.render().plain
-            assert app.query_one("#composer").region.bottom == app.screen.size.height
+            composer = app.query_one("#composer")
+            facts = app.query_one("#runtime-facts")
+            assert composer.region.bottom <= facts.region.y
+            assert facts.region.bottom == app.screen.size.height
 
     asyncio.run(scenario())

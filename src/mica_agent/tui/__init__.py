@@ -10,7 +10,7 @@ from .interactions import (
     RunCancelRequester,
     UserInputResponder,
 )
-from .models import StartupResourceSnapshot
+from .models import StartupResourceSnapshot, TuiSessionSnapshot
 from .output import AssistantResponseView, ReasoningDisplayMode, ReasoningView
 from .permissions import PermissionInteractionView, PermissionResponder
 from .status import WorkPhase, WorkStatus, WorkStatusView
@@ -69,6 +69,7 @@ __all__ = [
     "ToolCardFactory",
     "ToolCardState",
     "ToolCardStatus",
+    "TuiSessionSnapshot",
     "UserInputResponder",
     "WorkPhase",
     "WorkStatus",

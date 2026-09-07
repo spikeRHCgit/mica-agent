@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from textual.events import Resize
 from textual.geometry import Region
 from textual.widgets import Markdown
 
@@ -42,7 +43,9 @@ def test_run_started_creates_no_empty_output_components() -> None:
                 if child.id != "new-output"
             ] == [
                 "mica-logo",
+                "startup-intro",
                 "startup-resources",
+                "startup-ready",
             ]
 
     asyncio.run(scenario())
@@ -379,6 +382,36 @@ def test_completed_response_keeps_raw_markdown_source_and_removes_cursor() -> No
 
             assert await app.project_engine_event(RunCompleted("run-1", 2)) is True
             await pilot.pause()
+            assert view.text == source
+            assert view.markdown.source == source
+            assert view.is_streaming is False
+            assert len(view.query(".streaming-cursor")) == 0
+            assert len(app.query(Markdown)) == 1
+
+    asyncio.run(scenario())
+
+
+def test_delayed_cursor_positioning_is_noop_after_cursor_removed() -> None:
+    async def scenario() -> None:
+        app = MicaTuiApp()
+        async with app.run_test(size=(80, 30)) as pilot:
+            await pilot.pause()
+            assert await app.project_engine_event(RunStarted("run-1")) is True
+            source = "completed answer"
+            assert await app.project_engine_event(TextDelta("run-1", source, 1)) is True
+            await pilot.pause()
+
+            view = app.query(AssistantResponseView).first()
+            assert view.is_streaming is True
+            assert len(view.query(".streaming-cursor")) == 1
+
+            view.on_resize(Resize(view.size, view.size))
+            assert await app.project_engine_event(RunCompleted("run-1", 2)) is True
+            assert view.is_streaming is False
+            assert len(view.query(".streaming-cursor")) == 0
+
+            await pilot.pause()
+            await view.finish(stable_markdown=True)
             assert view.text == source
             assert view.markdown.source == source
             assert view.is_streaming is False

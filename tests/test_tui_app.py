@@ -22,8 +22,8 @@ def test_mica_tui_app_is_a_textual_app_with_semantic_dark_theme() -> None:
     assert MICA_THEME.success == "#22c55e"
     assert MICA_THEME.error == "#ef4444"
     assert MICA_THEME.foreground == "#f1f5f9"
-    assert MICA_THEME.background == "#0f172a"
-    assert MICA_THEME.surface == "#172033"
+    assert MICA_THEME.background == "#000000"
+    assert MICA_THEME.surface == "#111111"
     assert MICA_THEME.variables["mica-muted"] == "#94a3b8"
     assert MICA_THEME.variables["mica-border"] == "#475569"
 
@@ -49,6 +49,7 @@ def test_shell_mounts_ordered_regions_with_visible_bottom_composer(
                 "transcript",
                 "work-status",
                 "composer",
+                "runtime-facts",
             ]
             assert transcript.parent is app.screen
             assert work_status.parent is app.screen
@@ -56,7 +57,9 @@ def test_shell_mounts_ordered_regions_with_visible_bottom_composer(
             assert work_status not in transcript.query("*")
             assert transcript.region.bottom <= work_status.region.y
             assert work_status.region.bottom <= composer.region.y
-            assert composer.region.bottom == app.screen.size.height
+            assert composer.region.bottom <= app.query_one("#runtime-facts").region.y
+            visible_children = [child for child in app.screen.children if child.display]
+            assert visible_children[-1].region.bottom == app.screen.size.height
             assert composer.region.height > 0
 
     asyncio.run(scenario())
@@ -101,6 +104,9 @@ def test_shell_mounts_with_terminal_color_degradation(
                 assert app.native_ansi_color is True
             assert app.query_one("#transcript") is not None
             assert app.query_one("#work-status") is not None
-            assert app.query_one("#composer").region.bottom == app.screen.size.height
+            assert app.query_one("#composer").region.bottom <= app.screen.size.height
+            assert (
+                app.query_one("#runtime-facts").region.bottom <= app.screen.size.height
+            )
 
     asyncio.run(scenario())

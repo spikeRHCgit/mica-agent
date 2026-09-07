@@ -533,7 +533,7 @@ def test_installed_wheel_explicitly_imports_tui(
                 " async with app.run_test(size=(40, 12)) as pilot:\n"
                 "  await pilot.pause()\n"
                 "  text = app.query_one('#startup-resources').render().plain\n"
-                "  assert 'global AGENTS.md' in text and 'read' in text\n"
+                "  assert 'Global AGENTS.md' in text and 'Workspace AGENTS.md' in text\n"
                 "  composer = app.query_one('#composer', MicaComposer)\n"
                 "  assert composer.has_focus\n"
                 "  await pilot.press('安', '装')\n"

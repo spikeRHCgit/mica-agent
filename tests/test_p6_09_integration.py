@@ -167,6 +167,7 @@ def test_tui_route_freezes_context_snapshot_and_uses_selected_session(
         async def runner(runtime: MicaTuiRuntime) -> None:
             observed["session"] = runtime.tui.stored_session
             observed["snapshot"] = runtime.tui.startup_resources
+            observed["session_snapshot"] = runtime.tui.session_snapshot
             async with runtime.tui.run_test(size=(70, 18)) as pilot:
                 await pilot.pause()
                 assert runtime.submit("hello from tui") is True
@@ -196,6 +197,7 @@ def test_tui_route_freezes_context_snapshot_and_uses_selected_session(
 
         selected = observed["session"]
         snapshot = observed["snapshot"]
+        session_snapshot = observed["session_snapshot"]
         assert code == 0
         assert selected is not None
         assert provider.requests[0].messages[-1].content == "hello from tui"
@@ -203,9 +205,14 @@ def test_tui_route_freezes_context_snapshot_and_uses_selected_session(
         assert tuple(source.value for source in snapshot.agent_sources) == (
             "workspace",
         )
+        assert snapshot.global_agent_path is None
+        assert snapshot.workspace_agent_path == "./AGENTS.md"
         assert snapshot.tool_names == ("ask", "bash", "edit", "read", "write")
         assert snapshot.skill_names == ()
         assert snapshot.extension_names == ()
+        assert session_snapshot.workspace.endswith("工作区 with spaces")
+        assert session_snapshot.session_label == selected.meta.session_id
+        assert session_snapshot.model == "fake-model"
         assert build_calls == 1
         assert prompt_calls == 1
         assert (
@@ -228,9 +235,11 @@ def test_tui_route_passes_continue_or_resume_session_to_runtime(
         selected = service.create_session(title="selected")
         provider = ScriptedProvider([ProviderTextDelta("restored"), Finish()])
         observed: list[object] = []
+        observed_labels: list[str | None] = []
 
         async def runner(runtime: MicaTuiRuntime) -> None:
             observed.append(runtime.tui.stored_session)
+            observed_labels.append(runtime.tui.session_snapshot.session_label)
             async with runtime.tui.run_test(size=(70, 18)) as pilot:
                 await pilot.pause()
                 assert runtime.submit("restored prompt") is True
@@ -258,6 +267,7 @@ def test_tui_route_passes_continue_or_resume_session_to_runtime(
 
         assert code == 0
         assert observed == [selected]
+        assert observed_labels == ["selected"]
         assert provider.requests[0].messages[-1].content == "restored prompt"
         assert provider.aclose_calls == 1
 

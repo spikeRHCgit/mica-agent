@@ -19,7 +19,7 @@ LogoMode = Literal["full", "compact", "plain"]
 _FULL_ROWS = (
     (" ███        ███ ", "LLLLL......BBBBB", ""),
     ("██████    ██████", "LLLLLLB..BBBBBDD", ""),
-    ("██ ████  ████ ██", "LLBBBBBBDDDDDDDD", "   mica"),
+    ("██ ████  ████ ██", "LLBBBBBBDDDDDDDD", ""),
     ("██   ██████   ██", "LL..BBBBBBDD..DD", ""),
     ("██     ██     ██", "LL....BBBB....DD", ""),
     ("▀              ▀", "L......BB......D", ""),
@@ -27,7 +27,7 @@ _FULL_ROWS = (
 
 _COMPACT_ROWS = (
     (" ██    ██ ", "LLLL..BBBB", ""),
-    ("██ █  █ ██", "LLBBBDDDDD", "   mica"),
+    ("██ █  █ ██", "LLBBBDDDDD", ""),
     ("██      ██", "LL..BB..DD", ""),
     ("▀        ▀", "L........D", ""),
 )

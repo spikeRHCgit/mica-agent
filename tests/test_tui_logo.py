@@ -13,7 +13,7 @@ from mica_agent.tui.theme import BRAND, BRAND_DEEP, BRAND_LIGHT
 
 _FULL_LOGO = """ ███        ███ 
 ██████    ██████
-██ ████  ████ ██   mica
+██ ████  ████ ██
 ██   ██████   ██
 ██     ██     ██
 ▀              ▀"""
@@ -35,6 +35,7 @@ def test_logo_is_first_item_inside_transcript() -> None:
                 "transcript",
                 "work-status",
                 "composer",
+                "runtime-facts",
             ]
 
     asyncio.run(scenario())
@@ -50,7 +51,7 @@ def test_logo_uses_full_compact_and_plain_renderings() -> None:
             ),
             (40, 16): (
                 "compact",
-                " ██    ██ \n██ █  █ ██   mica\n██      ██\n▀        ▀",
+                " ██    ██ \n██ █  █ ██\n██      ██\n▀        ▀",
                 4,
             ),
             (24, 8): ("plain", "Mica", 1),
@@ -64,7 +65,7 @@ def test_logo_uses_full_compact_and_plain_renderings() -> None:
                 assert logo.render().plain == text
                 assert logo.region.height == height
                 assert not {"◢", "◣", "◥", "◤"} & set(text)
-                assert app.query_one("#composer").region.bottom == size[1]
+                assert app.query_one("#composer").region.bottom <= size[1]
 
     asyncio.run(scenario())
 
@@ -81,7 +82,7 @@ def test_full_logo_overflow_stays_inside_scrollable_transcript() -> None:
             assert logo.region.height == 6
             assert logo.region.height > transcript.size.height
             assert transcript.max_scroll_y > 0
-            assert app.query_one("#composer").region.bottom == 8
+            assert app.query_one("#composer").region.bottom <= 8
 
     asyncio.run(scenario())
 
@@ -100,7 +101,7 @@ def test_logo_switches_mode_during_terminal_resize_without_duplication() -> None
             assert logo.display_mode == "compact"
             assert logo.region.height == 4
             assert app.query_one("#mica-logo", MicaLogo) is logo
-            assert app.query_one("#composer").region.bottom == 16
+            assert app.query_one("#composer").region.bottom <= 16
 
             await pilot.resize_terminal(24, 8)
             await pilot.pause()
@@ -109,7 +110,7 @@ def test_logo_switches_mode_during_terminal_resize_without_duplication() -> None
             assert logo.region.height == 1
             assert app.query_one("#mica-logo", MicaLogo) is logo
             assert len(app.query("#mica-logo")) == 1
-            assert app.query_one("#composer").region.bottom == 8
+            assert app.query_one("#composer").region.bottom <= 8
 
     asyncio.run(scenario())
 
@@ -142,7 +143,7 @@ def test_logo_remains_readable_with_color_degradation(
             else:
                 assert app.ansi_color is True
                 assert app.native_ansi_color is True
-            assert "mica" in rendered.plain.lower()
+            assert "mica" not in rendered.plain.lower()
             assert "\x1b" not in rendered.plain
             assert styles == {
                 f"bold {BRAND_LIGHT}",

@@ -255,7 +255,8 @@ def test_long_line_soft_wraps_without_changing_raw_text() -> None:
             assert composer.virtual_size.height > 1
             assert composer.text == text
             assert "\n" not in composer.text
-            assert composer.region.bottom == 8
+            assert composer.region.bottom <= 8
+            assert app.query_one("#runtime-facts").region.bottom == 8
 
     asyncio.run(scenario())
 
@@ -319,10 +320,11 @@ def test_short_terminal_caps_composer_and_keeps_transcript_visible(
                 "x",
             )
             await pilot.pause()
-            assert composer.region.bottom == size[1]
+            assert composer.region.bottom <= size[1]
+            assert app.query_one("#runtime-facts").region.bottom == size[1]
             assert work_status.region.y >= transcript.region.bottom
             assert transcript.region.height >= 1
-            assert transcript.region.height < composer.region.height
+            assert composer.region.height >= 3
             assert composer.content_region.height >= 1
             assert composer.content_region.height <= 8
             assert composer.max_scroll_y > 0
@@ -396,14 +398,17 @@ def test_composer_stays_at_bottom_without_changing_screen_structure(
                 "transcript",
                 "work-status",
                 "composer",
+                "runtime-facts",
             ]
             assert [child.id for child in transcript.children] == [
                 "mica-logo",
+                "startup-intro",
                 "startup-resources",
+                "startup-ready",
             ]
             assert composer.parent is app.screen
             assert composer.region.height == 3
-            assert composer.region.bottom == size[1]
+            assert composer.region.bottom <= size[1]
 
     asyncio.run(scenario())
 
@@ -455,7 +460,8 @@ def test_resize_keeps_one_focused_composer_instance() -> None:
                 await pilot.pause()
                 assert app.query_one("#composer", MicaComposer) is composer
                 assert len(app.query("#composer")) == 1
-                assert composer.region.bottom == height
+                assert composer.region.bottom <= height
+                assert app.query_one("#runtime-facts").region.bottom == height
                 assert composer.text == "keep"
                 assert composer.has_focus
 

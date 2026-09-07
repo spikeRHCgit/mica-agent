@@ -25,7 +25,7 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeAlias
 
-from .context_builder import ContextBuilder
+from .context_builder import AgentFileSource, ContextBuilder
 from .events import (
     PermissionRequested,
     ReasoningDelta,
@@ -355,19 +355,35 @@ async def _run_selected_session(
         return 0
 
     try:
-        from .tui.models import StartupResourceSnapshot
+        from .tui.models import StartupResourceSnapshot, TuiSessionSnapshot
         from .tui.runtime import MicaTuiRuntime
 
         startup_resources = StartupResourceSnapshot(
             system_prompt_name="Mica built-in system prompt",
             agent_sources=context.loaded_sources,
+            global_agent_path=(
+                _global_agents_display_path(builder)
+                if AgentFileSource.GLOBAL in context.loaded_sources
+                else None
+            ),
+            workspace_agent_path=(
+                "./AGENTS.md"
+                if AgentFileSource.WORKSPACE in context.loaded_sources
+                else None
+            ),
             tool_names=tuple(spec.name for spec in executor.tool_specs),
             skill_names=(),
             extension_names=(),
         )
+        session_snapshot = TuiSessionSnapshot(
+            workspace=_workspace_display_value(workspace.workspace_path),
+            session_label=selected.meta.title.strip() or selected.meta.session_id,
+            model=model,
+        )
         runtime = MicaTuiRuntime(
             app,
             startup_resources=startup_resources,
+            session_snapshot=session_snapshot,
             stored_session=selected,
         )
     except Exception:  # noqa: BLE001 - TUI startup diagnostics stay safe
@@ -385,6 +401,27 @@ async def _run_selected_session(
     finally:
         await runtime.aclose()
     return 0
+
+
+def _workspace_display_value(path: Path) -> str:
+    """Return a safe, compact workspace label for the TUI facts row."""
+    try:
+        relative = path.relative_to(Path.home())
+    except (ValueError, RuntimeError):
+        return f".{os.sep}{path.name}"
+    if str(relative) == ".":
+        return "~"
+    return "~" + os.sep + str(relative)
+
+
+def _global_agents_display_path(builder: ContextBuilder) -> str:
+    """Return a safe path label without exposing a user absolute path."""
+    try:
+        if builder.data_root.resolve() == default_data_root().resolve():
+            return "~/.mica/AGENTS.md"
+    except OSError:
+        pass
+    return "data-root/AGENTS.md"
 
 
 async def _default_tui_runner(runtime: MicaTuiRuntime) -> None:

@@ -5,13 +5,13 @@ from __future__ import annotations
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll
-from textual.events import Click
+from textual.events import Click, Resize
 from textual.widgets import Static
 
 from mica_agent.tool_presentation import ToolPresentationSnapshot
 
 from .composer import MicaComposer
-from .theme import MUTED
+from .theme import BORDER, MUTED
 
 
 class NewOutputIndicator(Static):
@@ -40,8 +40,14 @@ class NewOutputIndicator(Static):
 class ConversationTranscript(VerticalScroll):
     """拥有历史内容并协调用户离底、自动跟随和新输出提示。"""
 
-    def __init__(self, *, id: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        id: str | None = None,
+        has_history: bool = False,
+    ) -> None:
         self._following = True
+        self._has_history = has_history
         self._pending_new_output = False
         self._programmatic_scroll = False
         super().__init__(id=id)
@@ -61,8 +67,20 @@ class ConversationTranscript(VerticalScroll):
         yield
 
     def on_mount(self) -> None:
-        self.anchor(True)
-        self.call_after_refresh(self._scroll_latest)
+        self._sync_compact_spacing()
+        self.anchor(self._has_history)
+        if self._has_history:
+            self.call_after_refresh(self._scroll_latest)
+
+    def on_resize(self, event: Resize) -> None:
+        self._sync_compact_spacing()
+
+    def _sync_compact_spacing(self) -> None:
+        compact = self.app.size.height < 10
+        self.styles.padding = (0, 1) if compact or self.app.size.width < 40 else (0, 3)
+        self.styles.border_bottom = (
+            ("none", "transparent") if compact else ("solid", BORDER)
+        )
 
     def action_page_up(self) -> None:
         """用即时滚动完成真实 PageUp，并明确释放跟随锚点。"""
