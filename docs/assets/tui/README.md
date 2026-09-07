@@ -23,6 +23,17 @@
   的低干扰信息层级，不照抄 Git、token、成本或进程数据。
 - `startup-context-paths-current-problem.png`：负向问题局部。记录已加载 AGENTS 只显示 `yes`
   而无法定位来源的问题。
+- `runtime-tool-flow-reference.png`：运行中工具流的整体参考。用于确认工具调用嵌入对话区、
+  长内容折叠和命令输出层级，不复刻截图所属产品的背景或外围控件。
+- `runtime-write-card-reference.png`：`write` 卡片正向参考。用于确认工具名、路径、纯文本正文
+  和折叠摘要的结构。
+- `runtime-edit-card-reference.png`：`edit` 卡片正向参考。用于确认上下文、删除、新增内容及
+  新旧行号的同卡片差异布局。
+- `runtime-ask-panel-reference.png`：结构化 `ask` 面板正向参考。用于确认标题、问题、选项、
+  推荐标记、说明文字和底部操作提示的层级。
+- `runtime-permission-panel-layout-reference.png`：权限面板的布局参考，只借鉴命令预览、问题、
+  纵向选项和底部提示的空间关系；当前产品契约仍固定为 `Yes`/`No` 与 `Esc` 取消，不照抄
+  截图中的永久授权或修改命令选项。
 
 ## 使用规则
 
@@ -32,5 +43,7 @@
   结构中移除。Pi 截图只约束底部信息布局，不是整体视觉目标。
 - 目标图包含旧版示例数据。`ls`、`Permissions: ask`、Context token 数、`/help` 等不得被
   当作当前产品事实照抄；实际文字必须来自当前已存在的公共契约和真实能力。
+- 运行中参考图只决定对应组件的构图和信息层级；工具参数、权限选项、状态文字与安全边界
+  仍以 `docs/tui_design.md` 和当前公共事件契约为准。
 - 自动化测试、构建成功和 DOM 断言不能代替视觉验收。应在相同或可比的终端尺寸与初始状态
   下生成实现截图，与目标图并排检查后再交由用户手工确认。

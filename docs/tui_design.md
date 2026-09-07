@@ -332,6 +332,17 @@ Mica 不主动探测或判断某个模型支持哪些档位。后续模型配置
 
 ## 11. 工具调用卡片
 
+运行中界面的持久视觉参考保存在 `docs/assets/tui/`：
+
+- [工具流整体参考](assets/tui/runtime-tool-flow-reference.png)
+- [`write` 卡片参考](assets/tui/runtime-write-card-reference.png)
+- [`edit` 卡片参考](assets/tui/runtime-edit-card-reference.png)
+- [结构化 `ask` 面板参考](assets/tui/runtime-ask-panel-reference.png)
+- [权限面板布局参考](assets/tui/runtime-permission-panel-layout-reference.png)
+
+这些图片只约束对应组件的结构、密度和信息层级；其中的产品背景、旧工具集合、授权选项和
+示例数据不是 Mica 当前事实，具体行为继续以下文及现有公共契约为准。
+
 工具调用按真实执行位置嵌入可滚动的对话记录区。一次调用只创建一张卡片；状态变化时更新
 原卡片，不为开始、执行和完成分别创建重复记录。卡片使用明显但偏深的背景色：正在执行为
 蓝色，成功为绿色，执行失败或执行中被中断为红色。已经成功完成的工具不会因为后续 Run
