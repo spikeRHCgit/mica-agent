@@ -178,16 +178,16 @@ class PermissionInteractionView(VerticalScroll):
         if not self._locked:
             if event.key == "up":
                 self._selected_index = max(0, self._selected_index - 1)
-                self.refresh()
+                self._refresh_panel()
             elif event.key == "down":
                 self._selected_index = min(1, self._selected_index + 1)
-                self.refresh()
+                self._refresh_panel()
             elif event.key == "1":
                 self._selected_index = 0
-                self.refresh()
+                self._refresh_panel()
             elif event.key == "2":
                 self._selected_index = 1
-                self.refresh()
+                self._refresh_panel()
             elif event.key == "enter":
                 self._submit_selection()
         # Permission interaction owns all keys while it is focused. In
@@ -203,9 +203,21 @@ class PermissionInteractionView(VerticalScroll):
     def _sync_max_height(self) -> None:
         if self.app is None:
             return
-        # Keep one transcript row, the one-line status, and the composer
-        # minimum visible even when the terminal is very short.
-        available = self.app.size.height - 5
+        # Keep one transcript row, the one-line status, the composer
+        # minimum and the two-row facts region visible even when short.
+        # Wide terminals also keep a one-row gap so the muted hint does
+        # not collide with "Mica · working...".
+        if self.app.size.height >= 16:
+            self.styles.padding = (1, 1, 1, 1)
+            self.styles.margin = (0, 0, 1, 0)
+            reserved = 8
+        else:
+            # Extreme terminals cannot afford the extra top pad;
+            # border-top already separates the panel from transcript.
+            self.styles.padding = (0, 1, 0, 1)
+            self.styles.margin = (0, 0, 0, 0)
+            reserved = 7
+        available = self.app.size.height - reserved
         self.styles.max_height = max(1, min(12, available))
 
     def _refresh_panel(self) -> None:

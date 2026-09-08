@@ -43,8 +43,8 @@
 | `src/mica_agent/tui/bottom.py` | composer 下方的两行只读运行事实；仅渲染 CLI 注入的安全 workspace、model 和 session label，并使用终端 cell width 做显示层省略与右对齐。 |
 | `src/mica_agent/tui/composer.py` | TUI 专用的可编辑输入组件；负责品牌提示符、完整固定边框、空草稿发送提示、软换行、真实换行、按显示行数 1～8 行自动增高与内部滚动、溢出提示、长粘贴折叠原子片段、原文还原提交消息与安全展示快照。 |
 | `src/mica_agent/tui/logo.py` | transcript 顶部的只读响应式 Mica Logo；按可用宽度切换无伴随字标的完整、紧凑与纯文本形态。 |
-| `src/mica_agent/tui/interactions.py` | ask 结构化交互面板与只读历史 ask 记录；消费公开 AskPrompt，提供可注入的响应/取消接缝、选项导航、自定义回答、备注、终态原地收口和安全展开，不连接 Broker、Engine、Provider 或 Store。 |
-| `src/mica_agent/tui/permissions.py` | 权限请求底部确认面板；消费 ToolPrepared 的安全展示快照与公共 PermissionResponse 接缝，提供一次性 Yes/No、Esc 取消、严格同步回调和无敏感信息的纯文本降级展示。 |
+| `src/mica_agent/tui/interactions.py` | ask 结构化交互面板与只读历史 ask 记录；消费公开 AskPrompt，提供可注入的响应/取消接缝、选项导航、自定义回答、备注、终态原地收口和安全展开；选项正文由独立内容子节点承担自动高度，不连接 Broker、Engine、Provider 或 Store。 |
+| `src/mica_agent/tui/permissions.py` | 权限请求底部确认面板；消费 ToolPrepared 的安全展示快照与公共 PermissionResponse 接缝，提供一次性 Yes/No、Esc 取消、严格同步回调和无敏感信息的纯文本降级展示；宽终端在提示行与状态条之间保留一行空隙，短终端去掉纵向 padding，避免把两行 facts 挤出 24×8 屏幕。 |
 | `src/mica_agent/tui/runtime.py` | TUI 运行适配控制器；集中拥有唯一活动 Run 的 CancellationToken、消费任务、真实 run_id 和 `MicaApp.run()` 事件流，顺序投影事件、转发公共交互响应，并在 TUI 退出或 `aclose()` 时按取消、等待流、清理 UI、关闭 MicaApp 的顺序释放资源。 |
 | `src/mica_agent/tui/paste.py` | TUI 内长粘贴折叠片段的模型与源文本判定；按逻辑行阈值决定是否折叠，并提供不可展开的紧凑摘要与真实原文快照。 |
 | `src/mica_agent/tui/history.py` | `StoredSession` 到 TUI 历史视图的只读投影；按持久化顺序产出历史用户卡片、ask、read/write/edit/bash 正式卡片和紧凑工具记录，不重放 Run、不重新执行工具、不读取会话存储。 |

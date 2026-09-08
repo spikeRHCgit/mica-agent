@@ -61,6 +61,17 @@ def _call_sync(callback: Callable[..., object] | None, *args: object) -> bool:
     return result is True
 
 
+class _AskContent(Static):
+    """Render proxy so option text, not the hidden Input, owns auto height."""
+
+    def __init__(self, owner: AskInteractionView) -> None:
+        self._owner = owner
+        super().__init__(classes="ask-content")
+
+    def render(self) -> Text:
+        return self._owner._render_text()
+
+
 class AskInteractionView(Static):
     """A single ask panel that remains the same widget through its lifecycle.
 
@@ -76,10 +87,11 @@ class AskInteractionView(Static):
 
     DEFAULT_CSS = """
     AskInteractionView {
+        layout: vertical;
         width: 100%;
         height: auto;
         min-height: 1;
-        padding: 1 1 0 1;
+        padding: 1 1 1 1;
         margin-bottom: 1;
         background: $surface;
         border-top: solid $mica-brand-light;
@@ -96,6 +108,12 @@ class AskInteractionView(Static):
         background: #450a0a;
         border-top: solid $error;
         border-bottom: solid $error;
+    }
+    AskInteractionView > .ask-content {
+        width: 100%;
+        height: auto;
+        color: $foreground;
+        text-wrap: wrap;
     }
     AskInteractionView > .ask-input {
         width: 100%;
@@ -190,6 +208,7 @@ class AskInteractionView(Static):
         return self._expanded
 
     def compose(self) -> ComposeResult:
+        yield _AskContent(self)
         self._input = Input(classes="ask-input")
         yield self._input
 
@@ -214,25 +233,26 @@ class AskInteractionView(Static):
             return
         if event.key == "up":
             self._selected_index = max(0, self._selected_index - 1)
-            self.refresh()
+            self._refresh_panel()
             event.stop()
         elif event.key == "down":
             self._selected_index = min(
                 self._option_count() - 1, self._selected_index + 1
             )
-            self.refresh()
+            self._refresh_panel()
             event.stop()
         elif event.key in "12345":
             index = ord(event.key) - ord("1")
             if index < self._option_count():
                 self._selected_index = index
-                self.refresh()
+                self._refresh_panel()
             event.stop()
         elif event.key == "n":
             self._mode = "notes"
             if self._input is not None:
                 self._input.value = self._notes or ""
             self._sync_input()
+            self._refresh_panel(layout=True)
             self._input.focus() if self._input is not None else self.focus()
             event.stop()
         elif event.key == "enter":
@@ -246,6 +266,7 @@ class AskInteractionView(Static):
             self._notes = event.value
             self._mode = "options"
             self._sync_input()
+            self._refresh_panel(layout=True)
             self.focus()
         elif self._mode in {"custom", "free"}:
             self._submit_answer(event.value)
@@ -255,7 +276,7 @@ class AskInteractionView(Static):
         if self._terminal is None:
             return
         self._expanded = not self._expanded
-        self.refresh(layout=True)
+        self._refresh_panel(layout=True)
         self._notify_transcript_resize()
 
     def finish(
@@ -290,7 +311,7 @@ class AskInteractionView(Static):
         self._mode = "terminal"
         self._sync_input()
         self._apply_state_class()
-        self.refresh(layout=True)
+        self._refresh_panel(layout=True)
         self._notify_transcript_resize()
         return self
 
@@ -304,7 +325,7 @@ class AskInteractionView(Static):
                 self._input.value = ""
             self._sync_input()
             self._input.focus() if self._input is not None else self.focus()
-            self.refresh(layout=True)
+            self._refresh_panel(layout=True)
             return
         option = self._prompt.options[self._selected_index]
         self._submit_answer(
@@ -332,7 +353,7 @@ class AskInteractionView(Static):
             self._locked = True
             self._mode = "waiting"
             self._sync_input()
-            self.refresh(layout=True)
+            self._refresh_panel(layout=True)
 
     def _request_cancel(self) -> None:
         if self._locked or self._terminal is not None:
@@ -342,7 +363,7 @@ class AskInteractionView(Static):
             self._locked = True
             self._mode = "waiting"
             self._sync_input()
-            self.refresh(layout=True)
+            self._refresh_panel(layout=True)
 
     def _sync_input(self) -> None:
         if self._input is None:
@@ -367,6 +388,11 @@ class AskInteractionView(Static):
             )
             self.add_class(f"ask-{suffix}")
 
+    def _refresh_panel(self, *, layout: bool = False) -> None:
+        self.refresh(layout=layout)
+        for child in self.children:
+            child.refresh(layout=layout)
+
     def _notify_transcript_resize(self) -> None:
         from .transcript import ConversationTranscript
 
@@ -384,6 +410,9 @@ class AskInteractionView(Static):
         text.append(self._prompt.question, style=TEXT)
 
     def render(self) -> Text:
+        return self._render_text()
+
+    def _render_text(self) -> Text:
         text = Text()
         if self._terminal is not None:
             text.append(

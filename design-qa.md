@@ -1,80 +1,80 @@
-# P6-10A Design QA
+# P6-10B Design QA
 
-final result: passed
+final result: blocked
 
 ## Comparison inputs
 
-- Source visual truth: `docs/assets/tui/startup-reference-wide.png`
-- Source pixels: 1487 × 1058
-- Previous negative captures retained in `docs/assets/tui/`:
-  - `startup-current-bottom-aligned.png`
-  - `composer-current-incomplete-border.png`
-- Current deletion/problem captures retained in `docs/assets/tui/`:
-  - `startup-remove-logo-wordmark.png`
-  - `startup-remove-simulated-greeting.png`
-  - `startup-remove-unimplemented-key-hints.png`
-  - `startup-facts-current-layout.png`
-  - `startup-context-paths-current-problem.png`
-- Current facts layout reference: `docs/assets/tui/startup-facts-pi-layout-reference.png`
-- Candidate directory: `C:/Users/10601/AppData/Local/Temp/mica-p6-10a-final/`
+- Source visual truth:
+  - `docs/assets/tui/runtime-ask-panel-reference.png`: 1066 × 439
+  - `docs/assets/tui/runtime-permission-panel-layout-reference.png`: 1137 × 559
+  - `docs/assets/tui/runtime-tool-flow-reference.png`: 822 × 988
+  - `docs/assets/tui/runtime-write-card-reference.png`: 966 × 358
+  - `docs/assets/tui/runtime-edit-card-reference.png`: 1239 × 312
+- Candidate directory: `C:/Users/10601/AppData/Local/Temp/mica-p6-10b/`
+- Capture method: public Engine event projection into a real `MicaTuiApp`, then Textual `save_screenshot` SVG. No real Provider, credentials, HOME or dangerous commands were used.
+- Normalization: Edge headless screenshot of each SVG, then crop of browser chrome. 110×36 / 80×24 / 40×16 PNG pixels match the Rich SVG viewBox unless noted. 24×8 keeps the same SVG (`viewBox 311 × 245.2`) but is recorded as a window-fitted PNG because that viewport is smaller than Edge chrome. The dedicated Write 110×36 capture is also recorded as a window-fitted PNG so the two-row facts remain in frame.
 - Candidate terminal viewports and PNG pixel sizes:
-  - `startup-110x36.png`: 110 × 36 cells, 1359 × 939 pixels
-  - `startup-100x30.png`: 100 × 30 cells, 1238 × 782 pixels
-  - `startup-80x24.png`: 80 × 24 cells, 994 × 636 pixels
-  - `startup-40x16.png`: 40 × 16 cells, 506 × 441 pixels
-  - `startup-24x8.png`: 24 × 8 cells, 311 × 246 pixels
-- Side-by-side comparison: `C:/Users/10601/AppData/Local/Temp/mica-p6-10a-final/comparison-reference-vs-110x36.png`
-- All candidates were generated from real Textual components in the same empty focused-composer state.
+  - `ask-110x36.png`: 110 × 36 cells, 1360 × 928 pixels
+  - `permission-110x36.png`: 110 × 36 cells, 1360 × 928 pixels
+  - `tools-110x36.png`: 110 × 36 cells, 1360 × 928 pixels
+  - `conversation-110x36.png`: 110 × 36 cells, 1360 × 928 pixels
+  - `history-scroll-110x36.png`: 110 × 36 cells, 1360 × 928 pixels
+  - `write-110x36.png`: 110 × 36 cells, SVG `viewBox 1360 × 928.4`, window-fitted PNG 1398 × 954
+  - `conversation-80x24.png`: 80 × 24 cells, 994 × 636 pixels
+  - `nocolor-80x24.png`: 80 × 24 cells, 994 × 636 pixels
+  - `conversation-40x16.png`: 40 × 16 cells, 506 × 440 pixels
+  - `conversation-24x8.png`: 24 × 8 cells, SVG 311 × 245.2, window-fitted PNG 500 × 400
+  - `tools-24x8.png`: 24 × 8 cells, SVG 311 × 245.2, window-fitted PNG 500 × 400
+  - `permission-24x8.png`: 24 × 8 cells, SVG `viewBox 311 × 245.2`, window-fitted PNG 500 × 400
+- Full-view comparisons:
+  - `C:/Users/10601/AppData/Local/Temp/mica-p6-10b/qa/comparison-ask-reference-vs-110x36.png`
+  - `C:/Users/10601/AppData/Local/Temp/mica-p6-10b/qa/comparison-permission-reference-vs-110x36.png`
+  - `C:/Users/10601/AppData/Local/Temp/mica-p6-10b/qa/comparison-tools-reference-vs-110x36.png`
+  - `C:/Users/10601/AppData/Local/Temp/mica-p6-10b/qa/comparison-write-reference-vs-110x36.png`
+  - `C:/Users/10601/AppData/Local/Temp/mica-p6-10b/qa/comparison-edit-reference-vs-tools-110x36.png`
+- Focused-region comparisons:
+  - `C:/Users/10601/AppData/Local/Temp/mica-p6-10b/qa/comparison-ask-focused.png`
+  - `C:/Users/10601/AppData/Local/Temp/mica-p6-10b/qa/comparison-permission-focused.png`
+  - `C:/Users/10601/AppData/Local/Temp/mica-p6-10b/qa/comparison-write-focused.png`
+  - `C:/Users/10601/AppData/Local/Temp/mica-p6-10b/qa/comparison-edit-focused.png`
+  - `C:/Users/10601/AppData/Local/Temp/mica-p6-10b/qa/focus-ask-110x36.png`
+  - `C:/Users/10601/AppData/Local/Temp/mica-p6-10b/qa/focus-permission-110x36.png`
+  - `C:/Users/10601/AppData/Local/Temp/mica-p6-10b/qa/focus-write-110x36.png`
+  - `C:/Users/10601/AppData/Local/Temp/mica-p6-10b/qa/focus-edit-110x36.png`
+  - `C:/Users/10601/AppData/Local/Temp/mica-p6-10b/qa/focus-bash-110x36.png`
 
-## First-pass and second-pass history
+## First-pass and rework history
 
-The first P6-10A pass resolved top anchoring, neutral canvas, resource framing, complete composer geometry,
-fixed facts height, narrow scrollbar contrast, 68-cell resource width and height-aware compaction. The first
-rework screenshots then passed the automated layout review.
+The first P6-10B pass captured real runtime states and found two actionable defects.
 
-The user's second visual review identified the remaining actionable details: the full/compact Logo still had a
-repeated lowercase wordmark, the ready area simulated a model greeting, the independent shortcut footer promised
-unconfirmed controls, the facts row still carried noisy W/M/P/time/tool values, and loaded AGENTS rows showed only
-`yes`. These were corrected in the current pass rather than hidden or renamed.
+- [P0 resolved] Structured Ask mounted only a hidden `Input`. Textual sizes `height: auto` from children, not parent `render()`, so 110×36 painted an empty cyan-bordered box. `_AskContent` now owns title, question, numbered options, descriptions, `Type something.` and the select/navigate/notes/cancel hint. Input stays hidden in options mode.
+- [P1 resolved] Permission hint `↑/↓ to navigate · Enter to confirm · Esc to cancel · PageUp/PageDown to scroll` collided with `Mica · working...` on 110×36. Wide terminals (`height >= 16`) now use padding `(1,1,1,1)` and a one-row bottom margin. The unique work-status, composer and two-row facts remain below the panel.
+- [P1 resolved in this rework] The restored 24×8 permission regression proved facts overflow (`runtime-facts.bottom == 9` on an 8-row screen) because short-terminal top padding plus `border-top` consumed an extra row. Short terminals now use padding `(0,1,0,1)` and no extra margin. Post-fix visual evidence is `C:/Users/10601/AppData/Local/Temp/mica-p6-10b/permission-24x8.png` with matching SVG `permission-24x8.svg`. Measured regions after the fix: panel `y=1 height=1`, status `y=2 height=1`, composer `y=3 height=3`, facts `y=6 height=2`, `facts.bottom == 8`. The screenshot shows the cyan permission rule, `Mica · working.`, composer and `sessions:` still on-screen. 40×16 keeps internal PageDown movement. 24×8 PageDown does not displace `scroll_y` on this 1-row border viewport; that is accepted extreme-terminal degradation, not an open P2.
+
+Reference screenshots are layout truth only. Permanent allow, amend-command, Git, token, cost, cache and foreign chrome from those images remain out of scope.
 
 ## Final evidence
 
-- [P2 resolved] Full and compact Logo matrices are unchanged except that the repeated lowercase `mica` label is
-  removed. Plain mode still renders the standalone `Mica` fallback.
-- [P2 resolved] Startup ready content keeps only `✓ Mica is ready.  Type your request below or run a command.`;
-  no greeting line, UserMessageCard, AssistantResponseView or synthetic session message is created.
-- [P2 resolved] The independent shortcut-hint component was removed from the App tree, resize logic and shell CSS.
-  Existing input bindings and the composer inline send hint remain unchanged.
-- [P1 resolved] Facts are fixed at two rows: workspace is left-aligned, model is right-aligned on row one, and row
-  two begins with exact `sessions:`. W/M/P labels, elapsed time and tool counts are absent.
-- [P1 resolved] CLI uses `selected.meta.title.strip() or selected.meta.session_id` for the session label. A named
-  session therefore displays its real title; an unnamed session falls back to the stable ID.
-- [P1 resolved] CLI supplies `~/.mica/AGENTS.md` for a loaded default global source and `./AGENTS.md` for a loaded
-  workspace source. Unloaded, unreadable, empty, oversized and invalid sources display `none`; compatibility callers
-  that provide only `agent_sources` also fail closed to `none` rather than inventing a path.
-- [P2 resolved] Facts use Rich terminal cell widths and display-only tail ellipsis. Full snapshot values remain frozen
-  and complete; long Unicode, CJK and Windows-path cases do not grow the two-row region.
-- [P2 resolved] Removing the footer returns its height to transcript. The unique work-status remains directly above
-  the composer, and the composer keeps one complete four-sided border.
+- Ask 110×36 shows `Follow-up`, the question, numbered options with descriptions, `Type something.`, and the existing hint. The options-mode block cursor is a Textual focus artifact, not a second input box.
+- Permission 110×36 shows the safe bash command preview, `Do you want to proceed?`, `1. Yes` / `2. No` only, the muted hint, then a one-row gap above `Mica · working...`, composer and `sessions:` facts.
+- Dedicated Write 110×36 (`write-110x36.png` / `write-110x36.svg`) shows a complete in-transcript `WriteToolCard`: tool name `write`, safe relative path `notes.md`, multi-line plain-text body, Markdown fence, blank lines, Unicode `保持正文可见。`, and fold `... (5 more lines, 15 total, ctrl+o to expand)`. The card sits above the unique work-status; composer and two-row facts remain uncovered. This capture, not the later tools viewport or the collapsed history `write notes.md` row, is the Write comparison input.
+- Tools 110×36 keeps read/edit/bash cards inside the transcript. Edit shows path plus minus/plus rows; bash final output includes `48 passed`. Cards do not cover status, composer or facts.
+- History-scroll 110×36 keeps earlier user/assistant turns, unique work-status, composer and two-row facts. It is history-scroll evidence only, not the Write card comparison source.
+- Conversation 110×36 / 80×24 / 40×16 keep one left reading axis, one work-status, complete composer border and two-row facts.
+- NO_COLOR 80×24 remains readable by text hierarchy: user line, thinking, reply, tool card, work-status, composer and facts.
+- 24×8 still compresses transcript density, but status, composer and `sessions:` facts stay on-screen. After the short-terminal padding fix, `permission-24x8.png` shows the permission rule, status, composer and facts without overlap or overflow. PageDown cannot displace `scroll_y` on this 1-row border viewport; that is accepted extreme-terminal degradation, not an open P2. Actual PageDown movement remains covered at 40×16.
 
 ## Fidelity review
 
-- Typography: passed; regular descriptive copy, restrained ready emphasis and muted facts hierarchy.
-- Spacing: passed; stable bottom inset, 68-cell resource column, two-row facts and no footer placeholder height.
-- Colors: passed; neutral black canvas, existing semantic colors, restrained borders and no saturated scrollbar block.
-- Logo: passed; full/compact use the established blue facet matrices without a companion wordmark; plain fallback is
-  still readable as `Mica`.
-- Copy: passed; no simulated greeting, no unimplemented shortcut promise, no fabricated provider/token/cost/cache/Git
-  data, and only real startup/context facts are displayed.
-- AGENTS paths: passed; only loaded sources receive safe single-line relative display paths and no absolute HOME path.
-- Responsiveness: passed for all five required viewports. Composer borders, focus/input, work-status, two-row facts,
-  transcript visibility and no-horizontal-overflow rules remain valid at 110 × 36, 100 × 30, 80 × 24, 40 × 16 and
-  24 × 8, including NO_COLOR and long Unicode/CJK facts.
-- Runtime safety: passed; no Provider, Store, ToolExecutor, ContextBuilder private state or repository reference PNG is
-  read by TUI rendering.
+- Typography: passed; regular option/command copy, muted hints, restrained status emphasis.
+- Spacing: passed for required runtime viewports. Ask content child sizes the panel; wide permission keeps a one-row gap above status; short permission stays compact; composer four-border and two-row facts remain.
+- Colors: passed; existing semantic tokens, cyan ask/permission rule, green tool cards, readable NO_COLOR hierarchy. No new palette.
+- Copy: passed; no unimplemented permission options, no simulated greeting, no fabricated Git/token/cost/cache/extension data.
+- History-scroll: passed; older turns remain reachable above the unique work-status.
+- Write card: passed; complete `WriteToolCard` title, path, body, Unicode/Markdown/blank lines and fold are visible in `write-110x36.png` and `qa/focus-write-110x36.png`.
+- Responsiveness: passed for 110×36, 80×24, 40×16 and 24×8. 24×8 density loss, including PageDown producing no observable displacement on a 1-row permission viewport, is recorded as accepted extreme-terminal degradation because status, composer and facts remain visible and no remaining overlap or overflow is actionable.
+- Runtime safety: passed; TUI still consumes only public events and safe snapshots.
 
 ## Final boundary
 
-No executable P0, P1 or P2 issue remains in the current screenshot and test evidence. The user subsequently completed
-and approved a real Windows-terminal visual recheck. The separately identified streaming-cursor race was fixed and the
-unified automated acceptance run passed, so P6-10A is closed. P6-10B, Phase 7 and Phase 8 have not started.
+The screenshot-based review resolved the listed Ask and permission findings, but the user's subsequent real Windows-terminal review identified additional foundational issues that must be fixed before later features are built. Those issues have not yet been catalogued in this document, so the current work is retained as a checkpoint rather than a final visual pass. P6-10B and Phase 6 remain open; Phase 7 and Phase 8 have not started.

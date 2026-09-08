@@ -348,7 +348,7 @@ def test_permission_panel_scrolls_in_short_terminal_and_stays_readable(
             ansi_color=ansi_color,
             permission_responder=lambda response: responses.append(response) or True,
         )
-        async with app.run_test(size=(24, 8)) as pilot:
+        async with app.run_test(size=(40, 16)) as pilot:
             await pilot.pause()
             await app.project_engine_event(RunStarted("run"))
             await app.project_engine_event(
@@ -363,9 +363,14 @@ def test_permission_panel_scrolls_in_short_terminal_and_stays_readable(
             )
             await pilot.pause()
             panel = app.query_one(PermissionInteractionView)
+            status = app.query_one("#work-status")
             composer = app.query_one("#composer")
+            facts = app.query_one("#runtime-facts")
             assert panel.max_scroll_y > 0
-            assert composer.region.bottom == app.screen.size.height
+            assert panel.region.bottom < status.region.y
+            assert status.region.bottom <= composer.region.y
+            assert composer.region.bottom <= facts.region.y
+            assert facts.region.bottom == app.screen.size.height
             rendered = panel.render().plain
             assert "long-safe-command-" in rendered
             assert "Do you want to proceed?" in rendered
@@ -383,6 +388,98 @@ def test_permission_panel_scrolls_in_short_terminal_and_stays_readable(
                 PermissionResponse("interaction", PermissionAnswer.DENY)
             ]
             assert len(app.query(PermissionInteractionView)) == 0
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("no_color", "ansi_color"),
+    [(True, None), (False, False)],
+)
+def test_permission_panel_keeps_controls_on_extreme_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+    no_color: bool,
+    ansi_color: bool | None,
+) -> None:
+    if no_color:
+        monkeypatch.setenv("NO_COLOR", "1")
+    else:
+        monkeypatch.delenv("NO_COLOR", raising=False)
+
+    async def scenario() -> None:
+        command = "printf 'long-safe-command-'" + ("x" * 160)
+        responses: list[PermissionResponse] = []
+        app = MicaTuiApp(
+            ansi_color=ansi_color,
+            permission_responder=lambda response: responses.append(response) or True,
+        )
+        async with app.run_test(size=(24, 8)) as pilot:
+            await pilot.pause()
+            await app.project_engine_event(RunStarted("run"))
+            await app.project_engine_event(
+                ToolPrepared(
+                    "run",
+                    2,
+                    bash_snapshot(ToolPresentationStatus.PENDING, command),
+                )
+            )
+            assert not await app.project_engine_event(
+                PermissionRequested("run", 3, "interaction", "call", "bash", "allow?")
+            )
+            await pilot.pause()
+            panel = app.query_one(PermissionInteractionView)
+            transcript = app.query_one("#transcript")
+            status = app.query_one("#work-status")
+            composer = app.query_one("#composer")
+            facts = app.query_one("#runtime-facts")
+            assert panel.is_attached
+            assert panel.max_scroll_y > 0
+            assert transcript.region.bottom <= panel.region.y
+            assert panel.region.bottom <= status.region.y
+            assert status.region.bottom <= composer.region.y
+            assert composer.region.bottom <= facts.region.y
+            assert facts.region.bottom == app.screen.size.height
+            assert status.region.height >= 1
+            assert composer.region.height >= 3
+            assert facts.region.height == 2
+            rendered = panel.render().plain
+            assert "1. Yes" in rendered and "2. No" in rendered
+
+            panel.focus()
+            start = panel.scroll_y
+            await pilot.press("pagedown")
+            assert 0 <= panel.scroll_y <= panel.max_scroll_y
+            await pilot.press("pageup")
+            assert 0 <= panel.scroll_y <= start
+            await pilot.press("2", "enter")
+            await pilot.pause()
+            assert responses == [
+                PermissionResponse("interaction", PermissionAnswer.DENY)
+            ]
+            assert len(app.query(PermissionInteractionView)) == 0
+
+    asyncio.run(scenario())
+
+
+def test_permission_panel_keeps_a_gap_above_status_on_wide_terminals() -> None:
+    async def scenario() -> None:
+        app = MicaTuiApp(permission_responder=lambda _response: True)
+        async with app.run_test(size=(110, 36)) as pilot:
+            await pilot.pause()
+            await app.project_engine_event(RunStarted("run"))
+            await app.project_engine_event(
+                ToolPrepared("run", 1, bash_snapshot(ToolPresentationStatus.PENDING))
+            )
+            assert not await app.project_engine_event(
+                PermissionRequested("run", 2, "interaction", "call", "bash", "allow?")
+            )
+            await pilot.pause()
+            panel = app.query_one(PermissionInteractionView)
+            status = app.query_one("#work-status")
+            facts = app.query_one("#runtime-facts")
+            assert "↑/↓ to navigate" in panel.render().plain
+            assert panel.region.bottom < status.region.y
+            assert facts.region.bottom == app.screen.size.height
 
     asyncio.run(scenario())
 

@@ -81,6 +81,14 @@ def test_ask_app_updates_the_same_view_and_disables_composer() -> None:
             )
             await pilot.pause()
             view = app.query_one(AskInteractionView)
+            content = view.query_one(".ask-content")
+            rendered = view.render().plain
+            assert view.region.height >= 8
+            assert content.region.height >= 6
+            assert "Pick" in rendered
+            assert "1. yes" in rendered
+            assert "2. no" in rendered
+            assert "Enter select" in rendered
             assert app.query_one("#composer").disabled
             await pilot.press("2")
             assert view.selected_option_index == 1
