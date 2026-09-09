@@ -113,6 +113,14 @@ Screen {
     height: 2;
     margin: 0 1;
 }
+
+#interaction-overlay {
+    width: 100%;
+    height: auto;
+    min-height: 1;
+    border-top: solid $mica-brand-light;
+    background: $surface;
+}
 """
 
 __all__ = ["MICA_THEME", "SHELL_CSS"]

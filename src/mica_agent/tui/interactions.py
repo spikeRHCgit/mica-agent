@@ -98,6 +98,11 @@ class AskInteractionView(Static):
         border-bottom: solid $mica-brand-light;
         color: $foreground;
     }
+    #interaction-overlay > AskInteractionView {
+        margin-bottom: 0;
+        border-top: none;
+        border-bottom: none;
+    }
     AskInteractionView.ask-success {
         background: #052e16;
         border-top: solid $success;
@@ -212,51 +217,94 @@ class AskInteractionView(Static):
         self._input = Input(classes="ask-input")
         yield self._input
 
+    @property
+    def prompt(self) -> AskPrompt:
+        return self._prompt
+
     def on_mount(self) -> None:
         self._sync_input()
-        self.focus_input()
+        if self._terminal is None:
+            self.focus_input()
+
+    def to_transcript_record(
+        self,
+        presentation: ToolPresentationSnapshot | None = None,
+    ) -> AskInteractionView:
+        """Create an inert transcript copy of this panel's terminal state."""
+        record = AskInteractionView(
+            run_id=self._run_id,
+            interaction_id=self._interaction_id,
+            prompt=self._prompt,
+        )
+        record._notes = self._notes
+        record._answer = self._answer
+        status = self._terminal or ToolResultStatus.CANCELLED
+        record.finish(status, presentation)
+        return record
+
+    @property
+    def mode(self) -> str:
+        return self._mode
 
     def focus_input(self) -> None:
         if self._input is not None and self._input.display and not self._input.disabled:
-            self._input.focus()
+            self._input.focus(scroll_visible=False)
         else:
-            self.focus()
+            self.focus(scroll_visible=False)
+
+    def owns_key(self, key: str) -> bool:
+        """Return whether App-level routing should consume this key."""
+        if self._terminal is not None:
+            return False
+        if key in {"pageup", "pagedown"}:
+            return True
+        if self._mode in {"free", "custom", "notes"} or self._locked:
+            return False
+        if self._mode != "options":
+            return False
+        return key in {"up", "down", "enter", "n", "home", "end"} or key in "12345"
+
+    def apply_key(self, key: str) -> bool:
+        """Handle one routed or locally received key without touching Esc."""
+        if not isinstance(key, str) or self._terminal is not None:
+            return False
+        if self._locked or self._mode != "options":
+            return False
+        if key == "up":
+            self._selected_index = max(0, self._selected_index - 1)
+            self._refresh_panel()
+            return True
+        if key == "down":
+            self._selected_index = min(
+                self._option_count() - 1, self._selected_index + 1
+            )
+            self._refresh_panel()
+            return True
+        if key in "12345":
+            index = ord(key) - ord("1")
+            if index < self._option_count():
+                self._selected_index = index
+                self._refresh_panel()
+            return True
+        if key == "n":
+            self._mode = "notes"
+            if self._input is not None:
+                self._input.value = self._notes or ""
+            self._sync_input()
+            self._refresh_panel(layout=True)
+            self.focus_input()
+            return True
+        if key == "enter":
+            self._submit_selection()
+            return True
+        return False
 
     def on_key(self, event: Key) -> None:
         if event.key == "escape":
             self._request_cancel()
             event.stop()
             return
-        if self._locked or self._terminal is not None:
-            return
-        if self._mode != "options":
-            return
-        if event.key == "up":
-            self._selected_index = max(0, self._selected_index - 1)
-            self._refresh_panel()
-            event.stop()
-        elif event.key == "down":
-            self._selected_index = min(
-                self._option_count() - 1, self._selected_index + 1
-            )
-            self._refresh_panel()
-            event.stop()
-        elif event.key in "12345":
-            index = ord(event.key) - ord("1")
-            if index < self._option_count():
-                self._selected_index = index
-                self._refresh_panel()
-            event.stop()
-        elif event.key == "n":
-            self._mode = "notes"
-            if self._input is not None:
-                self._input.value = self._notes or ""
-            self._sync_input()
-            self._refresh_panel(layout=True)
-            self._input.focus() if self._input is not None else self.focus()
-            event.stop()
-        elif event.key == "enter":
-            self._submit_selection()
+        if self.apply_key(event.key):
             event.stop()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:

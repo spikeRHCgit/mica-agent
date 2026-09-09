@@ -19,6 +19,7 @@ from mica_agent.tool_presentation import (
     ToolPresentationStatus,
 )
 from mica_agent.tui import AskInteractionView, MicaTuiApp
+from mica_agent.tui.interaction_layer import InteractionOverlay
 
 
 def ask_snapshot(
@@ -81,8 +82,15 @@ def test_ask_app_updates_the_same_view_and_disables_composer() -> None:
             )
             await pilot.pause()
             view = app.query_one(AskInteractionView)
+            overlay = app.query_one(InteractionOverlay)
             content = view.query_one(".ask-content")
             rendered = view.render().plain
+            assert view.parent is overlay
+            assert view not in app.query_one("#transcript").children
+            assert overlay.display is True
+            assert app.query_one("#work-status").display is False
+            assert app.query_one("#composer").display is False
+            assert app.query_one("#runtime-facts").display is False
             assert view.region.height >= 8
             assert content.region.height >= 6
             assert "Pick" in rendered
@@ -105,8 +113,13 @@ def test_ask_app_updates_the_same_view_and_disables_composer() -> None:
                     ask_snapshot(ToolPresentationStatus.SUCCESS, "no"),
                 )
             )
-            assert app.query_one(AskInteractionView) is view
-            assert view.terminal_status is ToolResultStatus.SUCCESS
+            await pilot.pause()
+            record = app.query_one(AskInteractionView)
+            assert record is not view
+            assert record.parent is app.query_one("#transcript")
+            assert record.terminal_status is ToolResultStatus.SUCCESS
+            assert overlay.display is False
+            assert app.query_one("#composer").display is True
             assert not app.query_one("#composer").disabled
 
     asyncio.run(scenario())
@@ -214,8 +227,10 @@ def test_async_callback_shapes_are_rejected_without_repr_leak(kind: str) -> None
             view._request_cancel()
             assert calls == ["run"]
             assert await app.project_engine_event(RunCancelled("run", 2))
-            assert view.terminal_status is ToolResultStatus.CANCELLED
-            assert "operation cancelled" in view.render().plain
+            await pilot.pause()
+            record = app.query_one(AskInteractionView)
+            assert record.terminal_status is ToolResultStatus.CANCELLED
+            assert "operation cancelled" in record.render().plain
 
     asyncio.run(scenario())
 

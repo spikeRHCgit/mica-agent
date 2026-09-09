@@ -10,6 +10,11 @@ final result: blocked
   - `docs/assets/tui/runtime-tool-flow-reference.png`: 822 × 988
   - `docs/assets/tui/runtime-write-card-reference.png`: 966 × 358
   - `docs/assets/tui/runtime-edit-card-reference.png`: 1239 × 312
+  - `docs/assets/tui/runtime-timeline-order-reference.png`: user-confirmed chronological flow target
+  - `docs/assets/tui/runtime-interaction-overlay-reference.png`: user-confirmed blocking interaction target
+- Real-terminal problem evidence:
+  - `docs/assets/tui/runtime-timeline-order-current.png`: model text and tool cards grouped into separate piles
+  - `docs/assets/tui/runtime-ask-keyboard-instability-current.png`: visible Ask panel whose keyboard focus is unstable
 - Candidate directory: `C:/Users/10601/AppData/Local/Temp/mica-p6-10b/`
 - Capture method: public Engine event projection into a real `MicaTuiApp`, then Textual `save_screenshot` SVG. No real Provider, credentials, HOME or dangerous commands were used.
 - Normalization: Edge headless screenshot of each SVG, then crop of browser chrome. 110×36 / 80×24 / 40×16 PNG pixels match the Rich SVG viewBox unless noted. 24×8 keeps the same SVG (`viewBox 311 × 245.2`) but is recorded as a window-fitted PNG because that viewport is smaller than Edge chrome. The dedicated Write 110×36 capture is also recorded as a window-fitted PNG so the two-row facts remain in frame.
@@ -53,6 +58,18 @@ The first P6-10B pass captured real runtime states and found two actionable defe
 
 Reference screenshots are layout truth only. Permanent allow, amend-command, Git, token, cost, cache and foreign chrome from those images remain out of scope.
 
+## Real Windows-terminal findings after the checkpoint
+
+The user's manual review reopened P6-10B with five foundational findings that the earlier headless screenshot pass did not cover:
+
+- [P0 automated resolution, manual confirmation pending] P6-10C now closes the active model step only after an accepted `ToolPrepared`, preserves the completed widgets in place, and mounts the next model step after the tool batch. Public DOM-order tests, a two-request runtime test and the 110×36 comparison capture confirm the required interleaving; final acceptance still requires the user's real Windows-terminal replay.
+- [P0 automated resolution, manual confirmation pending] P6-10D now uses priority App bindings for global `Esc` cancellation and the two-press `Ctrl+C` exit state machine. Public Pilot tests cover Provider streaming, real Git Bash execution, Ask, permission, idle behavior and cleanup; the user still owns the final Windows-terminal check that `Ctrl+C` reaches Textual rather than the outer console fallback.
+- [P1 automated resolution, manual confirmation pending] P6-10E routes Ask and permission navigation at the App event boundary according to the active interaction owner. Public Pilot tests cover arrows, ASCII digits, Enter, notes/custom input and panel scrolling even when the local view does not retain focus.
+- [P1 automated resolution, manual confirmation pending] P6-10E restores focus after `AppBlur → AppFocus` in the fixed order Ask, permission, active-run transcript, idle composer. Selection, typed interaction text, transcript scroll position and composer draft remain intact in automated tests.
+- [P1 automated resolution, manual confirmation pending] P6-10E provides one lazily mounted bottom `InteractionOverlay`. While Ask or permission is active it replaces work-status, composer and facts without removing the composer; after settlement it restores the same composer and draft. Ask settles to one transcript record, while permission does not enter history.
+
+The new problem and target images are durable inputs for P6-10C through P6-10E. Keyboard, cancellation and application-focus behavior cannot be accepted from screenshots alone; they require public key-event tests plus a final real Windows-terminal review.
+
 ## Final evidence
 
 - Ask 110×36 shows `Follow-up`, the question, numbered options with descriptions, `Type something.`, and the existing hint. The options-mode block cursor is a Textual focus artifact, not a second input box.
@@ -77,4 +94,4 @@ Reference screenshots are layout truth only. Permanent allow, amend-command, Git
 
 ## Final boundary
 
-The screenshot-based review resolved the listed Ask and permission findings, but the user's subsequent real Windows-terminal review identified additional foundational issues that must be fixed before later features are built. Those issues have not yet been catalogued in this document, so the current work is retained as a checkpoint rather than a final visual pass. P6-10B and Phase 6 remain open; Phase 7 and Phase 8 have not started.
+The screenshot-based review resolved the original Ask sizing and permission spacing findings. P6-10C through P6-10E have subsequently passed master code review and automated verification, while their real Windows-terminal confirmation remains user-owned. Commit `25acc3f570c6a04e838789ec9c9d585d9b8ec9d6` remains a checkpoint only. P6-10C through P6-10E must now be manually rechecked before P6-10B or Phase 6 can close; Phase 7 and Phase 8 have not started.

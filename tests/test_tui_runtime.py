@@ -36,11 +36,18 @@ from mica_agent.tool_contracts import (
 )
 from mica_agent.tool_executor import ToolExecutor
 from mica_agent.tool_registry import ToolRegistry
-from mica_agent.tui import MicaComposer, MicaTuiApp, MicaTuiRuntime
+from mica_agent.tui import (
+    AssistantResponseView,
+    MicaComposer,
+    MicaTuiApp,
+    MicaTuiRuntime,
+    ReadToolCard,
+    WriteToolCard,
+)
 from mica_agent.tui.interactions import AskInteractionView
 from mica_agent.tui.permissions import PermissionInteractionView
 from mica_agent.tui.tool_cards import ToolCard, ToolCardState
-from mica_agent.tui.transcript import UserMessageCard
+from mica_agent.tui.transcript import ConversationTranscript, UserMessageCard
 from mica_agent.workspace import resolve_workspace
 
 
@@ -260,6 +267,93 @@ def test_runtime_projects_complete_tool_lifecycle_on_one_card(
     asyncio.run(scenario())
 
 
+def test_runtime_two_model_steps_keep_transcript_event_order(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        calls: list[str] = []
+        registry = ToolRegistry()
+
+        async def read_handler(
+            request: ToolRequest, cancellation: CancellationToken
+        ) -> ToolResult:
+            calls.append(request.call_id)
+            return ToolResult(
+                request.call_id,
+                request.name,
+                ToolResultStatus.SUCCESS,
+                "read complete",
+            )
+
+        async def write_handler(
+            request: ToolRequest, cancellation: CancellationToken
+        ) -> ToolResult:
+            calls.append(request.call_id)
+            return ToolResult(
+                request.call_id,
+                request.name,
+                ToolResultStatus.SUCCESS,
+                "write complete",
+            )
+
+        registry.register(ToolSpec("read", "Read", {"type": "object"}), read_handler)
+        registry.register(ToolSpec("write", "Write", {"type": "object"}), write_handler)
+        executor = ToolExecutor(
+            registry,
+            PolicyEngine(PermissionMode.DEFAULT),
+            policy_input_factory=lambda request, spec: PolicyInput(
+                request.name, PolicyOperation.READ, False, False
+            ),
+        )
+        provider = ScriptedProvider(
+            [
+                [
+                    ProviderTextDelta("step-1"),
+                    Finish(
+                        tool_calls=(
+                            ToolCall("call-read", "read", {"path": "docs.md"}),
+                            ToolCall(
+                                "call-write",
+                                "write",
+                                {"path": "notes.md", "content": "safe"},
+                            ),
+                        )
+                    ),
+                ],
+                [ProviderTextDelta("step-2"), Finish()],
+            ]
+        )
+        app = make_app(tmp_path, provider, tool_executor=executor)
+        runtime = MicaTuiRuntime(app)
+        async with runtime.tui.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            assert runtime.submit("use two tools") is True
+            await asyncio.wait_for(runtime.wait_idle(), timeout=5.0)
+            await pilot.pause()
+            children = [
+                child
+                for child in runtime.tui.query_one("#transcript").children
+                if isinstance(
+                    child, (AssistantResponseView, ReadToolCard, WriteToolCard)
+                )
+            ]
+            assert [type(child) for child in children] == [
+                AssistantResponseView,
+                ReadToolCard,
+                WriteToolCard,
+                AssistantResponseView,
+            ]
+            responses = list(runtime.tui.query(AssistantResponseView))
+            assert responses[0].text == "step-1"
+            assert responses[1].text == "step-2"
+            assert calls == ["call-read", "call-write"]
+            assert app.history[-1].content == "step-2"
+        assert provider.stream_close_calls == 2
+        assert provider.aclose_calls == 1
+
+    asyncio.run(scenario())
+
+
 def test_runtime_routes_permission_panel_response_to_mica_app(
     tmp_path: Path,
 ) -> None:
@@ -451,6 +545,254 @@ def test_runtime_cancels_after_projected_tool_output_and_closes_stream(
             assert app.history == ()
             assert runtime.active_task is None
         assert provider.stream_close_calls == 1
+        assert provider.aclose_calls == 1
+
+    asyncio.run(scenario())
+
+
+async def wait_for_response_text(
+    pilot, app: MicaTuiApp, text: str
+) -> AssistantResponseView:
+    for _ in range(100):
+        for view in app.query(AssistantResponseView):
+            if text in view.text:
+                return view
+        await pilot.pause()
+    raise AssertionError("response text was not projected")
+
+
+def test_runtime_escape_cancels_streaming_provider_without_exiting(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        provider = ScriptedProvider(
+            [[ProviderTextDelta("partial"), Finish()]], block_after_text=True
+        )
+        app = make_app(tmp_path, provider)
+        runtime = MicaTuiRuntime(app)
+        events = []
+        original_project = runtime.tui.project_engine_event
+
+        async def project(event):
+            events.append(event)
+            return await original_project(event)
+
+        runtime.tui.project_engine_event = project
+        async with runtime.tui.run_test(size=(70, 18)) as pilot:
+            await pilot.pause()
+            assert runtime.submit("stream output") is True
+            view = await wait_for_response_text(pilot, runtime.tui, "partial")
+            runtime.tui.query_one(ConversationTranscript).focus()
+            await pilot.press("escape")
+            await asyncio.wait_for(runtime.wait_idle(), timeout=5.0)
+            await pilot.pause()
+            assert any(type(event).__name__ == "RunCancelled" for event in events)
+            assert view.text == "partial"
+            assert view.is_streaming is False
+            assert len(view.query(".streaming-cursor")) == 0
+            assert app.history == ()
+            assert runtime.active_task is None
+            assert runtime.tui.query_one(MicaComposer).disabled is False
+            assert runtime.tui.is_running
+        assert provider.stream_close_calls == 1
+        assert provider.aclose_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_runtime_escape_cancels_bash_after_projected_output(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        workspace_path = tmp_path / "workspace"
+        workspace_path.mkdir()
+        workspace = resolve_workspace(workspace_path)
+        registry = ToolRegistry()
+        register_runtime_tools(registry, workspace, lambda *_args: None)
+        executor = ToolExecutor(
+            registry,
+            PolicyEngine(PermissionMode.DEFAULT),
+            policy_input_factory=lambda request, spec: PolicyInput(
+                request.name, PolicyOperation.COMMAND, False, False
+            ),
+        )
+        provider = ScriptedProvider(
+            [
+                [
+                    Finish(
+                        tool_calls=(
+                            ToolCall(
+                                "call-bash",
+                                "bash",
+                                {"command": "printf first-output; sleep 30"},
+                            ),
+                        )
+                    )
+                ]
+            ]
+        )
+        app = make_app(
+            tmp_path, provider, tool_executor=executor, workspace_path=workspace_path
+        )
+        runtime = MicaTuiRuntime(app)
+        events = []
+        original_project = runtime.tui.project_engine_event
+
+        async def project(event):
+            events.append(event)
+            return await original_project(event)
+
+        runtime.tui.project_engine_event = project
+        async with runtime.tui.run_test(size=(70, 18)) as pilot:
+            await pilot.pause()
+            assert runtime.submit("run output") is True
+            card = await wait_for_view(pilot, runtime.tui, ToolCard)
+            for _ in range(100):
+                if "first-output" in card.render().plain:
+                    break
+                await pilot.pause()
+            else:
+                raise AssertionError("tool output was not projected")
+            runtime.tui.query_one(ConversationTranscript).focus()
+            await pilot.press("escape")
+            await asyncio.wait_for(runtime.wait_idle(), timeout=5.0)
+            await pilot.pause()
+            assert any(type(event).__name__ == "RunCancelled" for event in events)
+            assert card.state is ToolCardState.CANCELLED
+            assert "first-output" in card.render().plain
+            assert app.history == ()
+            assert runtime.active_task is None
+            assert runtime.tui.is_running
+            assert runtime.tui.query_one(MicaComposer).disabled is False
+        assert provider.stream_close_calls == 1
+        assert provider.aclose_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_runtime_escape_cancels_ask_without_synthesizing_an_answer(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        provider, app, runtime, broker, calls = make_interaction_runtime(
+            tmp_path, "ask"
+        )
+        events = []
+        original_project = runtime.tui.project_engine_event
+
+        async def project(event):
+            events.append(event)
+            return await original_project(event)
+
+        runtime.tui.project_engine_event = project
+        async with runtime.tui.run_test(size=(70, 18)) as pilot:
+            await pilot.pause()
+            assert runtime.submit("ask boundary") is True
+            view = await wait_for_view(pilot, runtime.tui, AskInteractionView)
+            runtime.tui.query_one(ConversationTranscript).focus()
+            await pilot.press("escape")
+            await asyncio.wait_for(runtime.wait_idle(), timeout=5.0)
+            await pilot.pause()
+            assert broker.pending_count == 0
+            assert broker.responses == []
+            assert calls == []
+            assert app.history == ()
+            assert view.is_active is False
+            assert view.terminal_status is ToolResultStatus.CANCELLED
+            assert any(type(event).__name__ == "RunCancelled" for event in events)
+            assert runtime.active_task is None
+            assert runtime.tui.is_running
+            view._request_cancel()
+            view._submit_selection()
+        assert provider.aclose_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_runtime_escape_cancels_permission_without_deny_response(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        provider, app, runtime, broker, calls = make_interaction_runtime(
+            tmp_path, "permission"
+        )
+        events = []
+        original_project = runtime.tui.project_engine_event
+
+        async def project(event):
+            events.append(event)
+            return await original_project(event)
+
+        runtime.tui.project_engine_event = project
+        async with runtime.tui.run_test(size=(70, 18)) as pilot:
+            await pilot.pause()
+            assert runtime.submit("permission boundary") is True
+            panel = await wait_for_view(pilot, runtime.tui, PermissionInteractionView)
+            runtime.tui.query_one(ConversationTranscript).focus()
+            await pilot.press("escape")
+            await asyncio.wait_for(runtime.wait_idle(), timeout=5.0)
+            await pilot.pause()
+            assert broker.pending_count == 0
+            assert broker.responses == []
+            assert calls == []
+            assert app.history == ()
+            assert panel.is_active is False
+            assert any(type(event).__name__ == "RunCancelled" for event in events)
+            assert runtime.active_task is None
+            assert runtime.tui.is_running
+            panel._request_cancel()
+            panel._submit_selection()
+        assert provider.aclose_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_runtime_ctrl_c_cancels_active_run_then_second_press_exits(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        class Clock:
+            def __init__(self) -> None:
+                self.value = 0.0
+
+            def __call__(self) -> float:
+                return self.value
+
+        clock = Clock()
+        provider = ScriptedProvider(
+            [[ProviderTextDelta("partial"), Finish()]], block_after_text=True
+        )
+        app = make_app(tmp_path, provider)
+        runtime = MicaTuiRuntime(app, clock=clock)
+        events = []
+        exits: list[int] = []
+        original_project = runtime.tui.project_engine_event
+        original_exit = runtime.tui.exit
+
+        async def project(event):
+            events.append(event)
+            return await original_project(event)
+
+        def tracking_exit(result=None, return_code: int = 0, message=None):
+            exits.append(return_code)
+            original_exit(result, return_code, message)
+
+        runtime.tui.project_engine_event = project
+        runtime.tui.exit = tracking_exit
+        async with runtime.tui.run_test(size=(70, 18)) as pilot:
+            await pilot.pause()
+            assert runtime.submit("stream output") is True
+            await wait_for_response_text(pilot, runtime.tui, "partial")
+            await pilot.press("ctrl+c")
+            await asyncio.wait_for(runtime.wait_idle(), timeout=5.0)
+            await pilot.pause()
+            assert any(type(event).__name__ == "RunCancelled" for event in events)
+            assert exits == []
+            assert runtime.tui.is_running
+            assert app.history == ()
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            assert exits == [0]
         assert provider.aclose_calls == 1
 
     asyncio.run(scenario())

@@ -24,6 +24,7 @@ from mica_agent.tui import (
     MicaTuiApp,
     PermissionInteractionView,
 )
+from mica_agent.tui.interaction_layer import InteractionOverlay
 from mica_agent.tui.tool_cards import BashToolCard, ToolCardState
 
 
@@ -97,13 +98,14 @@ def test_permission_app_selects_ascii_options_and_cleans_panel(
             )
             await pilot.pause()
             panel = app.query_one(PermissionInteractionView)
+            overlay = app.query_one(InteractionOverlay)
             card = app.query_one(BashToolCard)
             assert card.state is ToolCardState.PENDING
-            assert panel.parent is app.screen
+            assert panel.parent is overlay
+            assert overlay.display is True
             assert panel not in app.query_one("#transcript").query("*")
-            assert app.screen.children.index(panel) < app.screen.children.index(
-                app.query_one("#work-status")
-            )
+            assert app.query_one("#work-status").display is False
+            assert composer.display is False
             assert composer.disabled
             assert composer.text == "draft"
             assert "untrusted event text" not in panel.render().plain
@@ -122,6 +124,8 @@ def test_permission_app_selects_ascii_options_and_cleans_panel(
             )
             assert responses == [PermissionResponse("interaction", expected)]
             assert len(app.query(PermissionInteractionView)) == 0
+            assert overlay.display is False
+            assert composer.display is True
             assert not composer.disabled
             assert composer.text == "draft"
             assert card.state is ToolCardState.PENDING
@@ -362,15 +366,18 @@ def test_permission_panel_scrolls_in_short_terminal_and_stays_readable(
                 PermissionRequested("run", 3, "interaction", "call", "bash", "allow?")
             )
             await pilot.pause()
+            overlay = app.query_one(InteractionOverlay)
             panel = app.query_one(PermissionInteractionView)
             status = app.query_one("#work-status")
             composer = app.query_one("#composer")
             facts = app.query_one("#runtime-facts")
+            assert overlay.display is True
+            assert panel.parent is overlay
             assert panel.max_scroll_y > 0
-            assert panel.region.bottom < status.region.y
-            assert status.region.bottom <= composer.region.y
-            assert composer.region.bottom <= facts.region.y
-            assert facts.region.bottom == app.screen.size.height
+            assert overlay.region.bottom == app.screen.size.height
+            assert status.display is False
+            assert composer.display is False
+            assert facts.display is False
             rendered = panel.render().plain
             assert "long-safe-command-" in rendered
             assert "Do you want to proceed?" in rendered
@@ -427,21 +434,23 @@ def test_permission_panel_keeps_controls_on_extreme_terminal(
                 PermissionRequested("run", 3, "interaction", "call", "bash", "allow?")
             )
             await pilot.pause()
+            overlay = app.query_one(InteractionOverlay)
             panel = app.query_one(PermissionInteractionView)
             transcript = app.query_one("#transcript")
             status = app.query_one("#work-status")
             composer = app.query_one("#composer")
             facts = app.query_one("#runtime-facts")
+            assert overlay.display is True
             assert panel.is_attached
-            assert panel.max_scroll_y > 0
-            assert transcript.region.bottom <= panel.region.y
-            assert panel.region.bottom <= status.region.y
-            assert status.region.bottom <= composer.region.y
-            assert composer.region.bottom <= facts.region.y
-            assert facts.region.bottom == app.screen.size.height
-            assert status.region.height >= 1
-            assert composer.region.height >= 3
-            assert facts.region.height == 2
+            assert panel.parent is overlay
+            assert overlay.region.bottom == app.screen.size.height
+            assert overlay.region.y >= 1
+            assert overlay.region.y >= transcript.region.y
+            assert overlay.region.height >= 1
+            assert overlay.region.bottom <= app.screen.size.height
+            assert status.display is False
+            assert composer.display is False
+            assert facts.display is False
             rendered = panel.render().plain
             assert "1. Yes" in rendered and "2. No" in rendered
 
@@ -474,12 +483,16 @@ def test_permission_panel_keeps_a_gap_above_status_on_wide_terminals() -> None:
                 PermissionRequested("run", 2, "interaction", "call", "bash", "allow?")
             )
             await pilot.pause()
+            overlay = app.query_one(InteractionOverlay)
             panel = app.query_one(PermissionInteractionView)
             status = app.query_one("#work-status")
             facts = app.query_one("#runtime-facts")
+            assert overlay.display is True
+            assert panel.parent is overlay
             assert "↑/↓ to navigate" in panel.render().plain
-            assert panel.region.bottom < status.region.y
-            assert facts.region.bottom == app.screen.size.height
+            assert overlay.region.bottom == app.screen.size.height
+            assert status.display is False
+            assert facts.display is False
 
     asyncio.run(scenario())
 

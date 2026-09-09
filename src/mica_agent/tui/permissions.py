@@ -61,11 +61,10 @@ class PermissionInteractionView(VerticalScroll):
         width: 100%;
         height: auto;
         min-height: 1;
-        max-height: 12;
         padding: 1 1 0 1;
         background: $surface;
         color: $foreground;
-        border-top: solid $mica-brand-light;
+        border-top: none;
         overflow-y: auto;
     }
     PermissionInteractionView > _PermissionContent {
@@ -158,40 +157,70 @@ class PermissionInteractionView(VerticalScroll):
         self._permission_responder = None
         self._run_cancel_requester = None
 
+    def owns_key(self, key: str) -> bool:
+        """Return whether App-level routing should consume this key."""
+        if self._locked:
+            return key in {"pageup", "pagedown", "home", "end"}
+        return key in {
+            "up",
+            "down",
+            "1",
+            "2",
+            "enter",
+            "pageup",
+            "pagedown",
+            "home",
+            "end",
+        }
+
+    def apply_key(self, key: str) -> bool:
+        """Handle one routed or locally received key without touching Esc."""
+        if not isinstance(key, str):
+            return False
+        if key in {"pageup", "pagedown", "home", "end"}:
+            if key == "pageup":
+                self.scroll_page_up(animate=False)
+            elif key == "pagedown":
+                self.scroll_page_down(animate=False)
+            elif key == "home":
+                self.scroll_home(animate=False, immediate=True)
+            else:
+                self.scroll_end(animate=False, immediate=True)
+            return True
+        if self._locked:
+            return False
+        if key == "up":
+            self._selected_index = max(0, self._selected_index - 1)
+            self._refresh_panel()
+            return True
+        if key == "down":
+            self._selected_index = min(1, self._selected_index + 1)
+            self._refresh_panel()
+            return True
+        if key == "1":
+            self._selected_index = 0
+            self._refresh_panel()
+            return True
+        if key == "2":
+            self._selected_index = 1
+            self._refresh_panel()
+            return True
+        if key == "enter":
+            self._submit_selection()
+            return True
+        return False
+
     def on_key(self, event: Key) -> None:
         if event.key == "escape":
             if not self._locked:
                 self._request_cancel()
             event.stop()
             return
-        if event.key in {"pageup", "pagedown", "home", "end"}:
-            if event.key == "pageup":
-                self.scroll_page_up(animate=False)
-            elif event.key == "pagedown":
-                self.scroll_page_down(animate=False)
-            elif event.key == "home":
-                self.scroll_home(animate=False, immediate=True)
-            else:
-                self.scroll_end(animate=False, immediate=True)
+        if self.apply_key(event.key):
             event.stop()
             return
-        if not self._locked:
-            if event.key == "up":
-                self._selected_index = max(0, self._selected_index - 1)
-                self._refresh_panel()
-            elif event.key == "down":
-                self._selected_index = min(1, self._selected_index + 1)
-                self._refresh_panel()
-            elif event.key == "1":
-                self._selected_index = 0
-                self._refresh_panel()
-            elif event.key == "2":
-                self._selected_index = 1
-                self._refresh_panel()
-            elif event.key == "enter":
-                self._submit_selection()
-        # Permission interaction owns all keys while it is focused. In
-        # particular, arbitrary text must never reach the composer.
+        # Permission interaction owns remaining keys while it is focused so
+        # arbitrary text never reaches the composer.
         event.stop()
 
     def on_mount(self) -> None:
@@ -203,22 +232,12 @@ class PermissionInteractionView(VerticalScroll):
     def _sync_max_height(self) -> None:
         if self.app is None:
             return
-        # Keep one transcript row, the one-line status, the composer
-        # minimum and the two-row facts region visible even when short.
-        # Wide terminals also keep a one-row gap so the muted hint does
-        # not collide with "Mica · working...".
         if self.app.size.height >= 16:
             self.styles.padding = (1, 1, 1, 1)
-            self.styles.margin = (0, 0, 1, 0)
-            reserved = 8
         else:
-            # Extreme terminals cannot afford the extra top pad;
-            # border-top already separates the panel from transcript.
             self.styles.padding = (0, 1, 0, 1)
-            self.styles.margin = (0, 0, 0, 0)
-            reserved = 7
-        available = self.app.size.height - reserved
-        self.styles.max_height = max(1, min(12, available))
+        self.styles.margin = (0, 0, 0, 0)
+        self.styles.max_height = max(1, min(12, self.app.size.height - 1))
 
     def _refresh_panel(self) -> None:
         self.refresh(layout=True)

@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from time import monotonic
+from typing import ClassVar
 
 from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.events import AppFocus, Event, Key
+from textual.widget import Widget
 
 from mica_agent.events import (
     EngineEvent,
@@ -33,6 +37,7 @@ from mica_agent.tool_presentation import (
 from .bottom import TuiFactsView
 from .composer import MicaComposer
 from .history import iter_history_views
+from .interaction_layer import InteractionOverlay
 from .interactions import (
     AskInteractionView,
     RunCancelRequester,
@@ -70,6 +75,24 @@ class MicaTuiApp(App[None]):
     """Textual 外壳及现有 Engine 公共事件的前端投影边界。"""
 
     CSS = SHELL_CSS
+    EXIT_CONFIRMATION_SECONDS = 2.0
+    BINDINGS: ClassVar[list[Binding]] = [
+        Binding("escape", "interrupt_run", show=False, priority=True),
+        Binding("ctrl+c", "confirm_exit", show=False, priority=True),
+        Binding("up", "interaction_up", show=False, priority=True),
+        Binding("down", "interaction_down", show=False, priority=True),
+        Binding("enter", "interaction_enter", show=False, priority=True),
+        Binding("n", "interaction_n", show=False, priority=True),
+        Binding("1", "interaction_digit('1')", show=False, priority=True),
+        Binding("2", "interaction_digit('2')", show=False, priority=True),
+        Binding("3", "interaction_digit('3')", show=False, priority=True),
+        Binding("4", "interaction_digit('4')", show=False, priority=True),
+        Binding("5", "interaction_digit('5')", show=False, priority=True),
+        Binding("pageup", "interaction_pageup", show=False, priority=True),
+        Binding("pagedown", "interaction_pagedown", show=False, priority=True),
+        Binding("home", "interaction_home", show=False, priority=True),
+        Binding("end", "interaction_end", show=False, priority=True),
+    ]
 
     def __init__(
         self,
@@ -133,6 +156,8 @@ class MicaTuiApp(App[None]):
         self._run_requester = run_requester
         self._run_active = False
         self._runtime_closed = False
+        self._exit_armed_until: float | None = None
+        self._cancel_requested: set[str] = set()
         self._clock = clock
         self.stored_session = stored_session
         self._tool_card_factories = copy_tool_card_factories(tool_card_factories)
@@ -152,6 +177,7 @@ class MicaTuiApp(App[None]):
         self._ask_views: dict[tuple[str, str], AskInteractionView] = {}
         self._ask_calls: dict[tuple[str, str], AskInteractionView] = {}
         self._pending_ask_calls: dict[str, str] = {}
+        self._settled_ask_keys: set[tuple[str, str]] = set()
         self._user_input_responder = user_input_responder
         self._run_cancel_requester = run_cancel_requester
         self._permission_responder = permission_responder
@@ -257,17 +283,20 @@ class MicaTuiApp(App[None]):
                         closed_card = True
                 closed_ask = False
                 for (run_id, _interaction_id), view in tuple(self._ask_views.items()):
-                    if run_id == event.run_id and view.is_active:
+                    if run_id != event.run_id:
+                        continue
+                    if view.is_active:
                         view.finish(terminal_status)
                         closed_ask = True
+                    await self._settle_ask_view(view)
                 if closed_card or closed_ask:
                     self.query_one(ConversationTranscript).content_added()
                 self._pending_ask_calls.pop(event.run_id, None)
                 self._clear_permission_interactions_for_run(event.run_id)
-                self._restore_composer_if_possible()
+                self._sync_shell_chrome(restore_focus=True)
             else:
                 self._clear_permission_interactions_for_run(event.run_id)
-                self._restore_composer_if_possible()
+                self._sync_shell_chrome(restore_focus=True)
             if event.run_id == self._active_status_run_id:
                 status = (
                     WorkStatus.DONE
@@ -307,6 +336,7 @@ class MicaTuiApp(App[None]):
             if event.presentation.kind is ToolPresentationKind.ASK:
                 if key in self._ask_calls or event.run_id in self._pending_ask_calls:
                     return False
+                await self._close_active_model_step(event.run_id)
                 self._prepared_presentations[key] = event.presentation
                 self._pending_ask_calls[event.run_id] = event.call_id
                 return True
@@ -318,6 +348,7 @@ class MicaTuiApp(App[None]):
             )
             if card is None:
                 return False
+            await self._close_active_model_step(event.run_id)
             self._prepared_presentations[key] = event.presentation
             self._tool_cards[key] = card
             await self.query_one("#transcript").mount(card)
@@ -389,11 +420,8 @@ class MicaTuiApp(App[None]):
             self._active_permission_key = key
             self._permission_interactions[event.interaction_id] = key
             self._permission_views[key] = view
-            await self.screen.mount(view, before="#work-status")
+            await self._show_overlay(view)
             await view.wait_for_refresh()
-            self._set_composer_disabled(True)
-            view.focus()
-            self.query_one(ConversationTranscript).content_added()
             return False
         if isinstance(event, UserInputRequested):
             if self._active_permission_key is not None or any(
@@ -415,11 +443,8 @@ class MicaTuiApp(App[None]):
             if call_id is not None:
                 self._ask_calls[(event.run_id, call_id)] = view
                 self._pending_ask_calls.pop(event.run_id, None)
-            await self.query_one("#transcript").mount(view)
+            await self._show_overlay(view)
             await view.wait_for_refresh()
-            self._set_composer_disabled(True)
-            view.focus_input()
-            self.query_one(ConversationTranscript).content_added()
             return False
         if isinstance(event, ToolFinished):
             if event.tool_name == "ask":
@@ -453,12 +478,13 @@ class MicaTuiApp(App[None]):
                 if view is None:
                     return False
                 view.finish(event.status, event.presentation)
+                await self._settle_ask_view(view, event.presentation)
                 self._prepared_presentations.pop((event.run_id, event.call_id), None)
                 self._clear_permission_for_call(
                     event.run_id, event.call_id, event.tool_name
                 )
                 self.query_one(ConversationTranscript).content_added()
-                self._restore_composer_if_possible()
+                self._sync_shell_chrome(restore_focus=True)
                 return True
             card = self._tool_cards.get((event.run_id, event.call_id))
             if (
@@ -489,10 +515,212 @@ class MicaTuiApp(App[None]):
         self.query_one(ConversationTranscript).content_added()
         return True
 
+    async def _close_active_model_step(self, run_id: str) -> None:
+        """End the current model step without removing its transcript widgets."""
+        view = self._response_views.pop(run_id, None)
+        self._reasoning_views.pop(run_id, None)
+        if view is not None and view.is_mounted and not self._runtime_closed:
+            await view.finish(stable_markdown=True)
+            self.query_one(ConversationTranscript).content_added()
+
     def _has_active_ask(self) -> bool:
         return bool(self._pending_ask_calls) or any(
             view.is_active for view in self._ask_views.values()
         )
+
+    def _overlay(self) -> InteractionOverlay | None:
+        if not self.is_running:
+            return None
+        overlays = list(self.query(InteractionOverlay))
+        return overlays[0] if overlays else None
+
+    def _blocking_owner(
+        self,
+    ) -> AskInteractionView | PermissionInteractionView | None:
+        for view in self._ask_views.values():
+            if view.is_active:
+                return view
+        if self._active_permission_key is not None:
+            permission = self._permission_views.get(self._active_permission_key)
+            if permission is not None and permission.is_active:
+                return permission
+        return None
+
+    async def _ensure_overlay(self) -> InteractionOverlay:
+        overlay = self._overlay()
+        if overlay is not None:
+            return overlay
+        overlay = InteractionOverlay(id="interaction-overlay")
+        overlay.display = False
+        await self.screen.mount(overlay)
+        return overlay
+
+    async def _show_overlay(self, view: Widget) -> None:
+        overlay = await self._ensure_overlay()
+        for child in list(overlay.children):
+            if child is view:
+                continue
+            if isinstance(child, AskInteractionView) and not child.is_active:
+                await self._settle_ask_view(child)
+            elif child.parent is overlay:
+                child.remove()
+        if view.parent is not overlay:
+            await overlay.mount(view)
+        overlay.display = True
+        self._sync_shell_chrome(restore_focus=True)
+
+    async def _settle_ask_view(
+        self,
+        view: AskInteractionView,
+        presentation: ToolPresentationSnapshot | None = None,
+    ) -> None:
+        key = (view.run_id, view.interaction_id)
+        if key in self._settled_ask_keys or view.is_active:
+            return
+        self._settled_ask_keys.add(key)
+        record = view.to_transcript_record(presentation)
+        if view.parent is not None:
+            await view.remove()
+        if not self._runtime_closed:
+            await self.query_one("#transcript").mount(record)
+        self._ask_views[key] = record
+        for call_key, mapped in tuple(self._ask_calls.items()):
+            if mapped is view:
+                self._ask_calls[call_key] = record
+
+    def _set_chrome_visible(self, visible: bool) -> None:
+        for widget_id in ("#work-status", "#composer", "#runtime-facts"):
+            matches = list(self.query(widget_id))
+            if matches:
+                matches[0].display = visible
+
+    def _sync_shell_chrome(self, *, restore_focus: bool = False) -> None:
+        if not self.is_running:
+            return
+        owner = self._blocking_owner()
+        overlay = self._overlay()
+        blocking = owner is not None
+        if overlay is not None:
+            overlay.display = blocking
+        self._set_chrome_visible(not blocking)
+        composers = list(self.query(MicaComposer))
+        if composers:
+            composer = composers[0]
+            if (
+                blocking
+                or self._runtime_closed
+                or self._run_active
+                or self._has_active_ask()
+                or self._permission_views
+            ):
+                composer.disabled = True
+            else:
+                composer.disabled = False
+        if restore_focus:
+            self._restore_interaction_focus()
+
+    def _restore_interaction_focus(self) -> None:
+        if self._runtime_closed or not self.is_running:
+            return
+        owner = self._blocking_owner()
+        if isinstance(owner, AskInteractionView):
+            owner.focus_input()
+            return
+        if isinstance(owner, PermissionInteractionView):
+            owner.focus(scroll_visible=False)
+            return
+        run_id = self._active_status_run_id
+        if self._run_active or (
+            run_id is not None and run_id not in self._terminated_run_ids
+        ):
+            self.query_one(ConversationTranscript).focus(scroll_visible=False)
+            return
+        composers = list(self.query(MicaComposer))
+        if composers and not composers[0].disabled and composers[0].display:
+            composers[0].focus(scroll_visible=False)
+
+    def on_app_focus(self, _event: AppFocus) -> None:
+        self.call_after_refresh(self._restore_interaction_focus)
+
+    async def on_event(self, event: Event) -> None:
+        if isinstance(event, Key) and not event.is_forwarded:
+            owner = self._blocking_owner()
+            if owner is not None and owner.owns_key(event.key):
+                self._route_interaction_key(event.key)
+                event.stop()
+                event.prevent_default()
+                return
+        await super().on_event(event)
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action in {"interrupt_run", "confirm_exit"}:
+            return True
+        key_by_action = {
+            "interaction_up": "up",
+            "interaction_down": "down",
+            "interaction_enter": "enter",
+            "interaction_n": "n",
+            "interaction_digit": parameters[0] if parameters else "",
+            "interaction_pageup": "pageup",
+            "interaction_pagedown": "pagedown",
+            "interaction_home": "home",
+            "interaction_end": "end",
+        }
+        key = key_by_action.get(action)
+        if key is None:
+            return True
+        owner = self._blocking_owner()
+        if owner is None:
+            return False
+        return owner.owns_key(str(key))
+
+    def _route_interaction_key(self, key: str) -> None:
+        owner = self._blocking_owner()
+        if owner is None:
+            return
+        if key in {"pageup", "pagedown", "home", "end"}:
+            if isinstance(owner, PermissionInteractionView):
+                owner.apply_key(key)
+                return
+            overlay = self._overlay()
+            if overlay is not None and overlay.display:
+                if key == "pageup":
+                    overlay.scroll_page_up(animate=False)
+                elif key == "pagedown":
+                    overlay.scroll_page_down(animate=False)
+                elif key == "home":
+                    overlay.scroll_home(animate=False, immediate=True)
+                else:
+                    overlay.scroll_end(animate=False, immediate=True)
+            return
+        owner.apply_key(key)
+
+    def action_interaction_up(self) -> None:
+        self._route_interaction_key("up")
+
+    def action_interaction_down(self) -> None:
+        self._route_interaction_key("down")
+
+    def action_interaction_enter(self) -> None:
+        self._route_interaction_key("enter")
+
+    def action_interaction_n(self) -> None:
+        self._route_interaction_key("n")
+
+    def action_interaction_digit(self, digit: str) -> None:
+        self._route_interaction_key(digit)
+
+    def action_interaction_pageup(self) -> None:
+        self._route_interaction_key("pageup")
+
+    def action_interaction_pagedown(self) -> None:
+        self._route_interaction_key("pagedown")
+
+    def action_interaction_home(self) -> None:
+        self._route_interaction_key("home")
+
+    def action_interaction_end(self) -> None:
+        self._route_interaction_key("end")
 
     def _respond_permission(self, response: PermissionResponse) -> bool:
         if not isinstance(response, PermissionResponse) or self._runtime_closed:
@@ -542,7 +770,7 @@ class MicaTuiApp(App[None]):
         view.deactivate()
         if view.parent is not None:
             view.remove()
-        self._restore_composer_if_possible()
+        self._sync_shell_chrome(restore_focus=True)
         return True
 
     def _clear_permission_for_call(
@@ -578,7 +806,7 @@ class MicaTuiApp(App[None]):
         if self._active_permission_key == key:
             self._active_permission_key = None
         self._prepared_presentations.pop(key, None)
-        self._restore_composer_if_possible()
+        self._sync_shell_chrome(restore_focus=True)
 
     def _clear_permission_interactions_for_run(self, run_id: str) -> None:
         keys = {
@@ -606,9 +834,61 @@ class MicaTuiApp(App[None]):
         self.clear_runtime_interactions()
         super().exit(result, return_code, message)
 
+    def _cancellable_run_id(self) -> str | None:
+        """Return the current projected run_id that can still be cancelled."""
+        if (
+            self._runtime_closed
+            or self._active_status_run_id is None
+            or self._active_status_run_id in self._terminated_run_ids
+            or self._active_status_run_id in self._cancel_requested
+        ):
+            return None
+        return self._active_status_run_id
+
+    def _request_run_cancel(self, run_id: str) -> bool:
+        accepted = _call_sync(self._run_cancel_requester, run_id)
+        if not accepted:
+            return False
+        self._cancel_requested.add(run_id)
+        self._pending_ask_calls.pop(run_id, None)
+        closed_ask = False
+        for (owner, _interaction_id), view in tuple(self._ask_views.items()):
+            if owner != run_id:
+                continue
+            if view.is_active:
+                view.finish(ToolResultStatus.CANCELLED)
+                closed_ask = True
+        self._clear_permission_interactions_for_run(run_id)
+        if closed_ask:
+            self.query_one(ConversationTranscript).content_added()
+        self._sync_shell_chrome(restore_focus=True)
+        return True
+
+    def action_interrupt_run(self) -> None:
+        """Cancel the current Run from any focused widget; idle Esc is a no-op."""
+        run_id = self._cancellable_run_id()
+        if run_id is None:
+            return
+        self._request_run_cancel(run_id)
+
+    def action_confirm_exit(self) -> None:
+        """First Ctrl+C arms a short confirmation window; the second exits."""
+        if self._runtime_closed:
+            return
+        now = self._clock()
+        if self._exit_armed_until is not None and now <= self._exit_armed_until:
+            self._exit_armed_until = None
+            self.exit()
+            return
+        run_id = self._cancellable_run_id()
+        if run_id is not None:
+            self._request_run_cancel(run_id)
+        self._exit_armed_until = now + self.EXIT_CONFIRMATION_SECONDS
+
     def stop_runtime_input(self) -> None:
         """Stop input synchronously; resource cleanup belongs to the runtime."""
         self._runtime_closed = True
+        self._exit_armed_until = None
         if not self.is_running:
             return
         for composer in self.query(MicaComposer):
@@ -622,6 +902,7 @@ class MicaTuiApp(App[None]):
         self._ask_views.clear()
         self._ask_calls.clear()
         self._pending_ask_calls.clear()
+        self._settled_ask_keys.clear()
         for view in tuple(self._permission_views.values()):
             view.deactivate()
             if view.parent is not None:
@@ -631,6 +912,9 @@ class MicaTuiApp(App[None]):
         self._permission_response_ids.clear()
         self._prepared_presentations.clear()
         self._active_permission_key = None
+        overlay = self._overlay()
+        if overlay is not None:
+            overlay.display = False
 
     def hold_run_input(self) -> None:
         """Lock the composer from synchronous acceptance through stream cleanup."""
@@ -651,7 +935,7 @@ class MicaTuiApp(App[None]):
                 status.finish(WorkStatus.INTERRUPT)
         self._run_active = False
         if self.query(MicaComposer):
-            self._restore_composer_if_possible()
+            self._sync_shell_chrome(restore_focus=True)
 
     async def finish_interrupted_output(self, run_id: str | None) -> None:
         """Freeze partial text without marking it as a successful reply."""
@@ -664,20 +948,7 @@ class MicaTuiApp(App[None]):
         composer.disabled = disabled
 
     def _restore_composer_if_possible(self) -> None:
-        composers = self.query(MicaComposer)
-        if not composers:
-            return
-        composer = composers.first()
-        if (
-            self._runtime_closed
-            or self._run_active
-            or self._has_active_ask()
-            or self._permission_views
-        ):
-            composer.disabled = True
-            return
-        composer.disabled = False
-        composer.focus()
+        self._sync_shell_chrome(restore_focus=True)
 
     def on_mica_composer_submitted(self, message: MicaComposer.Submitted) -> None:
         """收到有效提交后，在 transcript 中追加用户消息卡片。"""

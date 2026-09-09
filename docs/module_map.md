@@ -39,12 +39,13 @@
 | `src/mica_agent/tool_presentation.py` | 工具展示快照和生成边界；提供五个内置工具与未知工具的安全 payload、编辑逐行差异、状态映射和深层不可变快照。 |
 | `src/mica_agent/tool_registry.py` | 进程内工具注册表；保存 ToolSpec 与异步 handler，提供原子注册、确定性列表、重复拒绝和按名解析。 |
 | `src/mica_agent/tui/__init__.py` | Textual TUI 包的显式导入入口；公开 `MicaTuiApp`、Composer、启动资源与会话事实快照、模型输出视图以及 transcript 滚动与历史记录类型，不扩展 `mica_agent` 顶层公共 API。 |
-| `src/mica_agent/tui/app.py` | Textual 外壳与 Engine 公共事件投影边界；建立 transcript、唯一 work-status、可编辑 composer 与两行运行事实的稳定布局，接收已加载的 `StoredSession` 恢复历史，按 Run/seq 隔离并追加模型思考与正式回复视图，同时驱动唯一工作状态条和工具卡片生命周期及动态输出投影；不包含独立快捷键栏。 |
+| `src/mica_agent/tui/app.py` | Textual 外壳与 Engine 公共事件投影边界；建立 transcript、唯一 work-status、可编辑 composer 与两行运行事实的稳定布局，接收已加载的 `StoredSession` 恢复历史，按 Run/seq 隔离事件，并把同一 Run 内每个模型步骤映射到独立的思考/回复视图。首个有效 `ToolPrepared`（含 ASK）结束当前步骤并保持 DOM 位置，后续 Delta 追加到上一批工具记录之后；同时驱动唯一工作状态条和工具卡片生命周期及动态输出投影。Ask/权限等待时懒创建唯一底部 overlay，隐藏普通控制区并走 App 级按键路由；`AppFocus` 按 Ask、权限、运行中 transcript、空闲 composer 恢复焦点。App 级高优先级 `Esc`/`Ctrl+C` 接管取消与两次确认退出，不依赖局部焦点，也不包含独立快捷键栏。 |
 | `src/mica_agent/tui/bottom.py` | composer 下方的两行只读运行事实；仅渲染 CLI 注入的安全 workspace、model 和 session label，并使用终端 cell width 做显示层省略与右对齐。 |
 | `src/mica_agent/tui/composer.py` | TUI 专用的可编辑输入组件；负责品牌提示符、完整固定边框、空草稿发送提示、软换行、真实换行、按显示行数 1～8 行自动增高与内部滚动、溢出提示、长粘贴折叠原子片段、原文还原提交消息与安全展示快照。 |
 | `src/mica_agent/tui/logo.py` | transcript 顶部的只读响应式 Mica Logo；按可用宽度切换无伴随字标的完整、紧凑与纯文本形态。 |
-| `src/mica_agent/tui/interactions.py` | ask 结构化交互面板与只读历史 ask 记录；消费公开 AskPrompt，提供可注入的响应/取消接缝、选项导航、自定义回答、备注、终态原地收口和安全展开；选项正文由独立内容子节点承担自动高度，不连接 Broker、Engine、Provider 或 Store。 |
-| `src/mica_agent/tui/permissions.py` | 权限请求底部确认面板；消费 ToolPrepared 的安全展示快照与公共 PermissionResponse 接缝，提供一次性 Yes/No、Esc 取消、严格同步回调和无敏感信息的纯文本降级展示；宽终端在提示行与状态条之间保留一行空隙，短终端去掉纵向 padding，避免把两行 facts 挤出 24×8 屏幕。 |
+| `src/mica_agent/tui/interaction_layer.py` | 唯一底部阻塞交互覆盖层；懒创建后用 `display` 显隐，承载活动 Ask 或权限视图，不进入空闲布局，也不保存会话或回调状态。 |
+| `src/mica_agent/tui/interactions.py` | ask 结构化交互面板与只读历史 ask 记录；消费公开 AskPrompt，提供可注入的响应/取消接缝、选项导航、自定义回答、备注、终态原地收口和安全展开。活动面板由 overlay 承载，完成后复制为 transcript 记录；选项正文由独立内容子节点承担自动高度，不连接 Broker、Engine、Provider 或 Store。 |
+| `src/mica_agent/tui/permissions.py` | 权限请求底部确认面板；消费 ToolPrepared 的安全展示快照与公共 PermissionResponse 接缝，提供一次性 Yes/No、Esc 取消、严格同步回调和无敏感信息的纯文本降级展示。活动面板挂在唯一 overlay 中，关闭后不进入 transcript；宽终端在提示行与状态条之间保留一行空隙，短终端去掉纵向 padding。 |
 | `src/mica_agent/tui/runtime.py` | TUI 运行适配控制器；集中拥有唯一活动 Run 的 CancellationToken、消费任务、真实 run_id 和 `MicaApp.run()` 事件流，顺序投影事件、转发公共交互响应，并在 TUI 退出或 `aclose()` 时按取消、等待流、清理 UI、关闭 MicaApp 的顺序释放资源。 |
 | `src/mica_agent/tui/paste.py` | TUI 内长粘贴折叠片段的模型与源文本判定；按逻辑行阈值决定是否折叠，并提供不可展开的紧凑摘要与真实原文快照。 |
 | `src/mica_agent/tui/history.py` | `StoredSession` 到 TUI 历史视图的只读投影；按持久化顺序产出历史用户卡片、ask、read/write/edit/bash 正式卡片和紧凑工具记录，不重放 Run、不重新执行工具、不读取会话存储。 |

@@ -304,3 +304,48 @@ TUI runner 只接收已装配的 `MicaTuiRuntime`，不接收 Provider、Engine�
 
 - 自动化测试覆盖 Ask 挂载后的选项可见高度，权限面板在 40×16 的内部滚动、24×8 的挂载/不重叠/facts 贴底，以及 110×36 的状态条空隙。
 - 当前 Ask 与权限布局修复及其自动验证作为阶段内检查点收口；后续继续依据使用者的真实终端反馈修复基础问题，完成复验后再宣布 P6-10B 和 Phase 6 完成。
+
+# P6-10C 对话时间线与模型步骤分段
+
+## 目标与实现
+
+- 同一 Run 内的思考/正式回复不再按整个 `run_id` 复用一个组件。活动映射仍按 `run_id` 指向当前模型步骤；首个被接受的 `ToolPrepared`（含 ASK）结束该步骤：稳定 Markdown、移除流式光标，并解除活动映射，DOM 位置保持不变。
+- 同批后续工具不会再生成空回复。工具完成后的新 Delta 在上一批工具卡片之后挂载新的思考/回复视图，transcript 顺序与 Engine 事件一致。
+- 无效、重复、乱序或迟到的 `ToolPrepared` 不收口当前步骤。Run 终态只结束当前活动回复。
+
+## 边界与验证
+
+- 不改 Engine/事件契约、Ask/权限公共回调、一次响应或取消语义，也不开始 P6-10D/E。
+- 聚焦测试覆盖两步两工具 DOM 顺序、拒绝边界、多工具无中段空回复、ASK 分段、失败/取消与迟到 Delta、真实 `MicaTuiRuntime` 两轮假 Provider、历史/跨 Run 隔离和离底 `↓ new output`。
+- 临时 110×36 截图已与时间线正负向参考对照：模型步骤、工具卡片、下一模型步骤沿单一时间线交错出现。自动化验收通过后，视觉完成仍由使用者在真实 Windows 终端确认。
+
+# P6-10D 全局 Run 中断与两次 Ctrl+C 退出
+
+## 目标与实现
+
+- `MicaTuiApp` 用高优先级 `escape`/`ctrl+c` 绑定接管全局控制，不再依赖 Ask、权限、composer 或 transcript 保有焦点。
+- `Esc` 只取消当前已投影且未终止的真实 `run_id`：调用既有同步 `run_cancel_requester`，不伪造 `RunCancelled`、空回答或 `PermissionResponse(DENY)`。空闲 `Esc` 是 no-op。
+- 第一次 `Ctrl+C` 永远不退出；活动 Run 同时请求取消并进入约两秒确认窗口，空闲时只布防。窗口内第二次才 `exit()`，超时后重新作为第一次。时间比较使用注入的 `_clock`，不创建 Timer/Worker/后台任务。
+- 取消成功后立即收口活动 Ask 记录并卸下权限面板，避免 App 级绑定抢先消费按键后局部 `on_key` 再触发第二次回调。清理仍走 `MicaTuiRuntime.cancel()`、CancellationToken、Engine、Broker、Provider 与 Bash 既有链路。
+
+## 边界与验证
+
+- 不改 Engine/事件契约、Ask/权限组件、CLI 或 P6-10C 时间线分段。未开始 P6-10E 交互覆盖层与失焦恢复。
+- 聚焦测试覆盖任意焦点下的一次 `Esc`、空闲 no-op、Provider 流式取消、Bash 进程回收、Ask/权限不合成回答、两次 `Ctrl+C` 与超时重置。
+- `runtime.py` 与 `cli.py` 未修改；第二次退出仍由 `_RuntimeTuiApp.exit()` 进入 `request_shutdown()`/`aclose()`。
+
+# P6-10E 统一交互覆盖层与焦点恢复
+
+## 目标与实现
+
+- 新增唯一 `InteractionOverlay`：空闲时不进入 `compose()`，Ask/权限等待时懒创建并 `display` 显隐。活动交互独占底部，隐藏 work-status/composer/facts；transcript 与工具卡片继续可见。composer 身份与草稿保留。
+- Ask 使用 overlay 活动视图加 transcript 惰性副本：Textual 不能把同一 widget 从 overlay 再挂到 transcript。Permission 关闭后不进入历史，既有工具卡片原地更新。
+- App 级高优先级绑定路由 Ask/权限的上下、Enter、数字、`n` 和滚动键；`check_action()` 只在存在活动交互且 `owns_key()` 为真时启用。空闲数字/Enter 仍归 composer。Ask 输入/备注模式不抢数字和 `n`。
+- 按键所有权按活动 Ask/权限状态判定，不依赖 overlay 子节点或挂载时 `focus()`。PageUp/PageDown 在权限面板上滚动 overlay 内容，不移动 transcript。
+- `AppFocus` 与交互挂载/收口按 Ask、权限、运行中 transcript、空闲 composer 恢复焦点。chrome 同步默认不抢焦点，避免 Bash 卡片内部滚动被打断。
+- 保留 P6-10C 时间线分段和 P6-10D `Esc`/`Ctrl+C`。不改 Engine/事件、runtime、CLI，也不伪造 Ask 回答或 Permission DENY。
+
+## 边界与验证
+
+- 新测试覆盖 overlay 替换底部控制区、无本地焦点的 Ask/权限按键、Ask 终态记录位置、权限不进 transcript、极端终端仍保留一行 transcript、`AppBlur → AppFocus` 恢复以及空闲数字键仍属 composer。
+- 自动化验收通过后，真实 Windows 终端的键盘与失焦行为仍由使用者确认。未开始 Phase 7/8，不宣布 Phase 6 完成。
