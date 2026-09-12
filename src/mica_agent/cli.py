@@ -16,10 +16,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import signal
 import sys
 import threading
 from collections.abc import Awaitable, Callable
-from contextlib import aclosing
+from contextlib import aclosing, suppress
 from datetime import datetime
 from importlib.metadata import version
 from pathlib import Path
@@ -110,6 +111,14 @@ def main() -> None:
         help="use the basic text interface instead of the default Textual TUI",
     )
     cli_parser.add_argument(
+        "--main-buffer-preview",
+        action="store_true",
+        help=(
+            "use the experimental main-buffer terminal frontend "
+            "(temporary; ignored with --plain)"
+        ),
+    )
+    cli_parser.add_argument(
         "--permission-mode",
         choices=("default", "solo"),
         default="default",
@@ -124,7 +133,14 @@ def main() -> None:
         "default": PermissionMode.DEFAULT,
         "solo": PermissionMode.SOLO,
     }[args.permission_mode]
-    sys.exit(_main_cli(args.session_mode, permission_mode, plain=args.plain))
+    sys.exit(
+        _main_cli(
+            args.session_mode,
+            permission_mode,
+            plain=args.plain,
+            main_buffer_preview=args.main_buffer_preview and not args.plain,
+        )
+    )
 
 
 def _load_config() -> tuple[str, str, str] | None:
@@ -145,6 +161,7 @@ def _main_cli(
     permission_mode: PermissionMode = PermissionMode.DEFAULT,
     *,
     plain: bool = False,
+    main_buffer_preview: bool = False,
 ) -> int:
     """mica cli 同步入口：手动事件循环以支持 Ctrl+C 优雅退出。"""
     config = _load_config()
@@ -162,6 +179,7 @@ def _main_cli(
                 session_mode=session_mode,
                 permission_mode=permission_mode,
                 plain=plain,
+                main_buffer_preview=main_buffer_preview,
             )
         )
         try:
@@ -194,6 +212,7 @@ async def run_interactive(
     session_mode: SessionMode = "new",
     permission_mode: PermissionMode = PermissionMode.DEFAULT,
     plain: bool = True,
+    main_buffer_preview: bool = False,
     tui_runner: TuiRunner | None = None,
     provider_factory: ProviderFactory | None = None,
     read_line: ReadLine | None = None,
@@ -249,6 +268,7 @@ async def run_interactive(
         turn_id_factory,
         clock,
         plain=plain,
+        main_buffer_preview=main_buffer_preview,
         tui_runner=tui_runner,
     )
 
@@ -270,6 +290,7 @@ async def _run_selected_session(
     clock: Clock | None,
     *,
     plain: bool,
+    main_buffer_preview: bool = False,
     tui_runner: TuiRunner | None,
 ) -> int:
     from .app import MicaApp
@@ -356,7 +377,6 @@ async def _run_selected_session(
 
     try:
         from .tui.models import StartupResourceSnapshot, TuiSessionSnapshot
-        from .tui.runtime import MicaTuiRuntime
 
         startup_resources = StartupResourceSnapshot(
             system_prompt_name="Mica built-in system prompt",
@@ -380,6 +400,24 @@ async def _run_selected_session(
             session_label=selected.meta.title.strip() or selected.meta.session_id,
             model=model,
         )
+    except Exception:  # noqa: BLE001 - TUI startup diagnostics stay safe
+        await app.aclose()
+        err("mica: unable to start terminal interface\n")
+        return 2
+
+    if main_buffer_preview:
+        return await _run_main_buffer(
+            app,
+            err=err,
+            startup_resources=startup_resources,
+            session_snapshot=session_snapshot,
+            stored_session=selected,
+            workspace=workspace,
+        )
+
+    try:
+        from .tui.runtime import MicaTuiRuntime
+
         runtime = MicaTuiRuntime(
             app,
             startup_resources=startup_resources,
@@ -391,6 +429,7 @@ async def _run_selected_session(
         err("mica: unable to start terminal interface\n")
         return 2
 
+    restore_sigint = _install_tui_sigint_seam(runtime)
     try:
         await (tui_runner or _default_tui_runner)(runtime)
     except asyncio.CancelledError:
@@ -399,8 +438,93 @@ async def _run_selected_session(
         err("mica: unable to start terminal interface\n")
         return 2
     finally:
+        if restore_sigint is not None:
+            restore_sigint()
         await runtime.aclose()
     return 0
+
+
+async def _run_main_buffer(
+    app: MicaApp,
+    *,
+    err: Write,
+    startup_resources: object,
+    session_snapshot: object,
+    stored_session: StoredSession,
+    workspace: WorkspaceIdentity,
+) -> int:
+    """运行临时的主缓冲区前端；失败时只给出固定安全诊断。"""
+    try:
+        from .tui.main_buffer import MainBufferScreen, Terminal
+
+        screen = MainBufferScreen(
+            app,
+            terminal=Terminal(),
+            startup_resources=startup_resources,
+            session_snapshot=session_snapshot,
+            stored_session=stored_session,
+            workspace_path=workspace.workspace_path,
+        )
+    except Exception:  # noqa: BLE001 - 前端启动诊断保持安全
+        await app.aclose()
+        err("mica: unable to start terminal interface\n")
+        return 2
+    try:
+        await screen.run()
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 - 前端细节保持私有
+        # 失败路径兜底关闭业务资源；正常关闭时 screen 已自行收敛，
+        # 因此这里不会重复关闭 Provider。
+        if not getattr(screen, "closed", False):
+            with suppress(Exception):  # 关闭诊断保持私有
+                await app.aclose()
+        err("mica: unable to start terminal interface\n")
+        return 2
+    return 0
+
+
+def _install_tui_sigint_seam(
+    runtime: MicaTuiRuntime,
+) -> Callable[[], None] | None:
+    """Route native Ctrl+C into the TUI exit state machine.
+
+    Returns a restore callable, or ``None`` when this process cannot own
+    ``SIGINT``.  The handler never performs cleanup itself: it only asks the
+    app to run the same two-press state machine as the ``Ctrl+C`` key, so
+    there is still exactly one product exit path.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return None
+    try:
+        loop = asyncio.get_running_loop()
+        previous = signal.getsignal(signal.SIGINT)
+    except (RuntimeError, ValueError, OSError):
+        return None
+
+    def _on_sigint(_signum: int, _frame: object) -> None:
+        app = runtime.tui
+        if not app.is_running:
+            # Outside the app session the historical behavior is preserved.
+            raise KeyboardInterrupt
+        try:
+            loop.call_soon_threadsafe(app.handle_native_interrupt)
+        except RuntimeError:
+            raise KeyboardInterrupt
+
+    try:
+        signal.signal(signal.SIGINT, _on_sigint)
+    except (ValueError, OSError, RuntimeError):
+        return None
+
+    def _restore() -> None:
+        try:
+            if signal.getsignal(signal.SIGINT) is _on_sigint:
+                signal.signal(signal.SIGINT, previous)
+        except (ValueError, OSError, RuntimeError):
+            pass
+
+    return _restore
 
 
 def _workspace_display_value(path: Path) -> str:

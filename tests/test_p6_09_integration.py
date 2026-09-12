@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import signal
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -107,7 +108,8 @@ def test_cli_main_routes_default_tui_and_plain_without_startup_work(
     monkeypatch.setenv("MICA_MODEL", "fake-model")
     calls: list[tuple[object, object, object]] = []
 
-    def fake_main_cli(mode, permission, *, plain):
+    def fake_main_cli(mode, permission, *, plain, main_buffer_preview=False):
+        assert main_buffer_preview is False
         calls.append((mode, permission, plain))
         return 0
 
@@ -269,6 +271,75 @@ def test_tui_route_passes_continue_or_resume_session_to_runtime(
         assert observed == [selected]
         assert observed_labels == ["selected"]
         assert provider.requests[0].messages[-1].content == "restored prompt"
+        assert provider.aclose_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_tui_route_installs_and_restores_the_sigint_seam(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        workspace, service, builder = make_dependencies(tmp_path / "sigint")
+        service.create_session(title="selected")
+        provider = ScriptedProvider([Finish()])
+        observed: dict[str, object] = {}
+
+        async def runner(runtime: MicaTuiRuntime) -> None:
+            observed["during"] = signal.getsignal(signal.SIGINT)
+
+        before = signal.getsignal(signal.SIGINT)
+        code = await cli.run_interactive(
+            "http://127.0.0.1:1/v1",
+            "fake-key",
+            "fake-model",
+            plain=False,
+            tui_runner=runner,
+            provider_factory=lambda _url, _key: provider,
+            read_line=InputScript(),
+            write_out=Recorder(),
+            write_err=Recorder(),
+            workspace=workspace,
+            session_service=service,
+            context_builder=builder,
+        )
+
+        assert code == 0
+        installed = observed["during"]
+        assert callable(installed)
+        assert installed is not before
+        assert signal.getsignal(signal.SIGINT) is before
+
+    asyncio.run(scenario())
+
+
+def test_tui_route_restores_the_sigint_seam_after_runner_failure(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        workspace, service, builder = make_dependencies(tmp_path / "sigint-failure")
+        service.create_session(title="selected")
+        provider = ScriptedProvider([Finish()])
+
+        async def failing_runner(runtime: MicaTuiRuntime) -> None:
+            raise RuntimeError("tui runner exploded")
+
+        before = signal.getsignal(signal.SIGINT)
+        code = await cli.run_interactive(
+            "http://127.0.0.1:1/v1",
+            "fake-key",
+            "fake-model",
+            plain=False,
+            tui_runner=failing_runner,
+            provider_factory=lambda _url, _key: provider,
+            read_line=InputScript(),
+            write_out=Recorder(),
+            write_err=Recorder(),
+            workspace=workspace,
+            session_service=service,
+            context_builder=builder,
+        )
+
+        assert code == 2
+        assert signal.getsignal(signal.SIGINT) is before
         assert provider.aclose_calls == 1
 
     asyncio.run(scenario())

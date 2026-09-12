@@ -2,6 +2,12 @@
 
 final result: blocked
 
+> Disposition：本报告保留为旧 Textual 全屏实现的视觉检查点和负向证据。后续真实 Windows
+> Terminal 冒烟再次确认权限方向键与内部 transcript 滚动不可靠；用户已批准 P6-11 主缓冲区
+> 迁移，不再以继续修补 Textual 焦点/滚动作为关闭路径。新的最终 Design QA 必须针对
+> `docs/assets/tui/runtime-main-buffer-pi-reference.png` 与
+> `runtime-tool-blocks-pi-reference.png` 重新建立，本文的 `blocked` 不因自动化通过而改写。
+
 ## Comparison inputs
 
 - Source visual truth:
@@ -68,6 +74,13 @@ The user's manual review reopened P6-10B with five foundational findings that th
 - [P1 automated resolution, manual confirmation pending] P6-10E restores focus after `AppBlur → AppFocus` in the fixed order Ask, permission, active-run transcript, idle composer. Selection, typed interaction text, transcript scroll position and composer draft remain intact in automated tests.
 - [P1 automated resolution, manual confirmation pending] P6-10E provides one lazily mounted bottom `InteractionOverlay`. While Ask or permission is active it replaces work-status, composer and facts without removing the composer; after settlement it restores the same composer and draft. Ask settles to one transcript record, while permission does not enter history.
 
+The subsequent full Windows-terminal smoke test keeps this QA blocked and supersedes the optimistic automated status for P6-10D/P6-10E:
+
+- [P0 open] After a long terminal blur, Ask and permission arrow navigation can stop working and transcript history can no longer scroll. A synthetic Pilot `AppBlur → AppFocus` sequence is insufficient evidence because the real Windows input path may not deliver the same lifecycle event.
+- [P0 open] One physical `Ctrl+C` can still terminate Mica. The two-press state machine therefore does not yet own every Windows console/Textual exit path.
+- [P1 open] In ordinary composer text, the visible caret cannot be moved reliably with arrow keys for middle-of-text editing. Logical widget state and rendered/screen cursor position must both be checked.
+- [non-visual product blocker] Cancelling a Run currently discards the whole in-progress turn from model context, including the user instruction and completed progress. This requires a distinct interrupted-run persistence contract and is tracked by P6-10G rather than visual QA alone.
+
 The new problem and target images are durable inputs for P6-10C through P6-10E. Keyboard, cancellation and application-focus behavior cannot be accepted from screenshots alone; they require public key-event tests plus a final real Windows-terminal review.
 
 ## Final evidence
@@ -94,4 +107,4 @@ The new problem and target images are durable inputs for P6-10C through P6-10E. 
 
 ## Final boundary
 
-The screenshot-based review resolved the original Ask sizing and permission spacing findings. P6-10C through P6-10E have subsequently passed master code review and automated verification, while their real Windows-terminal confirmation remains user-owned. Commit `25acc3f570c6a04e838789ec9c9d585d9b8ec9d6` remains a checkpoint only. P6-10C through P6-10E must now be manually rechecked before P6-10B or Phase 6 can close; Phase 7 and Phase 8 have not started.
+The screenshot-based review resolved the original Ask sizing and permission spacing findings, and P6-10C through P6-10E passed automated verification. Later real Windows-terminal smoke tests repeatedly reopened native input/focus and internal-scroll reliability, so P6-10B and Phase 6 remain blocked. P6-10F is closed as an unsuccessful Textual repair direction; P6-11 must migrate the default frontend to the main terminal buffer before P6-10G closes interrupted-context recovery and the user performs another final smoke test. Phase 7 and Phase 8 have not started.

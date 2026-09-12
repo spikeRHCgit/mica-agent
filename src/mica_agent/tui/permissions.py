@@ -7,8 +7,7 @@ from typing import ClassVar
 
 from rich.text import Text
 from textual.binding import Binding
-from textual.containers import VerticalScroll
-from textual.events import Key, Resize
+from textual.events import Resize
 from textual.widgets import Static
 
 from mica_agent.interactions import PermissionAnswer, PermissionResponse
@@ -46,11 +45,16 @@ class _PermissionContent(Static):
         return self._owner._render_text()
 
 
-class PermissionInteractionView(VerticalScroll):
+class PermissionInteractionView(Static):
     """A temporary bottom panel for one public permission interaction.
 
     Only a safe pending presentation is rendered. The view never receives a
     broker, executor, request, result, workspace, or run task.
+
+    The panel is deliberately **not** a scroll container: the shared
+    ``InteractionOverlay`` owns the viewport, and the App-level interaction
+    controller owns every interaction key. This view only keeps the selection
+    state and renders it.
     """
 
     can_focus = True
@@ -65,7 +69,6 @@ class PermissionInteractionView(VerticalScroll):
         background: $surface;
         color: $foreground;
         border-top: none;
-        overflow-y: auto;
     }
     PermissionInteractionView > _PermissionContent {
         width: 100%;
@@ -174,19 +177,15 @@ class PermissionInteractionView(VerticalScroll):
         }
 
     def apply_key(self, key: str) -> bool:
-        """Handle one routed or locally received key without touching Esc."""
+        """Handle one routed or locally received key without touching Esc.
+
+        PageUp/PageDown/Home/End are not handled here: the App routes them to
+        the shared overlay, which is the only scroll container.
+        """
         if not isinstance(key, str):
             return False
         if key in {"pageup", "pagedown", "home", "end"}:
-            if key == "pageup":
-                self.scroll_page_up(animate=False)
-            elif key == "pagedown":
-                self.scroll_page_down(animate=False)
-            elif key == "home":
-                self.scroll_home(animate=False, immediate=True)
-            else:
-                self.scroll_end(animate=False, immediate=True)
-            return True
+            return False
         if self._locked:
             return False
         if key == "up":
@@ -210,26 +209,14 @@ class PermissionInteractionView(VerticalScroll):
             return True
         return False
 
-    def on_key(self, event: Key) -> None:
-        if event.key == "escape":
-            if not self._locked:
-                self._request_cancel()
-            event.stop()
-            return
-        if self.apply_key(event.key):
-            event.stop()
-            return
-        # Permission interaction owns remaining keys while it is focused so
-        # arbitrary text never reaches the composer.
-        event.stop()
-
     def on_mount(self) -> None:
-        self._sync_max_height()
+        self._sync_panel_padding()
 
     def on_resize(self, _event: Resize) -> None:
-        self._sync_max_height()
+        self._sync_panel_padding()
 
-    def _sync_max_height(self) -> None:
+    def _sync_panel_padding(self) -> None:
+        """Keep the wide-terminal gap above the status row; drop it when short."""
         if self.app is None:
             return
         if self.app.size.height >= 16:
@@ -237,7 +224,6 @@ class PermissionInteractionView(VerticalScroll):
         else:
             self.styles.padding = (0, 1, 0, 1)
         self.styles.margin = (0, 0, 0, 0)
-        self.styles.max_height = max(1, min(12, self.app.size.height - 1))
 
     def _refresh_panel(self) -> None:
         self.refresh(layout=True)

@@ -383,16 +383,20 @@ def test_permission_overlay_scrolls_without_moving_transcript() -> None:
             await pilot.pause()
             transcript = app.query_one(ConversationTranscript)
             panel = app.query_one(PermissionInteractionView)
+            overlay = app.query_one(InteractionOverlay)
             transcript.focus(scroll_visible=False)
             await pilot.pause()
             start = transcript.scroll_y
+            overlay_start = overlay.scroll_y
             await pilot.press("pagedown")
             await pilot.pause()
             assert transcript.scroll_y == start
-            assert panel.scroll_y >= 0
+            assert panel.scroll_y == 0
+            assert overlay.scroll_y > overlay_start
             await pilot.press("pageup")
             await pilot.pause()
             assert transcript.scroll_y == start
+            assert overlay.scroll_y == overlay_start
 
     asyncio.run(scenario())
 

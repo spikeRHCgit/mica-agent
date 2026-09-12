@@ -9,7 +9,7 @@ Mica 是面向个人开发者的轻量 Agent 基座。当前仓库只包含 Mica
 - 产品定位、长期范围与架构边界：`PROJECT_PLAN.md`。
 - 当前施工范围、接口契约与验收标准：对应的 `docs/phaseN_plan.md`。
 - 源码文件定位与职责：`docs/module_map.md`；新增、删除或重命名源码时同步更新。
-- Textual TUI 已确认的交互与视觉规则：`docs/tui_design.md`。
+- 终端交互前端已确认的架构、交互与视觉规则：`docs/tui_design.md`。
 - 面向使用者的安装与运行说明：`README.md`。
 - 第三阶段构建记录：`docs/phase3_build_log.md`。除非用户明确要求，master 不读取或改写该日志。
 - `CLAUDE.md` 只作为 Claude Code 的入口引用，不维护第二套规则。
@@ -21,6 +21,7 @@ Mica 是面向个人开发者的轻量 Agent 基座。当前仓库只包含 Mica
 | 需求 | 优先读取 |
 |---|---|
 | 命令解析、交互循环与会话选择 | `src/mica_agent/cli.py` |
+| 终端交互前端设计与迁移任务 | `docs/tui_design.md`、`docs/phase6_plan.md` |
 | 应用装配、提交边界与上下文组合 | `src/mica_agent/app.py`、`src/mica_agent/context_builder.py` |
 | Run 生命周期与事件顺序 | `src/mica_agent/engine.py`、`src/mica_agent/events.py` |
 | 模型请求、SSE 和重试 | `src/mica_agent/providers/openai_compatible.py` |

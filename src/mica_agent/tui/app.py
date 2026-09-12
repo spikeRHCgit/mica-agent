@@ -6,9 +6,17 @@ from collections.abc import Callable, Mapping
 from time import monotonic
 from typing import ClassVar
 
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, ScreenStackError
 from textual.binding import Binding
-from textual.events import AppFocus, Event, Key
+from textual.dom import DOMNode, NoScreen
+from textual.events import (
+    AppFocus,
+    Event,
+    Key,
+    MouseScrollDown,
+    MouseScrollUp,
+    Resize,
+)
 from textual.widget import Widget
 
 from mica_agent.events import (
@@ -76,6 +84,9 @@ class MicaTuiApp(App[None]):
 
     CSS = SHELL_CSS
     EXIT_CONFIRMATION_SECONDS = 2.0
+    # Near-synchronous duplicates of one physical press arrive inside a single
+    # input burst; this window merges them without merging deliberate presses.
+    EXIT_PRESS_DEDUP_SECONDS = 0.15
     BINDINGS: ClassVar[list[Binding]] = [
         Binding("escape", "interrupt_run", show=False, priority=True),
         Binding("ctrl+c", "confirm_exit", show=False, priority=True),
@@ -157,6 +168,7 @@ class MicaTuiApp(App[None]):
         self._run_active = False
         self._runtime_closed = False
         self._exit_armed_until: float | None = None
+        self._last_exit_press_at: float | None = None
         self._cancel_requested: set[str] = set()
         self._clock = clock
         self.stored_session = stored_session
@@ -173,6 +185,8 @@ class MicaTuiApp(App[None]):
         self._permission_interactions: dict[str, tuple[str, str]] = {}
         self._permission_response_ids: set[str] = set()
         self._completed_permission_interactions: set[str] = set()
+        # 业务关联索引：只用于接受/拒绝响应与取消请求的归属校验，
+        # 不参与键盘所有权判定（后者只看 overlay 的活动子组件）。
         self._active_permission_key: tuple[str, str] | None = None
         self._ask_views: dict[tuple[str, str], AskInteractionView] = {}
         self._ask_calls: dict[tuple[str, str], AskInteractionView] = {}
@@ -537,14 +551,15 @@ class MicaTuiApp(App[None]):
     def _blocking_owner(
         self,
     ) -> AskInteractionView | PermissionInteractionView | None:
-        for view in self._ask_views.values():
-            if view.is_active:
-                return view
-        if self._active_permission_key is not None:
-            permission = self._permission_views.get(self._active_permission_key)
-            if permission is not None and permission.is_active:
-                return permission
-        return None
+        """Return the single keyboard owner of the shared overlay.
+
+        The overlay's assembled state（可见、已挂载、仍活动）是所有权唯一事实源。
+        业务索引（如权限关联键）只负责映射交互，不再决定键盘交给谁。
+        """
+        overlay = self._overlay()
+        if overlay is None:
+            return None
+        return overlay.active_view
 
     async def _ensure_overlay(self) -> InteractionOverlay:
         overlay = self._overlay()
@@ -642,7 +657,91 @@ class MicaTuiApp(App[None]):
     def on_app_focus(self, _event: AppFocus) -> None:
         self.call_after_refresh(self._restore_interaction_focus)
 
+    def _focused_widget(self) -> Widget | None:
+        """Return the focused widget, tolerating a missing or closed screen."""
+        if not self.is_running:
+            return None
+        try:
+            return self.screen.focused
+        except (NoScreen, ScreenStackError):
+            return None
+
+    def _focus_is_usable(self, focused: Widget | None) -> bool:
+        """True when focus still points at a live widget of the current screen."""
+        if focused is None or not focused.is_mounted:
+            return False
+        try:
+            if focused.screen is not self.screen:
+                return False
+        except (NoScreen, ScreenStackError):
+            return False
+        return focused.display and not focused.disabled
+
+    def _focus_within(self, container: Widget) -> bool:
+        """True when the focused widget is the container or one of its children."""
+        focused = self._focused_widget()
+        if focused is None or not self._focus_is_usable(focused):
+            return False
+        node: DOMNode | None = focused
+        while node is not None:
+            if node is container:
+                return True
+            node = node.parent
+        return False
+
+    def _focus_browses_own_overflow(self) -> bool:
+        """True while a focused Bash card owns page keys for its own viewport."""
+        node: DOMNode | None = self._focused_widget()
+        while node is not None:
+            if isinstance(node, BashToolCard):
+                return True
+            node = node.parent
+        return False
+
+    def _reconcile_input_owner(self) -> None:
+        """Idempotently repair focus before dispatching one input event.
+
+        Real terminal drivers may never report ``AppBlur``/``AppFocus``, so
+        the first key, mouse-wheel or resize event after a blur must repair
+        the current owner instead of dropping the user's action.  Only an
+        unusable focus or a focus outside the blocking owner is corrected.
+        """
+        if self._runtime_closed or not self.is_running:
+            return
+        if not self.app_focus:
+            # Mirror Textual's own healing; required because owned keys are
+            # consumed at the App entry before the framework updates app_focus.
+            self.app_focus = True
+        owner = self._blocking_owner()
+        if owner is not None:
+            if not self._focus_within(owner):
+                if isinstance(owner, AskInteractionView):
+                    owner.focus_input()
+                else:
+                    owner.focus(scroll_visible=False)
+            return
+        focused = self._focused_widget()
+        if self._focus_is_usable(focused):
+            return
+        run_id = self._active_status_run_id
+        run_current = self._run_active or (
+            run_id is not None and run_id not in self._terminated_run_ids
+        )
+        if run_current:
+            transcripts = list(self.query(ConversationTranscript))
+            if transcripts:
+                transcripts[0].focus(scroll_visible=False)
+            return
+        for composer in self.query(MicaComposer):
+            if not composer.disabled and composer.display:
+                composer.focus(scroll_visible=False)
+                return
+
     async def on_event(self, event: Event) -> None:
+        if not event.is_forwarded and isinstance(
+            event, (Key, MouseScrollDown, MouseScrollUp, Resize)
+        ):
+            self._reconcile_input_owner()
         if isinstance(event, Key) and not event.is_forwarded:
             owner = self._blocking_owner()
             if owner is not None and owner.owns_key(event.key):
@@ -671,6 +770,10 @@ class MicaTuiApp(App[None]):
             return True
         owner = self._blocking_owner()
         if owner is None:
+            if key in {"pageup", "pagedown"}:
+                # No blocking interaction: page keys browse transcript history
+                # unless a focused card owns page keys for its own viewport.
+                return not self._focus_browses_own_overflow()
             return False
         return owner.owns_key(str(key))
 
@@ -679,21 +782,24 @@ class MicaTuiApp(App[None]):
         if owner is None:
             return
         if key in {"pageup", "pagedown", "home", "end"}:
-            if isinstance(owner, PermissionInteractionView):
-                owner.apply_key(key)
-                return
-            overlay = self._overlay()
-            if overlay is not None and overlay.display:
-                if key == "pageup":
-                    overlay.scroll_page_up(animate=False)
-                elif key == "pagedown":
-                    overlay.scroll_page_down(animate=False)
-                elif key == "home":
-                    overlay.scroll_home(animate=False, immediate=True)
-                else:
-                    overlay.scroll_end(animate=False, immediate=True)
+            # 两种交互视图共用同一个滚动容器；面板本身不再自己滚动。
+            self._scroll_interaction_overlay(key)
             return
         owner.apply_key(key)
+
+    def _scroll_interaction_overlay(self, key: str) -> None:
+        """Scroll the single shared overlay for any active interaction owner."""
+        overlay = self._overlay()
+        if overlay is None or not overlay.display:
+            return
+        if key == "pageup":
+            overlay.scroll_page_up(animate=False)
+        elif key == "pagedown":
+            overlay.scroll_page_down(animate=False)
+        elif key == "home":
+            overlay.scroll_home(animate=False, immediate=True)
+        else:
+            overlay.scroll_end(animate=False, immediate=True)
 
     def action_interaction_up(self) -> None:
         self._route_interaction_key("up")
@@ -711,10 +817,26 @@ class MicaTuiApp(App[None]):
         self._route_interaction_key(digit)
 
     def action_interaction_pageup(self) -> None:
+        if self._blocking_owner() is None:
+            self._browse_transcript_page(page_up=True)
+            return
         self._route_interaction_key("pageup")
 
     def action_interaction_pagedown(self) -> None:
+        if self._blocking_owner() is None:
+            self._browse_transcript_page(page_up=False)
+            return
         self._route_interaction_key("pagedown")
+
+    def _browse_transcript_page(self, *, page_up: bool) -> None:
+        """Browse transcript history when no interaction owns the page keys."""
+        transcripts = list(self.query(ConversationTranscript))
+        if not transcripts:
+            return
+        if page_up:
+            transcripts[0].scroll_page_up(animate=False)
+        else:
+            transcripts[0].scroll_page_down(animate=False)
 
     def action_interaction_home(self) -> None:
         self._route_interaction_key("home")
@@ -871,11 +993,26 @@ class MicaTuiApp(App[None]):
             return
         self._request_run_cancel(run_id)
 
-    def action_confirm_exit(self) -> None:
-        """First Ctrl+C arms a short confirmation window; the second exits."""
+    def _handle_exit_press(self) -> None:
+        """Count one independent Ctrl+C press; duplicates never exit."""
         if self._runtime_closed:
             return
         now = self._clock()
+        last_press = self._last_exit_press_at
+        if (
+            last_press is not None
+            and 0.0 <= now - last_press < self.EXIT_PRESS_DEDUP_SECONDS
+        ):
+            # One physical press can be delivered near-synchronously more than
+            # once (the key plus a console signal, or a duplicated dispatch);
+            # those duplicates must never count as the second press.
+            # 平台限制：Textual 8.2.8 的 Windows 控制台输入在转换时丢弃 key-up
+            # 记录并忽略 wRepeatCount，``Key`` 事件也不携带按下/重复/释放标记，
+            # 因此“延迟到达的自动重复”与本层可见的“新的独立按下”无法区分。
+            # 该限制已写入 P6-10F 构建日志，并改由真实终端手工复验，而不是
+            # 在这里声称已识别完美物理按键。
+            return
+        self._last_exit_press_at = now
         if self._exit_armed_until is not None and now <= self._exit_armed_until:
             self._exit_armed_until = None
             self.exit()
@@ -884,6 +1021,16 @@ class MicaTuiApp(App[None]):
         if run_id is not None:
             self._request_run_cancel(run_id)
         self._exit_armed_until = now + self.EXIT_CONFIRMATION_SECONDS
+
+    def action_confirm_exit(self) -> None:
+        """First Ctrl+C arms a short confirmation window; the second exits."""
+        self._handle_exit_press()
+
+    def handle_native_interrupt(self) -> None:
+        """Route a native Ctrl+C signal into the same exit state machine."""
+        if self._runtime_closed or not self.is_running:
+            return
+        self._handle_exit_press()
 
     def stop_runtime_input(self) -> None:
         """Stop input synchronously; resource cleanup belongs to the runtime."""

@@ -461,6 +461,15 @@ def test_wheel_contains_only_mica_package_and_metadata(
         "mica_agent/tui/theme.py",
         "mica_agent/tui/tool_cards.py",
         "mica_agent/tui/transcript.py",
+        "mica_agent/tui/main_buffer/__init__.py",
+        "mica_agent/tui/main_buffer/components.py",
+        "mica_agent/tui/main_buffer/editor.py",
+        "mica_agent/tui/main_buffer/interactions.py",
+        "mica_agent/tui/main_buffer/renderer.py",
+        "mica_agent/tui/main_buffer/runtime.py",
+        "mica_agent/tui/main_buffer/sanitize.py",
+        "mica_agent/tui/main_buffer/screen.py",
+        "mica_agent/tui/main_buffer/terminal.py",
     } <= members
     assert 'name="ls"' not in file_tools_source
     assert "MAX_LIST_ENTRIES" not in file_tools_source
@@ -500,7 +509,8 @@ def test_installed_distribution_declares_runtime_dependencies(
 
     assert result.returncode == 0
     assert result.stdout == (
-        "['httpx>=0.28.1', 'jsonschema>=4.25.1', 'textual>=8.2.8']\n"
+        "['httpx>=0.28.1', 'jsonschema>=4.25.1', 'textual>=8.2.8', "
+        "'prompt-toolkit>=3.0.52']\n"
     )
     assert result.stderr == ""
 

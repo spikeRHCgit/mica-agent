@@ -349,3 +349,101 @@ TUI runner 只接收已装配的 `MicaTuiRuntime`，不接收 Provider、Engine�
 
 - 新测试覆盖 overlay 替换底部控制区、无本地焦点的 Ask/权限按键、Ask 终态记录位置、权限不进 transcript、极端终端仍保留一行 transcript、`AppBlur → AppFocus` 恢复以及空闲数字键仍属 composer。
 - 自动化验收通过后，真实 Windows 终端的键盘与失焦行为仍由使用者确认。未开始 Phase 7/8，不宣布 Phase 6 完成。
+
+# P6-10F Windows 终端输入与焦点可靠性
+
+## 目标与实现
+
+- 真实 Windows 终端冒烟暴露三组输入问题：长时间失焦后 Ask/权限导航与 transcript 滚动失效、单次 `Ctrl+C` 仍可能直接退出、composer 可见光标与编辑位置不可靠。
+- 本地根因证据：Textual 8.2.8 的 win32 `EventMonitor` 只处理 `KEY_EVENT` 与 `WINDOW_BUFFER_SIZE_EVENT`，声明的 `FOCUS_EVENT_RECORD` 从不读取；Windows Terminal 会通过 DECSET 1004 的 `ESC[I`/`ESC[O` 汇报焦点，但该路径依赖终端版本与设置。因此恢复不能只绑定 `AppFocus`。
+- `MicaTuiApp` 在 Key、鼠标滚轮和 Resize 分派前执行幂等的输入所有权校正：只修复无效、已脱离 DOM 或不属于当前活动交互的焦点；活动 Ask、活动权限优先，其次运行中 transcript，最后空闲 composer。首个按键或滚轮本身直接生效，不吞掉用户操作。
+- 无阻塞交互时 PageUp/PageDown 由 App 级路由滚动 transcript；聚焦 Bash 卡片时保留其内部浏览与边界冒泡。`app_focus` 在 App 入口恢复，覆盖被 App 拦截消费的按键路径。
+- `Ctrl+C` 只有一个退出状态机：第一次布防（活动 Run 同时调用一次既有取消接缝），约两秒内第二次独立按键才退出。新增基于可注入时钟的同按键去重窗口，合并同一输入批次内的近同步重复投递（按键与原生信号、或重复分发）。
+- 平台限制（如实收窄，非已解决）：Textual 8.2.8 的 win32 事件转换丢弃 key-up 记录、忽略 `wRepeatCount`，其 `Key` 事件也不携带按下/重复/释放标记；Kitty 扩展序列里本版本同样丢弃事件类型字段，且 Windows 控制台路径不产生该序列。因此“去重窗口之后到达的自动重复”与“新的独立按下”在产品可观察层无法区分，持续按住 Ctrl+C 超过系统重复延迟仍可能被计为第二次按键。该边界不通过自动测试声称已识别，而由真实 Windows Terminal 的手工复验（一次短按不退出、两次明确短按才退出）确认。
+- `cli.py` 在 TUI 期间安装最小 SIGINT 接缝：把原生 Ctrl+C 转入 App 的同一状态机，自身不执行清理；App 退出或 runner 异常后恢复原处理器，非主线程场景跳过；`--plain` 行为保持不变。
+- composer 删除会丢弃基类 `_on_mouse_down` 协程的同步覆写（`coroutine was never awaited`），鼠标定位继续由基类处理器与 `watch_selection` 完成。渲染、`cursor_screen_offset` 与 `get_target_document_location()` 现在共用同一提示符偏移：`› ` 只在首个可见行占两格，非首行的硬件/IME 光标与鼠标命中都不再额外偏移两格。
+
+## 边界与验证
+
+- 不改 Engine/事件契约、会话格式、Provider、权限策略或中断轮次持久化；未开始 P6-10G，未宣布 Phase 6 完成。
+- 聚焦测试覆盖：无 `AppFocus` 时 Ask/权限第一发 Down、transcript PageUp 与鼠标滚轮、resize 自愈、Run 终态 composer 恢复、Screen 卸载安全 no-op、Bash 卡片消费与边界冒泡不回归；composer 中间插入/删除、多行与 Unicode、软换行、点击定位和无未 await 协程；Ctrl+C 真实时间推进下的近同步重复、确认窗口内第二次、超时重置与关闭幂等，以及去重窗口之外事件按平台限制计为第二次的边界。
+- composer 坐标统一：`render_line()`、`cursor_screen_offset` 与重写的 `get_target_document_location()` 共用同一提示符偏移规则（`› ` 只在首个可见行占两格）。聚焦测试覆盖第二/第三逻辑行、软换行后的第二视觉行、内部滚动后的首个与后续可见行、Unicode 与宽字符、点击后插入/Backspace/Delete 的实际位置，以及长粘贴片段点击后仍保持原子。
+- 真实 Windows Terminal 的长时间失焦、两秒双击与 composer 编辑仍由使用者手工复验后关闭；自动化不能替代该确认。持续按住 Ctrl+C 的自动重复边界属于上述平台限制，同样由手工复验确认（作为已知风险，不作为已完全解决）。
+
+## P6-10F 返工：自动跟随竞争与交互所有权
+
+### 根因一：滚动失效不是焦点事件缺失，而是自动跟随竞争
+
+- 准确链路：PageUp 只安排一次延迟滚动，`scroll_y` 与 `watch_scroll_y` 尚未生效时，流式 `TextDelta`/`ToolOutputDelta` 已经看到 `_following=True`，于是排下强制 `scroll_end()`，把用户刚刚的 PageUp 覆盖。多次失焦只是放大器（失焦期间输出更多、回调更多）。
+- 另一层冲突是双重跟随状态：Textual `anchor()` 与 Mica `_following` 同时想控制“是否跟随底部”，没有单一所有者。
+- 修复：`ConversationTranscript` 独占跟随状态并移除 `anchor()`；PageUp/方向键/滚轮上滚/滚动条点击拖动/Home 先在入口同步置 `_following=False`，再委托滚动；自动跟随请求合并为一个待执行回调，并在执行前复查跟随状态，用户一旦离底旧回调自动失效；落底改由布局变化（`_scroll_update`）同步完成，不再依赖 `call_after_refresh` 时序；`End` 立即落底并恢复跟随，`_following` 只在到底或显式 End 时恢复；全新会话的启动首屏保持顶部对齐。`scroll_visible` 等程序性揭示不再被误判为用户意图。
+
+### 根因二：权限面板是多重所有权，不是 Down 选择算法
+
+- `apply_key("down")` 本身正确；问题是 owner 依赖 `_active_permission_key` 指针，与 `_permission_views`、overlay 已挂载子组件和 `screen.focused` 可能分叉。指针一旦失效，App 级路由找不到 owner，失焦后的第一发按键就落不到可见面板上。
+- 结构问题还包括：`PermissionInteractionView` 自己继承 `VerticalScroll`，与外层 overlay 形成嵌套滚动；页面键既可能被 App 路由又被面板本地 `on_key` 处理。
+- 修复：overlay 是唯一滚动容器，`PermissionInteractionView` 改为普通可聚焦组件，只保存选择状态与渲染；owner 事实源改为 `InteractionOverlay.active_view`（已挂载、仍活动、且 overlay 可见），`_active_permission_key` 只作为业务关联索引（响应接受与取消请求仍由它把关）；页键一律滚动 overlay；删除面板本地 `on_key`，App 级交互控制器是唯一按键入口。
+
+### 返工验证
+
+- 新增回归顺序：PageUp 后同一事件循环内 `content_added()`，刷新后仍离底且只有一个 `↓ new output`；先排队的跟随回调在用户接管后失效；连续失焦/聚焦加流式输出保持离底；`End` 后恢复跟随；业务索引与焦点同时失效时第一发 Down 仍生效；页键滚动 overlay 且 transcript 不动。
+- 权限面板的滚动断言随架构一起迁移到 overlay（面板 `max_scroll_y == 0`）；Bash 卡片测试的聚焦改为 `scroll_visible=False`，与产品聚焦约定一致。
+- 真实 Windows Terminal 的滚动抢占、失焦恢复与页键行为仍由使用者手工复验；自动化不能替代该确认。
+
+# P6-11A 主缓冲区核心纵向闭环
+
+## 目标
+
+在现有脏工作树上建立不进入 alternate screen 的主缓冲区终端前端，通过临时 `mica cli --main-buffer-preview` 跑通「启动首屏 → composer 编辑 → 提交 → 真实 `MicaApp.Run` → 流式文本 → Ask/Permission 阻塞 → Esc/Ctrl+C → 工作状态 → 输入区恢复 → 正常关闭并保留主缓冲区历史」的完整纵向闭环。默认 Textual 入口与 `--plain` 语义不变，旧前端不删除，不开始 P6-11B/C 与 P6-10G。
+
+## 包边界与 IO 所有权
+
+- 新代码只放在 `src/mica_agent/tui/main_buffer/`，不导入 Textual：`terminal.py`（唯一 IO 所有者）、`sanitize.py`（不可信正文的唯一清洗接缝）、`renderer.py`（语义文档与差分帧）、`components.py`（纯文本组件）、`editor.py`（草稿、软换行与粘贴片段）、`interactions.py`（ask/权限独占模式）、`runtime.py`（单 Run）、`screen.py`（模式机与编排）。
+- 除 `terminal.py` 外任何模块都不写 stdout、不读原始输入；渲染器与组件只返回字符串或语义块，使测试能直接断言逻辑帧而不依赖终端。
+- `FORBIDDEN_SEQUENCES` 只作为文档化样例；真正的防线是 `find_forbidden_sequences()`：它按 ANSI 序列语法解析**实际发出的完整字节流**，因此未知私有模式、整屏擦除、窗口标题与剪贴板操作都会被检出，而不是只匹配固定字符串。
+
+## 输入与渲染的关键决定
+
+- 依赖：新增直接依赖 `prompt-toolkit>=3.0.52`（锁定 `3.0.53`），只使用 `create_input`、`raw_mode`、`attach`、`read_keys` 与 `Buffer`/`Document`，不引入其 Application 与全屏渲染，采用自有渲染与自有按键分派。
+- Windows 低层语义：`Win32Input.read_keys()` 是非阻塞轮询，`attach(callback)` 才是输入就绪信号源，因此模式机使用「就绪回调内排空 `read_keys()` + 线程安全入队」，而不是阻塞式读取。
+- 差分渲染（物理模型）：渲染器记录上一帧的真实物理状态：动态区行数、帧内光标行、可重写尾部块的起始行，以及已经作为永久行写出的 pending 前缀行。首帧只从当前光标位置向下写出，不先发 Cursor Up、不擦除启动前内容；后续帧**先**按上一帧状态回到「本次仍需重绘的第一个块」的起点并擦除其下的旧尾部，**然后**才写出内容，因此正文绝不会从 composer 光标处开始写。超出屏幕预算的行在同一个擦除点之后作为一次性永久输出向下写出（自然进入 scrollback），随后写出不超过屏高的可重绘帧并把光标放回 composer 单元格；已经被永久写出的前缀行不会重复写出，也不会重复重绘。
+- 不可信正文边界：用户输入与历史消息、模型正文、工具可见字段与输出、`RunFailed` 可见信息、Ask 问题/选项/备注、权限工具名与预览、以及 session/model/workspace/branch 等动态事实，都先过 `sanitize.py`；它整段删除 CSI/OSC/DCS/C1 与 C0 控制内容、归一 CRLF、保留正常 Unicode，而且从不插入新的 `ESC`，因此清洗结果无法再组成控制序列。`Terminal.write()` **不**做无差别清洗：渲染器自己生成的光标与擦除序列必须原样写出，可信控制与不可信正文只在语义正文边界区分。
+- 预着色行：带 ANSI 的 Logo 与资源面板行标记为 `styled`（先按纯文本测量/截断、后着色，且宽度不超过终端），不参与换行、宽度测量与二次着色，避免按列切分 ANSI 序列。
+- composer：按终端单元格软换行（CJK、Emoji、组合字符不拆错），显示最多八行并保持光标行可见，上下隐藏行数标在边框上；达到阈值的 bracketed paste 折叠为 `[paste #N +M lines]` 原子片段（整体跨越、一接触就整体删除、提交还原原文、transcript 只显示摘要，手打同名摘要不会冒充真实片段）。草稿正文不做 `strip`：前导/尾随空格与空白行保留，只清控制内容；制表符在显示层按 `TAB_WIDTH` 确定性展开为空格，软换行、显示文本与物理光标单元格共用同一套宽度计算，`submit_text()` 仍返回带真实 `\t` 的原文。提交顺序是「先交给运行时，返回 True 才清空草稿并进入 running」：被拒绝时草稿、光标、粘贴片段与编号全部保持原样，不追加用户消息、不伪造 Run、不启动工作动画，也不暴露内部原因。界面不再显示当前输入层无法交付的 `Shift+Enter` 提示，临时入口保留 `Ctrl+J` 换行。
+- 生命周期：`run()` 把输入获取、raw mode、autowrap 关闭、attach 与首帧都纳入同一清理边界；raw mode、autowrap、attach、`Input.close()` 与 App 关闭各自独立记账且相互隔离，单项失败不会阻断其他清理，也不以异常形式打扰使用者（包括 `clear_chrome` 自身的 write 失败：仍会 detach 输入、恢复 autowrap、离开 raw mode、关闭输入对象、调用一次 `aclose` 并标记 `closed`）。CLI 在失败路径兜底关闭业务资源，正常关闭后不重复关闭 Provider。
+- resize 与状态刷新：终端尺寸在每次绘制前重新读取，只重排可重绘区、chrome、composer 与交互面板，不改变草稿文本、逻辑光标、交互状态或事件顺序；工作状态由**唯一**刷新任务推进 `working.` 点动画，交互面板活动时隐藏并在回到 running 后恢复，`done` 显示真实耗时约两秒后淡出、`stop`/`error` 持久到下一轮，关闭时取消并等待该任务。run 恢复 idle 后用公开接缝刷新 Git 分支，并为模型切换/会话重命名保留 `update_session_snapshot()` 入口，不用定时器轮询。
+- 降级：颜色与交互能力分离；`NO_COLOR`/`TERM=dumb` 只关闭颜色。输出不是交互式终端时前端拒绝启动（`--plain` 仍是基础文字降级入口），不向管道写入光标寻址序列。
+- 模式机：唯一活动模式 `IDLE/RUNNING/ASK/PERMISSION/CLOSED`；终端失焦不改变模式。`Esc` 只在活动 Run 时取消（空闲 no-op）；第一次 `Ctrl+C` 永不退出（活动 Run 同时请求取消），两秒窗口内第二次才退出；`Ctrl+D` 采用最小规则（当前没有更细的 CLI 事实源）：只在空闲且草稿为空时退出，有草稿、活动 Run 或交互模式时忽略，输入流自身的 `EOFError` 走同一条规则，都不删字符也不伪造 Run。
+- Ask 与权限面板在选择期间替代工作状态、输入框与事实区，回答或取消后恢复 composer；权限仍只提供一次允许与拒绝，`Esc` 的语义是取消 Run 而不是拒绝本次调用。
+
+## 事件投影
+
+- 同一模型步骤内的连续 Delta 更新同一个可重写尾部块；首个工具事件或交互事件结束该步骤。
+- 一次工具调用只产生一条记录，按 `ToolPrepared → ToolStarted → ToolOutputDelta → ToolFinished` 原地更新同一尾部块，收口后提交为永久记录；Ask/权限等待期间该记录保持可重写，因此回答后仍能收到真实终态，不会留下永久 pending 记录。
+- `RunCompleted` 显示实际耗时的 `done(Ns)` 约两秒后淡出，`stop`/`error` 保留到下一次 Run；同一界面始终只有一条工作状态条。
+- 事件准入：只有当前真实 `run_id`、严格递增 `seq` 与匹配的 `(run_id, call_id, tool_name)` 才会被修改；重复、倒序、未知 Run、终态之后的迟到事件都被拒绝，只记入内部诊断。`ToolFinished` 还要求最终快照的 `call_id`、`tool_name`、`kind` 与 pending 一致、状态与 `ToolFinished.status` 符合公共契约：不一致时整条事件都不投影——pending 卡片保持原状态、不提交、不清除待答工具身份，只记固定安全诊断，后续匹配的合法终态仍能收口同一张卡片。
+- 终止分类：用户 Esc/Ctrl+C 取消映射为 `stop`，Provider 或消费链异常、以及无终态结束映射为 `error`；内部标记只携带最小类别（`cancelled`/`runtime_error`/`stream_ended`），真实公共终态事件仍然优先。`RunFailed` 的原始 `message` 不进入 transcript：正文只按公共 `ErrorCategory` 映射固定文案，因此绝对路径、Provider 原始响应、异常正文、Key 与 traceback 都不会到达屏幕或发出的字节流。
+- 恢复会话时从已加载 `StoredSession` 只读投影用户消息、已成功/失败的 v3 工具快照与最终回复；缺少快照的旧版本降级为 `recorded`，不重放 Run、不重新执行工具。
+
+## 验证结果
+
+- 测试：`test_tui_main_buffer_render.py`（组件、编辑器、按键归一与交互模式）、`test_tui_main_buffer_vt.py`（虚拟终端回放器及其自检）、`test_tui_main_buffer_redraw.py`（首帧不覆盖 shell sentinel、连续同帧不上移、pending 增长与收回、短帧后 pending 超高不写入 composer、超高继续增长不重复写出、超高缩短不留残影、chrome 同时变高变矮、clear_chrome 保留正文、宽度重排、超高帧滚入 scrollback、全程无禁用效果）、`test_tui_main_buffer_sanitize.py`（22 类对抗载荷注入文档块/事实/交互面板/启动面板，共 114 例）、`test_tui_main_buffer_composer.py`（软换行、八行窗口、长粘贴片段、ask 自定义项、面板排版顺序）、`test_tui_main_buffer_composer_whitespace.py`（前导/尾随空格、空白行、Tab 展开与光标一致、软换行后的 Tab 光标、提交原文保留 `	`）、`test_tui_main_buffer_screen.py`（端到端纵向闭环、提交被拒绝时保留普通草稿与粘贴片段）、`test_tui_main_buffer_lifecycle.py`（初始化/退出路径的清理计数与幂等性、清理阶段 write 失败、`Ctrl+D` 与输入流 EOF 的最小退出规则）、`test_tui_main_buffer_refresh.py`（resize、工作状态动画、done 到期、事实刷新）、`test_tui_main_buffer_events.py`（Run/seq/call/tool_name 隔离、最终快照身份与状态契约、终态与 stop/error 分类、RunFailed 固定文案不泄漏路径与 Key、交互响应被拒绝时保留面板）、`test_tui_main_buffer_cli.py`（路由、失败兜底关闭且不重复关闭、依赖声明）。
+- 分发断言同步更新：wheel 必须包含 `mica_agent/tui/main_buffer/` 九个模块（含 `sanitize.py`），`importlib.metadata.requires` 必须包含 `prompt-toolkit>=3.0.52`；既有 P6-09 路由测试的 `_main_cli` 替身增加新关键字断言。
+- 统一门槛：聚焦组（含分发与既有 CLI/TUI/runtime 套件）`-W error` **347 通过**；全量 **1842 通过、2 跳过**；`ruff check` 全绿；`ruff format --check`（133 文件）通过；`uv build --offline` 成功；两项 `git diff --check` 干净。
+- 视觉证据：110×36 与 40×16 的启动帧（彩色与 NO_COLOR）、resize 前后帧、Ask 与权限面板帧；另用虚拟终端把真实发出的字节流回放，证明 shell sentinel 原样保留、没有清除 scrollback、没有 alternate screen / 鼠标捕获，且退出后物理光标落在干净行。
+
+## 边界与后续
+
+- 本切片不包含：工具专用折叠/展开卡片（`Ctrl+O` 全局展开）、思考显示模式、粘贴片段折叠、Bash 动态输出视口、Markdown 渲染，均为 P6-11B；默认入口切换与旧 Textual 退役为 P6-11C。
+- Logo 几何在 Textual 与主缓冲区两侧各有一份实现（新前端不得导入 Textual），P6-11C 删除旧前端后收敛为单份。
+- 已知偏差：`Shift+Enter` 换行在当前输入层不可用（prompt-toolkit 3.0.53 没有 `ShiftEnter` 键，Windows 控制台与 Windows Terminal 默认也不交付该修饰符），因此界面不再显示该提示，临时入口保留 `Ctrl+J`；输入协议适配属于 P6-11B/C，本轮不自行发明键序列。
+- 已知边界：`import mica_agent.tui.main_buffer` 仍会经由父包 `mica_agent.tui.__init__` 连带加载旧 Textual 前端（子包源码本身不含 Textual 依赖）；把旧前端包改成惰性导出属于 P6-11C 的退役工作，本轮未改。
+- 终端 resize 只重新排版重绘区；已经写入 scrollback 的历史行保留写入时的宽度，由终端自身的重排行为决定。
+- 多行输入：`Enter` 提交，`Ctrl+J`（LF）插入真实换行。prompt-toolkit 3.0.53 没有 `ShiftEnter` 键，Windows 控制台与 Windows Terminal 默认也不把 Shift 修饰符交付到这一层，因此“Shift+Enter 换行”当前不可用；若某个终端开启 modifyOtherKeys / CSI-u，该序列也不会被解析（可能被当普通文本）。输入协议适配属于 P6-11B/C 的输入层工作，本轮不自行发明键序列。
+- 真实 Windows Terminal 的滚轮/scrollbar/scrollback、长时间失焦后的第一发按键、持续按住 `Ctrl+C` 的自动重复边界仍由使用者手工复验；自动化不能替代该确认。
+
+## 用户真实终端验收
+
+- 使用者已在 Windows Terminal 通过临时 `--main-buffer-preview` 完成冒烟：主缓冲区、终端原生滚动与 scrollback、composer 编辑、Ask/Permission 选择、Run 中断及退出恢复等主要功能运行正常，P6-11A 验收通过。
+- 本次验收同时确认了下一切片的视觉基线：当前用户消息、模型思考、工具记录和正式回复层级仍然拥挤，正式回复尚未渲染 Markdown。该差异属于 P6-11B，不回退 P6-11A 的主缓冲区架构结论。
+- 负向现状与正向层级参考分别保存为 `runtime-main-buffer-current-p6-11a.png` 和 `runtime-content-hierarchy-pi-reference.png`；后续任务必须实际打开并成对对照，不照抄参考产品的文案、数据或外围功能。

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from textual.containers import VerticalScroll
 
 from mica_agent.events import (
     PermissionRequested,
@@ -373,7 +374,10 @@ def test_permission_panel_scrolls_in_short_terminal_and_stays_readable(
             facts = app.query_one("#runtime-facts")
             assert overlay.display is True
             assert panel.parent is overlay
-            assert panel.max_scroll_y > 0
+            # 单一滚动容器：长内容由 overlay 承载，面板自身不再滚动。
+            assert not isinstance(panel, VerticalScroll)
+            assert panel.max_scroll_y == 0
+            assert overlay.max_scroll_y > 0
             assert overlay.region.bottom == app.screen.size.height
             assert status.display is False
             assert composer.display is False
@@ -384,11 +388,11 @@ def test_permission_panel_scrolls_in_short_terminal_and_stays_readable(
             assert "1. Yes" in rendered and "2. No" in rendered
 
             panel.focus()
-            start = panel.scroll_y
+            start = overlay.scroll_y
             await pilot.press("pagedown")
-            assert panel.scroll_y > start
+            assert overlay.scroll_y > start
             await pilot.press("pageup")
-            assert panel.scroll_y <= start
+            assert overlay.scroll_y <= start
             await pilot.press("2", "enter")
             await pilot.pause()
             assert responses == [
@@ -455,11 +459,11 @@ def test_permission_panel_keeps_controls_on_extreme_terminal(
             assert "1. Yes" in rendered and "2. No" in rendered
 
             panel.focus()
-            start = panel.scroll_y
+            start = overlay.scroll_y
             await pilot.press("pagedown")
-            assert 0 <= panel.scroll_y <= panel.max_scroll_y
+            assert 0 <= overlay.scroll_y <= overlay.max_scroll_y
             await pilot.press("pageup")
-            assert 0 <= panel.scroll_y <= start
+            assert 0 <= overlay.scroll_y <= start
             await pilot.press("2", "enter")
             await pilot.pause()
             assert responses == [

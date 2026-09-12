@@ -206,6 +206,7 @@ def test_ctrl_c_idle_requires_two_presses_and_resets_after_timeout() -> None:
             await pilot.pause()
             assert app.is_running
             assert app.exits == []
+            clock.advance(0.5)
             await pilot.press("ctrl+c")
             await pilot.pause()
             assert app.exits == [0]
@@ -252,6 +253,7 @@ def test_failed_cancel_still_arms_exit_and_second_ctrl_c_exits() -> None:
             await pilot.pause()
             assert app.is_running
             assert app.exits == []
+            clock.advance(0.5)
             await pilot.press("ctrl+c")
             await pilot.pause()
             assert app.exits == [0]

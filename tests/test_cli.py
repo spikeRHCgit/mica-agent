@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import signal
 import subprocess
 import sys
+from collections.abc import Callable
+from typing import cast
 
 import pytest
 
@@ -109,6 +112,62 @@ def test_main_cli_shuts_down_async_generators_on_keyboard_interrupt(
     assert closed is True
     with pytest.raises(RuntimeError, match="There is no current event loop"):
         asyncio.get_event_loop()
+
+
+def test_tui_sigint_seam_routes_signal_into_app_and_restores() -> None:
+    async def scenario() -> None:
+        class FakeTui:
+            def __init__(self) -> None:
+                self.is_running = True
+                self.interrupts = 0
+
+            def handle_native_interrupt(self) -> None:
+                self.interrupts += 1
+
+        class FakeRuntime:
+            def __init__(self) -> None:
+                self.tui = FakeTui()
+
+        runtime = FakeRuntime()
+        original = signal.getsignal(signal.SIGINT)
+        restore = cli._install_tui_sigint_seam(runtime)  # type: ignore[arg-type]
+        assert restore is not None
+        installed = signal.getsignal(signal.SIGINT)
+        assert installed is not original
+        handler = cast(Callable[[int, object | None], None], installed)
+
+        handler(signal.SIGINT, None)
+        await asyncio.sleep(0)
+        assert runtime.tui.interrupts == 1
+
+        restore()
+        assert signal.getsignal(signal.SIGINT) is original
+        restore()
+        assert signal.getsignal(signal.SIGINT) is original
+
+    asyncio.run(scenario())
+
+
+def test_tui_sigint_seam_preserves_keyboard_interrupt_before_app_runs() -> None:
+    async def scenario() -> None:
+        class FakeTui:
+            is_running = False
+
+        class FakeRuntime:
+            def __init__(self) -> None:
+                self.tui = FakeTui()
+
+        original = signal.getsignal(signal.SIGINT)
+        restore = cli._install_tui_sigint_seam(FakeRuntime())  # type: ignore[arg-type]
+        assert restore is not None
+        installed = signal.getsignal(signal.SIGINT)
+        handler = cast(Callable[[int, object | None], None], installed)
+        with pytest.raises(KeyboardInterrupt):
+            handler(signal.SIGINT, None)
+        restore()
+        assert signal.getsignal(signal.SIGINT) is original
+
+    asyncio.run(scenario())
 
 
 def test_module_version() -> None:

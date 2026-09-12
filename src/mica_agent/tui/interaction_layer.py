@@ -5,6 +5,9 @@ from __future__ import annotations
 from textual.containers import VerticalScroll
 from textual.events import Resize
 
+from .interactions import AskInteractionView
+from .permissions import PermissionInteractionView
+
 
 class InteractionOverlay(VerticalScroll):
     """One App-lifetime overlay for a single active Ask or permission view."""
@@ -23,6 +26,25 @@ class InteractionOverlay(VerticalScroll):
         scrollbar-background: $background;
     }
     """
+
+    @property
+    def active_view(self) -> AskInteractionView | PermissionInteractionView | None:
+        """The single mounted, active interaction view — the owner fact source.
+
+        Keyboard ownership, visible chrome and focus restore all read this
+        state, so a business index (such as the App's permission correlation
+        key) can never disagree with what is actually on screen.
+        """
+        if not self.display:
+            return None
+        for child in self.children:
+            if (
+                isinstance(child, (AskInteractionView, PermissionInteractionView))
+                and child.is_mounted
+                and child.is_active
+            ):
+                return child
+        return None
 
     def on_mount(self) -> None:
         self._sync_max_height()

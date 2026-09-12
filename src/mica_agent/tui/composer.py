@@ -9,7 +9,8 @@ from typing import ClassVar
 from rich.segment import Segment
 from rich.style import Style
 from textual.binding import Binding
-from textual.events import MouseDown, MouseMove, Paste, Resize
+from textual.events import MouseEvent, MouseMove, Paste, Resize
+from textual.geometry import Offset
 from textual.message import Message
 from textual.strip import Strip
 from textual.widgets import TextArea
@@ -128,6 +129,42 @@ class MicaComposer(TextArea):
         """Reserve two editor cells for the persistent Mica prompt."""
         return 2
 
+    def _prompt_cells_at_viewport_row(self, viewport_row: float) -> int:
+        """`› ` 提示符只在首个可见行占两格，其余可见行不保留该缩进。
+
+        渲染、硬件/IME 光标和鼠标命中必须共用这一偏移语义。
+        """
+        return self.gutter_width if viewport_row == 0 else 0
+
+    @property
+    def cursor_screen_offset(self) -> Offset:
+        """Keep the hardware/IME cursor aligned with the rendered caret.
+
+        The ``› `` prompt only occupies the gutter cells on the first visible
+        content row, so caret rows after it must not add ``gutter_width``
+        again; the drawn caret cell never does.
+        """
+        offset = super().cursor_screen_offset
+        _, cursor_y = self._cursor_offset
+        viewport_row = int(cursor_y) - int(self.scroll_offset.y)
+        if self._prompt_cells_at_viewport_row(viewport_row):
+            return offset
+        return Offset(offset.x - self.gutter_width, offset.y)
+
+    def get_target_document_location(self, event: MouseEvent) -> Location:
+        """Map a mouse event with the same prompt offset used for rendering.
+
+        The base implementation subtracts ``gutter_width`` on every row, but
+        Mica draws the prompt only on the first visible row; without this
+        override every later row would resolve two cells to the left of the
+        rendered text.
+        """
+        scroll_x, scroll_y = self.scroll_offset
+        prompt = self._prompt_cells_at_viewport_row(event.y - self.gutter.top)
+        target_x = event.x - prompt + scroll_x - self.gutter.left
+        target_y = event.y + scroll_y - self.gutter.top
+        return self.wrapped_document.offset_to_location(Offset(target_x, target_y))
+
     @property
     def _base_hidden_above(self) -> int:
         return int(self.scroll_y)
@@ -169,7 +206,7 @@ class MicaComposer(TextArea):
         if not 0 <= relative < content_height:
             return strip
 
-        if relative == 0:
+        if self._prompt_cells_at_viewport_row(relative):
             prompt_style = Style(color=BRAND_LIGHT, bgcolor=BACKGROUND, bold=True)
             prompt = Strip([Segment("› ", prompt_style)])
             strip = Strip.join([prompt, strip]).crop_extend(
@@ -415,10 +452,6 @@ class MicaComposer(TextArea):
             center=center,
             record_width=record_width,
         )
-        self._normalize_selection()
-
-    def _on_mouse_down(self, event: MouseDown) -> None:
-        super()._on_mouse_down(event)
         self._normalize_selection()
 
     async def _on_mouse_move(self, event: MouseMove) -> None:

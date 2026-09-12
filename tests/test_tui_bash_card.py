@@ -426,7 +426,8 @@ def test_bash_internal_moves_consume_and_boundary_keys_bubble() -> None:
                 )
             card = app.query_one(BashToolCard)
             transcript = app.query_one(ConversationTranscript)
-            card.focus()
+            # 与产品一致：聚焦不抢 transcript 的滚动位置。
+            card.focus(scroll_visible=False)
             await pilot.pause()
             card.scroll_visible(animate=False)
             await transcript.stop_animation("scroll_y")

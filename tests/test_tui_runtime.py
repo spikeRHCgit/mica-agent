@@ -790,6 +790,7 @@ def test_runtime_ctrl_c_cancels_active_run_then_second_press_exits(
             assert exits == []
             assert runtime.tui.is_running
             assert app.history == ()
+            clock.value = 0.5
             await pilot.press("ctrl+c")
             await pilot.pause()
             assert exits == [0]

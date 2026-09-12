@@ -17,7 +17,7 @@
 | `src/mica_agent/_file_lock.py` | JSONL Store 使用的跨平台独占文件锁；组合进程内线程锁与 Windows/POSIX 文件锁，提供超时和上下文管理。 |
 | `src/mica_agent/app.py` | 应用层装配边界；绑定 SessionService、启动上下文、AgentEngine 和工具执行器，只在完整成功后提交包含最终工具展示快照的会话轮次。 |
 | `src/mica_agent/cancellation.py` | Provider、Engine、工具和交互等待共享的协作式取消令牌与固定取消异常。 |
-| `src/mica_agent/cli.py` | 正式 CLI 装配与前端路由边界；负责参数解析、环境配置检查、工作区与会话选择、启动上下文快照、一次性工具/Provider/App 装配，默认进入 Textual TUI，`--plain` 进入基础文字界面，并提供安全启动诊断与资源关闭。 |
+| `src/mica_agent/cli.py` | 正式 CLI 装配与前端路由边界；负责参数解析、环境配置检查、工作区与会话选择、启动上下文快照、一次性工具/Provider/App 装配，默认进入 Textual TUI，`--plain` 进入基础文字界面，并提供安全启动诊断与资源关闭。TUI 会话期间安装最小 SIGINT 接缝，把原生 Ctrl+C 路由进 App 的两次确认退出状态机，App 退出或 runner 异常后恢复原处理器；`--plain` 保持原 KeyboardInterrupt 行为。P6-11A 增加临时 `--main-buffer-preview` 路由：与 Textual 路径复用同一会话、工具、Provider 与快照装配，只替换前端，且 `--plain` 优先（该参数不是稳定公共契约，不写入 README）；主缓冲区路径不安装 SIGINT 接缝，原始模式下 Ctrl+C 由前端模式机处理。前端构造或运行失败时，CLI 在未自行收敛的失败路径兜底关闭业务资源并给出固定诊断，正常关闭后不重复关闭 Provider。 |
 | `src/mica_agent/context_builder.py` | 会话激活时读取 global/workspace `AGENTS.md`，生成独立指令消息、安全诊断和实际加载来源的不可变快照；不负责系统提示词正文。 |
 | `src/mica_agent/engine.py` | 单次 Run 的核心循环；按序推进 Provider 请求、文本事件、工具调用、交互等待、限制、取消和唯一终态。 |
 | `src/mica_agent/events.py` | Engine 对前端公开的有序事件契约，包括 Run、思考与文本增量、工具准备/开始/完成、工具展示快照、动态输出、权限、用户输入和终态事件。 |
@@ -39,23 +39,32 @@
 | `src/mica_agent/tool_presentation.py` | 工具展示快照和生成边界；提供五个内置工具与未知工具的安全 payload、编辑逐行差异、状态映射和深层不可变快照。 |
 | `src/mica_agent/tool_registry.py` | 进程内工具注册表；保存 ToolSpec 与异步 handler，提供原子注册、确定性列表、重复拒绝和按名解析。 |
 | `src/mica_agent/tui/__init__.py` | Textual TUI 包的显式导入入口；公开 `MicaTuiApp`、Composer、启动资源与会话事实快照、模型输出视图以及 transcript 滚动与历史记录类型，不扩展 `mica_agent` 顶层公共 API。 |
-| `src/mica_agent/tui/app.py` | Textual 外壳与 Engine 公共事件投影边界；建立 transcript、唯一 work-status、可编辑 composer 与两行运行事实的稳定布局，接收已加载的 `StoredSession` 恢复历史，按 Run/seq 隔离事件，并把同一 Run 内每个模型步骤映射到独立的思考/回复视图。首个有效 `ToolPrepared`（含 ASK）结束当前步骤并保持 DOM 位置，后续 Delta 追加到上一批工具记录之后；同时驱动唯一工作状态条和工具卡片生命周期及动态输出投影。Ask/权限等待时懒创建唯一底部 overlay，隐藏普通控制区并走 App 级按键路由；`AppFocus` 按 Ask、权限、运行中 transcript、空闲 composer 恢复焦点。App 级高优先级 `Esc`/`Ctrl+C` 接管取消与两次确认退出，不依赖局部焦点，也不包含独立快捷键栏。 |
+| `src/mica_agent/tui/app.py` | Textual 外壳与 Engine 公共事件投影边界；建立 transcript、唯一 work-status、可编辑 composer 与两行运行事实的稳定布局，接收已加载的 `StoredSession` 恢复历史，按 Run/seq 隔离事件，并把同一 Run 内每个模型步骤映射到独立的思考/回复视图。首个有效 `ToolPrepared`（含 ASK）结束当前步骤并保持 DOM 位置，后续 Delta 追加到上一批工具记录之后；同时驱动唯一工作状态条和工具卡片生命周期及动态输出投影。Ask/权限等待时懒创建唯一底部 overlay，隐藏普通控制区；键盘所有权来自 overlay 当前已挂载的活动子组件（唯一事实源），业务关联索引只映射交互、不决定路由。Key、鼠标滚轮和 Resize 分派前执行幂等的输入所有权校正，只修复无效或不属于当前所有者的焦点，不假设终端一定上报 `AppFocus`。无阻塞交互时 PageUp/PageDown 浏览 transcript；有交互时页键一律滚动 overlay，聚焦 Bash 卡片时保留其内部滚动与边界冒泡。App 级高优先级 `Esc`/`Ctrl+C` 接管取消与两次确认退出，不依赖局部焦点；同一输入批次内近同步重复投递（按键与原生信号、或重复分发）不会计为第二次按键。Textual 8.2.8 的 Windows 控制台输入丢弃 key-up 记录并忽略重复计数，延迟到达的自动重复与本层可见的“新的独立按下”无法区分，该平台限制由真实终端手工复验。不含独立快捷键栏。 |
 | `src/mica_agent/tui/bottom.py` | composer 下方的两行只读运行事实；仅渲染 CLI 注入的安全 workspace、model 和 session label，并使用终端 cell width 做显示层省略与右对齐。 |
-| `src/mica_agent/tui/composer.py` | TUI 专用的可编辑输入组件；负责品牌提示符、完整固定边框、空草稿发送提示、软换行、真实换行、按显示行数 1～8 行自动增高与内部滚动、溢出提示、长粘贴折叠原子片段、原文还原提交消息与安全展示快照。 |
+| `src/mica_agent/tui/composer.py` | TUI 专用的可编辑输入组件；负责品牌提示符、完整固定边框、空草稿发送提示、软换行、真实换行、按显示行数 1～8 行自动增高与内部滚动、溢出提示、长粘贴折叠原子片段、原文还原提交消息与安全展示快照。屏幕光标按提示符行的实际偏移对齐渲染出的光标单元，鼠标定位与删除选区的片段原子性不变。 |
 | `src/mica_agent/tui/logo.py` | transcript 顶部的只读响应式 Mica Logo；按可用宽度切换无伴随字标的完整、紧凑与纯文本形态。 |
-| `src/mica_agent/tui/interaction_layer.py` | 唯一底部阻塞交互覆盖层；懒创建后用 `display` 显隐，承载活动 Ask 或权限视图，不进入空闲布局，也不保存会话或回调状态。 |
+| `src/mica_agent/tui/interaction_layer.py` | 唯一底部阻塞交互覆盖层；懒创建后用 `display` 显隐，承载活动 Ask 或权限视图，不进入空闲布局，也不保存会话或回调状态。它同时是**唯一滚动容器**，并通过 `active_view` 暴露“已挂载且仍活动”的交互子组件，作为键盘所有权、chrome 显示与焦点恢复的共同事实源。 |
 | `src/mica_agent/tui/interactions.py` | ask 结构化交互面板与只读历史 ask 记录；消费公开 AskPrompt，提供可注入的响应/取消接缝、选项导航、自定义回答、备注、终态原地收口和安全展开。活动面板由 overlay 承载，完成后复制为 transcript 记录；选项正文由独立内容子节点承担自动高度，不连接 Broker、Engine、Provider 或 Store。 |
-| `src/mica_agent/tui/permissions.py` | 权限请求底部确认面板；消费 ToolPrepared 的安全展示快照与公共 PermissionResponse 接缝，提供一次性 Yes/No、Esc 取消、严格同步回调和无敏感信息的纯文本降级展示。活动面板挂在唯一 overlay 中，关闭后不进入 transcript；宽终端在提示行与状态条之间保留一行空隙，短终端去掉纵向 padding。 |
+| `src/mica_agent/tui/permissions.py` | 权限请求底部确认面板；消费 ToolPrepared 的安全展示快照与公共 PermissionResponse 接缝，提供一次性 Yes/No、严格同步回调和无敏感信息的纯文本降级展示。面板自身不是滚动容器，页键由 App 路由给共享 overlay；没有本地 `on_key`，App 级交互控制器是唯一按键入口。宽终端在提示行与状态条之间保留一行空隙，短终端去掉纵向 padding。 |
 | `src/mica_agent/tui/runtime.py` | TUI 运行适配控制器；集中拥有唯一活动 Run 的 CancellationToken、消费任务、真实 run_id 和 `MicaApp.run()` 事件流，顺序投影事件、转发公共交互响应，并在 TUI 退出或 `aclose()` 时按取消、等待流、清理 UI、关闭 MicaApp 的顺序释放资源。 |
 | `src/mica_agent/tui/paste.py` | TUI 内长粘贴折叠片段的模型与源文本判定；按逻辑行阈值决定是否折叠，并提供不可展开的紧凑摘要与真实原文快照。 |
 | `src/mica_agent/tui/history.py` | `StoredSession` 到 TUI 历史视图的只读投影；按持久化顺序产出历史用户卡片、ask、read/write/edit/bash 正式卡片和紧凑工具记录，不重放 Run、不重新执行工具、不读取会话存储。 |
-| `src/mica_agent/tui/transcript.py` | transcript 容器、用户消息卡片与历史工具记录；新会话从顶部展示启动层级，恢复历史时定位最新内容，并提供底部自动跟随、用户上滚离底检测、唯一 `↓ new output` 提示与返回底部动作；展示提交时保存的紧凑显示快照，不把用户原始文本解释为 Markdown，也不展开工具细节。 |
+| `src/mica_agent/tui/transcript.py` | transcript 容器、用户消息卡片与历史工具记录；新会话从顶部展示启动层级，恢复历史时定位最新内容，并提供底部自动跟随、用户上滚离底检测、唯一 `↓ new output` 提示与返回底部动作；展示提交时保存的紧凑显示快照，不把用户原始文本解释为 Markdown，也不展开工具细节。自动跟随由本组件独占（不使用 Textual `anchor`）：用户滚动入口先同步释放跟随，流式追加只在仍跟随时排队一次回调并在执行前复查，落底由布局变化驱动，显式 End 才恢复跟随。 |
 | `src/mica_agent/tui/output.py` | TUI 模型正式回复与独立思考视图；使用 Textual Markdown、流式光标、完整/折叠/隐藏思考模式及当前焦点的 `Ctrl+O` 切换，支持从历史正文构造非流式回复，不持久化事件内容。 |
 | `src/mica_agent/tui/models.py` | TUI 专用的不可变安全快照；启动资源快照保存系统提示词名称、AGENTS 来源及其安全显示路径、工具/Skill/扩展名称，会话事实快照保存显示用工作区、会话标签和模型。 |
 | `src/mica_agent/tui/startup.py` | transcript 内的只读启动首屏组件；依次渲染定位文案、Context/Skills/Extensions/Tools 分区资源框和真实就绪说明，不自行读取或推断业务状态，也不模拟模型欢迎消息。 |
 | `src/mica_agent/tui/status.py` | 唯一工作状态条视图；公开 Run 工作状态和阶段类型，消费已校验事件投影提供的时钟，负责阶段/总耗时、进展颜色和确定性点号动画，不显示敏感运行标识或正文。 |
 | `src/mica_agent/tui/theme.py` | TUI 外壳的深色语义主题令牌与基础布局样式；依靠 Textual/Rich 完成颜色能力协商和外壳级降级。 |
 | `src/mica_agent/tui/tool_cards.py` | 工具卡片基础组件、`read`、`write`、`edit`、`bash` 和 Generic 兜底卡片；按 `(run_id, call_id)` 由外壳维护稳定组件身份，消费安全展示快照并原地更新生命周期状态，write 支持纯文本十行折叠与焦点展开，edit 支持逐行差异、行号与二十条变化折叠，bash 支持三行命令折叠、动态输出、八行视口、内部浏览与终态输出校准，并提供统一的安全卡片解析及可注入专用工厂接缝。 |
+| `src/mica_agent/tui/main_buffer/__init__.py` | 主缓冲区终端前端的显式导入入口；只导出终端、清洗接缝、渲染、组件、编辑器、交互模式、单 Run 控制器与编排层，不依赖 Textual，也不扩展 `mica_agent` 顶层公共 API。 |
+| `src/mica_agent/tui/main_buffer/terminal.py` | 主缓冲区**唯一 IO 所有者**；负责原始输入注册与轮询、终端尺寸、交互与颜色能力判断、autowrap 管理、主缓冲区输出，以及 `find_forbidden_sequences()` 对**实际发出的字节流**做按语法解析的安全扫描（含未知私有模式、整屏擦除、标题与剪贴板）。输入与输出的获取与释放互相隔离、可重复调用，单项清理失败只记账不外抛。 |
+| `src/mica_agent/tui/main_buffer/sanitize.py` | 不可信正文到可信 ANSI 的**唯一清洗接缝**：整段删除 CSI/OSC/DCS/C1 与 C0 控制内容、归一 CRLF、保留正常 Unicode（含组合字符与 ZWJ 序列），且从不插入新的 `ESC`，因此清洗结果无法再组成控制序列。 |
+| `src/mica_agent/tui/main_buffer/renderer.py` | 语义文档与差分帧渲染；保存未换行的语义块与唯一可重写尾部块，并维护**上一帧的真实物理状态**（动态区行数、帧内光标行、可重写尾部块的起始行、已永久写出的 pending 前缀行）。重绘时**先**回到「本次仍需重绘的第一个块」的起点并擦除旧尾部，**再**写出内容与永久溢出行，因此正文不会从 composer 光标处开始；帧高不超过屏幕高，超预算行作为一次性永久输出进入 scrollback，已永久写出的前缀不重复写出。同时提供 `cell_len`/`expand_tabs`（共用 `TAB_WIDTH`）与 `wrap_line`。非 `styled` 正文在排版前先过清洗接缝，`styled` 行（Logo、已排版面板）不换行、不测量、不二次着色。 |
+| `src/mica_agent/tui/main_buffer/components.py` | 纯文本展示组件；生成 Logo（与 Textual 侧同一几何，P6-11C 再收敛）、启动资源面板、用户/思考/回复块、工具状态行、工作状态条、输入框边框与底部事实行，并只读地探测当前工作区 Git 分支。面板与边框一律先按纯文本测量/截断再着色，动态事实与正文经清洗接缝后再进入排版。 |
+| `src/mica_agent/tui/main_buffer/editor.py` | composer 草稿、软换行与粘贴片段；基于 prompt_toolkit `Buffer`/`Document` 提供插入、删除、移动与按终端单元格的软换行视图（制表符先按 `expand_tabs` 展开，使软换行、显示与光标列共用同一套宽度），并把终端按键归一为稳定 `Key`。达到阈值的长粘贴折叠为不可拆分的 `[paste #N +M lines]` 片段：整体跨越、整体删除，提交时还原原始正文。 |
+| `src/mica_agent/tui/main_buffer/interactions.py` | ask 与权限的独占输入模式；提供选项导航（含 `Type something.` 自定义行）、数字定位编号选项、自定义回答、备注、一次允许/拒绝与取消意图，只产生公共 `UserInputResponse`/`PermissionResponse`，不直连 Broker、Engine、Provider 或 Store。 |
+| `src/mica_agent/tui/main_buffer/runtime.py` | 主缓冲区单 Run 控制器；集中拥有唯一活动 Run 的取消令牌、消费任务、真实 `run_id` 与事件流，转发公共交互响应，并在未收到公共终态时补一条只携带最小终止类别（`cancelled`/`runtime_error`/`stream_ended`）的内部标记；退出时按取消、等待、关闭 `MicaApp` 的顺序释放资源且幂等。 |
+| `src/mica_agent/tui/main_buffer/screen.py` | 主缓冲区前端编排与模式机；维护 `IDLE/RUNNING/ASK/PERMISSION/CLOSED` 唯一活动模式，按 `run_id`／单调 `seq`／`(run_id, call_id, tool_name)` 与最终快照完整身份准入公共事件，把事件投影到语义文档与唯一工作状态，处理 Esc 取消、`Ctrl+D` 最小退出规则、两次 `Ctrl+C` 退出、resize 重排、唯一工作状态刷新任务与 Run 结束后输入区恢复。提交顺序是先交运行时、成功才清空草稿。关闭时每一步（提交 pending、清 chrome、关输入、关业务资源）互相隔离并只记固定标签，退出后仍保留主缓冲区历史；`RunFailed` 只按 `ErrorCategory` 映射固定文案。 |
 | `src/mica_agent/workspace.py` | 工作区身份与数据根边界；优先识别 Git 根目录，否则使用启动目录，并生成规范路径、slug、SHA-256 ID 和会话目录。 |
 | `src/mica_agent/workspace_paths.py` | 文件工具共享的工作区路径解析器；拒绝绝对/越界路径、重解析点、Windows 别名和 ADS；另提供文件授权与命令分析共用的敏感路径分类，不自行授权。 |
 | `src/mica_agent/providers/__init__.py` | Provider 子包的公共出口；只重导出供应商无关契约和错误，不执行网络请求。 |

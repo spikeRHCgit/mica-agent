@@ -5,7 +5,9 @@ from __future__ import annotations
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll
-from textual.events import Click, Resize
+from textual.events import Click, MouseScrollUp, Resize
+from textual.geometry import Size
+from textual.message import Message
 from textual.widgets import Static
 
 from mica_agent.tool_presentation import ToolPresentationSnapshot
@@ -49,6 +51,10 @@ class ConversationTranscript(VerticalScroll):
         self._following = True
         self._has_history = has_history
         self._pending_new_output = False
+        self._follow_scheduled = False
+        # 自动跟随只在真正拥有输出时生效：恢复的历史或已经产生过可见内容。
+        # 全新会话的启动首屏因此保持顶部对齐，不被布局变化拉到底部。
+        self._auto_follow_armed = has_history
         self._programmatic_scroll = False
         super().__init__(id=id)
 
@@ -68,9 +74,11 @@ class ConversationTranscript(VerticalScroll):
 
     def on_mount(self) -> None:
         self._sync_compact_spacing()
-        self.anchor(self._has_history)
         if self._has_history:
-            self.call_after_refresh(self._scroll_latest)
+            # 恢复的历史定位到最新内容：先尝试同步落底，布局稳定后由待命状态
+            # 在 _scroll_update 中再次校准，不依赖 Textual 的 anchor。
+            self._scroll_latest()
+            self._schedule_follow()
 
     def on_resize(self, event: Resize) -> None:
         self._sync_compact_spacing()
@@ -82,9 +90,63 @@ class ConversationTranscript(VerticalScroll):
             ("none", "transparent") if compact else ("solid", BORDER)
         )
 
+    def _note_user_scroll(self) -> None:
+        """同步记录用户接管视口的意图，早于实际滚动位置更新。
+
+        Textual 把真实滚动推迟到下一次刷新，而本组件的跟随状态必须在这之前
+        生效；否则在该窗口到达的流式输出会把视口强行拉回底部。
+        """
+        if self._programmatic_scroll or not self._following:
+            return
+        self._following = False
+        self._sync_indicator()
+
+    def scroll_page_up(self, **kwargs: object) -> None:
+        """真实 PageUp：先同步释放跟随，再委托给 Textual 滚动。"""
+        self._note_user_scroll()
+        super().scroll_page_up(**kwargs)
+
+    def scroll_up(self, **kwargs: object) -> None:
+        """向上逐行滚动（方向键）同样属于用户接管视口。"""
+        self._note_user_scroll()
+        super().scroll_up(**kwargs)
+
+    def scroll_home(self, **kwargs: object) -> None:
+        """Home 离开底部，同样同步释放跟随。"""
+        self._note_user_scroll()
+        super().scroll_home(**kwargs)
+
+    def _on_mouse_scroll_up(self, event: MouseScrollUp) -> None:
+        """滚轮上滚：先记录意图，再让基类滚动。"""
+        if not (event.ctrl or event.shift):
+            self._note_user_scroll()
+        super()._on_mouse_scroll_up(event)
+
+    def _on_scroll_to(self, message: Message) -> None:
+        """滚动条点击或拖动由用户发起，先记录意图。"""
+        self._note_user_scroll()
+        super()._on_scroll_to(message)
+
+    def _scroll_update(self, virtual_size: Size) -> None:
+        """跟随状态下，布局变化后立即落到最新内容。
+
+        内容追加会改变 virtual size；在这里同步完成落底，不依赖
+        ``call_after_refresh`` 的回调时序，也不与用户接管视口冲突（后者已把
+        ``_following`` 置为假）。
+        """
+        super()._scroll_update(virtual_size)
+        if not self.is_mounted or not self._following:
+            return
+        if self._auto_follow_armed:
+            self._scroll_latest()
+
     def action_page_up(self) -> None:
-        """用即时滚动完成真实 PageUp，并明确释放跟随锚点。"""
+        """用即时滚动完成真实 PageUp，并同步释放跟随意图。"""
         self.scroll_page_up(animate=False)
+
+    def action_scroll_end(self) -> None:
+        """显式 End：立即回到最新输出并恢复自动跟随。"""
+        self.return_to_latest()
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         super().watch_scroll_y(old_value, new_value)
@@ -101,31 +163,56 @@ class ConversationTranscript(VerticalScroll):
 
     def content_added(self) -> None:
         """通知可见内容已追加，并按公开跟随状态处理滚动。"""
-        if self._following:
-            self.call_after_refresh(self._scroll_latest)
-        else:
+        if not self._following:
             self._pending_new_output = True
             self._sync_indicator()
+            return
+        self._auto_follow_armed = True
+        self._schedule_follow()
 
     def content_resized(self) -> None:
         """Reconcile scroll position after an existing card changes height."""
-        if self._following:
-            self.call_after_refresh(self._scroll_latest)
+        if not self._following:
+            return
+        self._auto_follow_armed = True
+        self._schedule_follow()
 
     def return_to_latest(self) -> None:
         """公开动作：返回 transcript 底部并恢复自动跟随。"""
         self._following = True
+        self._auto_follow_armed = True
         self._pending_new_output = False
         self._sync_indicator()
-        self.call_after_refresh(self._scroll_latest)
+        self._scroll_latest()
+        self._schedule_follow()
+
+    def _schedule_follow(self) -> None:
+        """合并同一刷新周期内的自动跟随请求，避免每个增量排一次回调。"""
+        if self._follow_scheduled:
+            return
+        self._follow_scheduled = True
+        self.call_after_refresh(self._run_scheduled_follow)
+
+    def _run_scheduled_follow(self) -> None:
+        self._follow_scheduled = False
+        if not self._following:
+            # 回调排队之后用户已接管视口：旧回调自动失效，只保留新输出提示。
+            self._pending_new_output = True
+            self._sync_indicator()
+            return
+        self._scroll_latest()
 
     def _scroll_latest(self) -> None:
+        if not self._following:
+            # 自动跟随不得覆盖用户刚刚抢回的滚动控制权。
+            self._pending_new_output = True
+            self._sync_indicator()
+            return
         self._programmatic_scroll = True
         try:
             self.scroll_end(animate=False, immediate=True, force=True)
         finally:
             self._programmatic_scroll = False
-        self._following = True
         self._pending_new_output = False
         self._sync_indicator()
 
