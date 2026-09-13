@@ -16,7 +16,6 @@ from mica_agent.tui.main_buffer.components import (
     logo_lines,
     startup_blocks,
     status_line,
-    tool_block,
 )
 from mica_agent.tui.main_buffer.editor import (
     ComposerEditor,
@@ -86,7 +85,7 @@ def test_renderer_keeps_document_order_and_chrome_last() -> None:
     renderer.set_chrome(["chrome"], cursor=None)
     renderer.repaint()
 
-    assert renderer.frame() == ["first", "second", "chrome"]
+    assert renderer.frame() == ["first", "", "second", "chrome"]
 
 
 def test_renderer_streaming_updates_single_pending_block() -> None:
@@ -291,12 +290,41 @@ def test_logo_lines_switch_modes_by_width() -> None:
     assert len(full) == 6
 
 
-def test_tool_block_uses_status_symbol_and_kind() -> None:
-    block = tool_block("read", "success", "docs/a.md")
-    assert block.text.startswith(" ✓ read")
-    assert block.kind == "tool_success"
-    recorded = tool_block("bash", "recorded", "")
-    assert recorded.kind == "tool_cancelled"
+def test_read_tool_view_is_one_line_with_safe_reason() -> None:
+    """read 视图：单行、只显示工具名与安全相对路径；失败只追加固定原因。"""
+    from mica_agent.tool_presentation import (
+        ToolPresentationKind,
+        ToolPresentationSnapshot,
+        ToolPresentationStatus,
+    )
+    from mica_agent.tui.main_buffer.renderer import Palette
+    from mica_agent.tui.main_buffer.tool_views import ToolViewFactory
+
+    factory = ToolViewFactory()
+    ok = ToolPresentationSnapshot(
+        "c1",
+        "read",
+        ToolPresentationKind.READ,
+        ToolPresentationStatus.SUCCESS,
+        {"path": "docs/a.md"},
+    )
+    ok_view = factory.create(ok, state="success")
+    assert ok_view is not None
+    assert ok_view.render(30, Palette(False), False) == ["✓ read  docs/a.md"]
+
+    failed = ToolPresentationSnapshot(
+        "c2",
+        "read",
+        ToolPresentationKind.READ,
+        ToolPresentationStatus.FAILED,
+        {"path": "docs/a.md"},
+        "tool execution failed",
+    )
+    failed_view = factory.create(failed, state="failed")
+    assert failed_view is not None
+    assert failed_view.render(40, Palette(False), False) == [
+        "× read  docs/a.md  tool execution failed"
+    ]
 
 
 # -- 编辑器 -----------------------------------------------------------------

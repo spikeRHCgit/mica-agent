@@ -54,6 +54,12 @@
 - `runtime-content-hierarchy-pi-reference.png`：正文层级正向参考。只借鉴段落留白、标题/列表/行内代码
   的可读层级、次要过程信息与正式回复的区分，以及工具色块和普通正文的清晰边界；不照抄 Todo、
   token、成本、模型名、产品文案、桌面背景或其他应用控件。
+- `runtime-p6-11b-hierarchy-still-crowded.png`：负向问题。P6-11B 真实 Windows Terminal 复验：用户消息
+  背景随文字收缩、用户/思考/回复/工具之间零间距、思考不够次要。只用于确认必须消除的偏差，
+  不是待复刻目标。
+- `runtime-p6-11b-inline-code-overhighlighted.png`：负向问题。P6-11B 真实 Windows Terminal 复验：普通
+  段落里的路径、工具名、命令和环境变量被行内代码灰块密集高亮。只用于确认必须消除的偏差，
+  不是待复刻目标。
 
 ## 使用规则
 

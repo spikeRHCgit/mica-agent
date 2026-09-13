@@ -15,25 +15,37 @@ import io
 import pytest
 
 from mica_agent.interactions import AskOption, AskPrompt
+from mica_agent.tool_presentation import (
+    ToolPresentationKind,
+    ToolPresentationSnapshot,
+    ToolPresentationStatus,
+)
 from mica_agent.tui.main_buffer.components import (
     assistant_block,
     composer_frame,
     facts_lines,
     reasoning_block,
     startup_blocks,
-    tool_block,
     user_block,
 )
 from mica_agent.tui.main_buffer.interactions import (
     AskInteraction,
     PermissionInteraction,
 )
-from mica_agent.tui.main_buffer.renderer import Block, Palette, wrap_blocks
+from mica_agent.tui.main_buffer.markdown import render_markdown
+from mica_agent.tui.main_buffer.renderer import (
+    Block,
+    BlockLike,
+    Palette,
+    RenderedBlock,
+    wrap_blocks,
+)
 from mica_agent.tui.main_buffer.sanitize import sanitize_scalar, sanitize_text
 from mica_agent.tui.main_buffer.terminal import (
     Terminal,
     find_forbidden_sequences,
 )
+from mica_agent.tui.main_buffer.tool_views import ToolViewFactory
 
 # 任务单列举的对抗载荷：终端状态、剪贴板、光标、覆写与普通控制字符。
 PAYLOADS = {
@@ -116,7 +128,20 @@ def test_detector_catches_effects_not_only_known_strings() -> None:
     assert find_forbidden_sequences("\x1b]2;t\x1b\\") == ["OSC 2"]
 
 
-def _render(terminal: Terminal, blocks: list[Block], width: int = 100) -> str:
+def _forged_tool(payload_key: str, raw: str) -> ToolPresentationSnapshot:
+    """伪造一个带控制序列的工具快照，验证视图自身的防线。"""
+    snapshot = ToolPresentationSnapshot(
+        "forged",
+        "read",
+        ToolPresentationKind.READ,
+        ToolPresentationStatus.SUCCESS,
+        {"path": "docs/a.md"},
+    )
+    object.__setattr__(snapshot, "payload", {payload_key: raw})
+    return snapshot
+
+
+def _render(terminal: Terminal, blocks: list[BlockLike], width: int = 100) -> str:
     palette = Palette(True)
     for line in wrap_blocks(blocks, width):
         terminal.write(palette.paint(line, "text") + "\r\n")
@@ -129,12 +154,17 @@ def test_untrusted_text_in_document_blocks_never_reaches_the_stream(
 ) -> None:
     raw = PAYLOADS[name]
     terminal = make_terminal()
-    blocks = [
+    view = ToolViewFactory().create(_forged_tool("path", raw), state="success")
+    assert view is not None
+    blocks: list[BlockLike] = [
         user_block(f"ask {raw}"),
         assistant_block(f"answer {raw}"),
         reasoning_block(f"think {raw}"),
-        tool_block(f"tool{raw}", "success", f"detail{raw}"),
+        view,
         Block("text", f"raw {raw}"),
+        RenderedBlock(
+            "assistant", tuple(render_markdown(f"md {raw}", 60, Palette(True)))
+        ),
     ]
     stream = _render(terminal, blocks)
     assert raw not in stream

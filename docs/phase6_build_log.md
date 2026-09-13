@@ -447,3 +447,72 @@ TUI runner 只接收已装配的 `MicaTuiRuntime`，不接收 Provider、Engine�
 - 使用者已在 Windows Terminal 通过临时 `--main-buffer-preview` 完成冒烟：主缓冲区、终端原生滚动与 scrollback、composer 编辑、Ask/Permission 选择、Run 中断及退出恢复等主要功能运行正常，P6-11A 验收通过。
 - 本次验收同时确认了下一切片的视觉基线：当前用户消息、模型思考、工具记录和正式回复层级仍然拥挤，正式回复尚未渲染 Markdown。该差异属于 P6-11B，不回退 P6-11A 的主缓冲区架构结论。
 - 负向现状与正向层级参考分别保存为 `runtime-main-buffer-current-p6-11a.png` 和 `runtime-content-hierarchy-pi-reference.png`；后续任务必须实际打开并成对对照，不照抄参考产品的文案、数据或外围功能。
+
+# P6-11B 历史与工具呈现迁移
+
+## 目标
+
+在 P6-11A 的主缓冲区架构上把近似的纯文本日志升级为有明确语义层级的终端界面：区分用户消息、模型思考、正式回复与工具记录；对正式回复做安全、宽度感知的 Markdown 渲染；恢复 read/write/edit/bash/ask/generic 的专用工具呈现与大面积状态色块；活动工具显示有界实时输出；实现全局 `Ctrl+O`；历史恢复与实时事件复用同一组视图。仍通过临时 `--main-buffer-preview` 验收，不切换默认入口、不删除旧前端、不开始 P6-11C/P6-10G。
+
+## 语义块与模块边界
+
+- 语义块只保存安全源数据与展示状态，并按当前宽度/调色板/全局展开状态生成物理行（`Block` 纯文本、`RenderedBlock` 冻结物理行、`UserBlock`/`ReasoningBlock`/`Markdown*`/工具视图）。业务层不再提前拼接整段不可信 ANSI；不可信正文仍在清洗接缝之后才进入排版。
+- 新增 `markdown.py` 与 `tool_views.py` 两个职责单一的模块：前者只管安全边界、Rich 主题映射与物理行集成，后者只管把安全展示快照变成工具色块；编排层（`screen.py`）继续只做投影与模式机，不再堆放 Markdown 与工具解析。
+- `ReasoningDisplayMode` 移到不依赖 Textual 的 `tui/models.py`，旧 `output.py` 继续导入并重导出，旧前端行为与公开导出不变。
+
+## 物理重绘模型
+
+- 渲染器改为**保留式屏幕映射**：为每个已写入的物理行保存逻辑身份（同一消息/工具记录被切分后的片段共享标识与连续逻辑行号）。映射行数不超过终端高度，因此映射内的每一行都仍在屏幕上，回到任意一行的上移量都不会越过屏幕顶部。
+- 重绘时按身份+文本求公共前缀：普通增量只回到变化尾部；较早块高度变化（全局 Ctrl+O、宽度变化）时从该块起点受控重排；完全相同的帧不再产生任何字节。首帧仍只从当前光标位置向下写出，擦除始终从可寻址行开始，不触碰启动前的 shell 内容；超过屏幕预算的行仍然只写一次并进入 scrollback。
+- 唯一可重写块高于屏幕预算时按物理行切分：头部成为永久片段、尾部继续可重写，两个片段共享逻辑标识与连续行号，因此已写出的行不会被重复写出，也不会改变屏幕映射中的身份。
+
+## 内容层级
+
+- 用户消息：原文按纯文本显示（正文里的 `#`、`**`、围栏都不会生效），每一条物理行填满当前可用内容宽度的低对比度深灰背景，首行左侧短蓝色身份标识、后续行稳定缩进；块自身不附加空行。
+- 模型思考：只有 `ReasoningDelta` 进入思考块；muted + dim 灰色次要文字 + 左侧细灰线；默认 `collapsed`（最多两行，省略号计入第二行宽度预算），`hidden` 不产生任何行、也不留下空白占位，`full` 展示全部；显示模式由 `MainBufferScreen` 注入，不响应 `Ctrl+O`。历史没有保存思考正文时不伪造历史思考。
+- 正式回复：直接位于终端背景，不使用聊天气泡；标题/列表标记/链接使用克制的蓝青色，行内代码只用蓝灰色前景、不加背景，代码块深灰背景并填满可用宽度；完成收口后用完整累计源文本做一次稳定渲染并移除流式光标。
+- 语义间距唯一事实源在渲染器 `_layout_document`：相邻且不同逻辑流的高层记录之间恰好一条无背景空白行；同一流切分、流式增量与工具原地更新不重复插入；chrome/composer/facts/status 不参与。
+
+## Markdown 安全边界
+
+- 使用锁文件中已有的 Rich 15.0.0（本轮声明为直接依赖，不升级任何依赖）；Mica 只做清洗、主题映射与物理行集成，不自行实现 CommonMark 解析器。
+- 行样式由 Mica 从 Rich 解析出的 `Style` 重新生成，只允许加粗/暗淡/斜体/下划线与前景/背景色，**从不生成 OSC 8 超链接**；链接显示为可读文本加地址。不渲染 HTML、不加载图片、不访问 URL、不执行代码，不改变光标、标题栏、剪贴板、终端模式或 scrollback。
+- NO_COLOR 下保留标题（加粗）、缩进、列表标记、引用边界（`▌`）与代码块等宽边界（`│`），结构不依赖颜色；未闭合围栏、未闭合强调与拆开的 Unicode 增量都不会抛异常。
+- 流式累计源文本始终不超过 `MAX_SOURCE_CHARS`：多次追加后完整 source 被截到上限，到达上限后继续追加不改变内容（确定且幂等），清洗、Unicode、流式光标、`finish()` 与切分/冻结行为不变。
+- Rich 解析器构造与渲染处于同一个普通异常边界：任一阶段抛普通异常都降级为已清洗纯文本（先按逻辑换行拆分，再按当前终端列宽硬换行，每个字符串都是一条独立物理行且不超宽度）；制表符展开为空格，不保留任何 C0/C1 控制内容，也不泄露异常文本，不新增超链接、备用屏幕或鼠标捕获序列；只捕获普通异常，`BaseException` 继续上抛。
+- 流式光标计入最终物理行宽度：末行按实际可见宽度还有空余列时直接追加，已占满 `width` 时另起一条物理行；不删不截正文，光标只出现一次，`finish()` 后完全消失，正常路径与降级路径都保证含光标的完整物理行不超宽。
+
+## 工具视图
+
+- 一次调用仍只有一条记录，按 `ToolPrepared → ToolStarted → ToolOutputDelta → ToolFinished` 原地更新；身份继续按 `run_id`/单调 `seq`/`(run_id, call_id, tool_name)` 与最终快照完整契约校验，名称与 presentation kind 不一致时拒绝投影，不回退通用视图。只有通过完整 presentation 准入的 `ToolPrepared` 才能建立工具步骤边界；被拒绝的 `ToolPrepared` 不改变当前 reasoning/assistant 流。
+- 状态用大面积低饱和色块表达并填满可用内容宽度：待执行/执行深蓝、成功深绿、失败或取消深红；不显示 `running`/`success` 等冗余状态词，NO_COLOR 改用 `○ ● ✓ × ■` 与固定安全原因；后续 Run 失败不会把已完成的成功工具重新染红。
+- read 单行只显示工具名与安全相对路径；write 按纯文本显示十行并给出准确剩余/总行数；edit 使用快照中的真实旧/新行号与逐行差异、超过二十条变化时保留前十与后十条；bash 命令行三行折叠、活动期只显示最近八条逻辑行与准确更早行数（不建立卡片内滚动、不抢翻页键），终态用最终快照收口并显示 `exit N`/`(no output)`/固定原因；ask 显示问题与真实答案；generic 只显示工具名与必要原因，不伪造可展开内容。
+- Bash 动态输出按逻辑行累积：空白行、连续空行、CRLF 与尾部无换行的片段都保留原语义，跨事件到达的片段拼回同一条逻辑行而不被拆成额外行，进行中行也计入逻辑行数与“更早行数”；动态缓冲只保留最近八条逻辑行（其中至多一条进行中行），`ToolFinished` 后一律以最终安全快照为唯一终态正文，不把动态缓冲拼到最终输出。
+- `ToolViewFactory` 是唯一解析接缝：构造时复制外部映射、内置工具名不可被覆盖，只接收公共安全快照；解析顺序与既有 Textual seam 一致：保留名只接受对应 kind，内置 kind（含 ASK）只给名称正确的内置视图，外部 builder 只处理非保留名的 `GENERIC`。扩展视图的接受条件是对调用方快照做完整值比较（call_id、tool_name、kind、status、payload、message 任一字段不同即拒绝），因此字段等值的独立副本会被接受；构建调用、返回类型与快照比较都在普通异常边界内，出错时安全回退通用视图（只累计一个固定计数，异常文本与 traceback 不进入卡片或诊断）。
+
+## 全局 Ctrl+O 与物理边界
+
+- `Ctrl+O` 由屏幕路由、由渲染器持有唯一全局状态，一次展开当前会话中所有仍在可寻址范围内、具有合法安全快照的可展开终态工具，再次折叠；不影响用户消息、思考、正式回复、Ask、Permission、composer、status 或 facts，也不改变工具的业务状态、snapshot、call_id 与事件顺序；新完成的工具遵循当前全局状态，活动工具始终保持有界预览。
+- 物理上限：终端 scrollback 中已经滚出屏幕的行无法原地改变高度（不清屏或不重复写出就无法重排）。可寻址范围等于渲染器的屏幕映射：最近一屏、且首行仍在屏幕上的块；屏幕外的历史工具保持写入时的形态。虚拟终端回放证实在展开/折叠过程中只使用光标上移 + `ESC[J` 擦除，没有 alternate screen、鼠标捕获、`CSI 3J` 或 shell sentinel 丢失。
+
+## 历史恢复
+
+- `StoredSession` 继续按 Turn 顺序显示用户消息、该轮工具调用与最终回复；用户消息与最终回复使用与实时内容相同的块与渲染器，v3 `ToolPresentationSnapshot` 走同一套专用工具视图，v1/v2 或缺少快照时退化为中性 `tool <name> · recorded`。
+- 不重放 Run、不重新执行工具、不重读工作区、不重算 write/edit/bash 内容、不建立历史与实时 call_id 映射，也不补造未保存的思考；历史正文与实时正文走同一条清洗接缝。
+
+## 验证结果
+
+- 新增测试：`test_tui_main_buffer_markdown.py`（结构要素与 CJK 宽度、代码块满宽背景、NO_COLOR 结构、resize 重排、流式未闭合增量、冻结前缀切分、链接无 OSC 8、对抗载荷注入、跨多个 delta 的累计源上限与上限幂等、Rich 异常降级的多行/超宽/Unicode/宽度约束、`BaseException` 不被吞掉）、`test_tui_main_buffer_tool_views.py`（六类视图规则、满宽状态色块、NO_COLOR 符号与安全原因、bash 有界输出与终态覆盖、write/edit 折叠、工厂复制与安全回退、宽度上限、完整快照值比较的等值接受与逐字段回退）、`test_tui_main_buffer_hierarchy.py`（用户消息纯文本、层级顺序与留白、思考三模式与注入接缝、Ctrl+O 展开/折叠与活动 bash 有界、历史同视图与 recorded 降级、repr 不泄漏正文）。
+- 既有套件更新：`test_tui_main_buffer_render.py`（read 视图替代旧工具行断言）、`test_tui_main_buffer_sanitize.py`（工具视图与 Markdown 管线加入对抗载荷）、`test_tui_main_buffer_events.py`（名称/kind 不一致拒绝、新工具遵循全局展开、活动 bash 忽略翻页键改为等待输入队列而不固定 sleep、Bash 动态空白行/CRLF/跨事件片段/八行窗口与更早行数/终态快照覆盖）、`test_tui_main_buffer_redraw.py`（变化行起点、完全相同帧零字节、Ctrl+O 受控重排）、`test_tui_main_buffer_screen.py`（用户消息带身份标识的行内断言）、`test_distribution.py`（wheel 收录 `markdown.py`/`tool_views.py`，直接依赖含 `rich>=15.0.0`）。
+- 统一门槛（P6-11B-MR3 视觉层级返工后）：P6-11B/main-buffer 兼容组（`tests/test_tui_main_buffer_*.py` + 分发 + P6-09）`-W error` **410 通过**；全量 `pytest -q -W error` **1955 通过、2 跳过**；`ruff check` 全绿；`ruff format --check`（157 文件）通过；`uv build --offline` 成功；两项 `git diff --check` 干净。
+- 视觉证据：110×36 彩色、80×24 彩色、80×24 NO_COLOR、完整纵向序列（用户消息 → 思考 → Markdown 回复 → read → write → edit → bash → 后续回复）、默认折叠与 Ctrl+O 展开、Bash 活动输出、恢复历史共 8 张截图，与 `runtime-main-buffer-current-p6-11a.png`、`runtime-content-hierarchy-pi-reference.png`、`runtime-tool-blocks-pi-reference.png`、`runtime-write-card-reference.png`、`runtime-edit-card-reference.png` 并排比对；截图带真实样式序列，代码块背景与工具色块均覆盖可用宽度。
+
+## 用户真实终端验收
+
+- 使用者已在真实 Windows Terminal 完成 P6-11B 冒烟并确认通过；仍有不影响本切片核心目标的细节问题，后续按独立问题处理，不阻塞 P6-11B 收口。
+
+## 边界与后续
+
+- 本切片不切换默认 `mica cli`、不删除旧 Textual、不开始 P6-11C 与 P6-10G；会话格式、Engine、Provider、权限后端与工具执行未改动。
+- 屏幕外历史的高度重排受终端物理限制（见上）；若未来需要改变已滚出屏幕的旧记录高度，只能选择清屏重绘或另起一段重复内容，两者都违反当前主缓冲区原则，因此保持现状并等待产品决策。
+- 思考显示模式的配置入口与持久化仍属 Phase 7；本轮只提供注入接缝与默认折叠。

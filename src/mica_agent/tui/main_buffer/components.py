@@ -1,21 +1,24 @@
-"""主缓冲区的纯文本展示组件。
+"""主缓冲区的纯文本与语义展示组件。
 
-本模块只把已经确认的安全快照和公开状态转成**未换行的语义块**或
-**已排版的 chrome 行**，不做 IO、不读业务对象、不导入 Textual。
+本模块只把已经确认的安全快照和公开状态转成**语义块**或**已排版的
+chrome 行**，不做 IO、不读业务对象、不导入 Textual。
 """
 
 from __future__ import annotations
 
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+from ..models import ReasoningDisplayMode
 from .renderer import (
     Block,
+    BlockLike,
     Palette,
     cell_len,
     expand_tabs,
     truncate_head,
     truncate_tail,
+    wrap_line,
 )
 from .sanitize import sanitize_scalar, sanitize_text
 
@@ -26,9 +29,11 @@ COMPOSER_MAX_LINES = 8
 IDLE_HINT = "Enter to send · Ctrl+J for new line"
 COMPOSER_PLACEHOLDER = "Type your request or command..."
 COMPOSER_PROMPT = "› "
-DEFAULT_TOOL_KINDS = frozenset(
-    {"tool_pending", "tool_running", "tool_success", "tool_failed"}
-)
+# 用户消息的左侧身份标记与思考块的左侧细线。
+USER_MARKER = "▌"
+REASONING_BAR = "│ "
+REASONING_COLLAPSED_ROWS = 2
+REASONING_PREVIEW_SUFFIX = "…"
 
 _FULL_ROWS = (
     (" ███        ███ ", "LLLLL......BBBBB"),
@@ -54,14 +59,6 @@ _BOX_BL = "└"
 _BOX_BR = "┘"
 _BOX_LT = "├"
 _BOX_RT = "┤"
-
-TOOL_SYMBOLS = {
-    "pending": "○",
-    "running": "●",
-    "success": "✓",
-    "failed": "×",
-    "cancelled": "■",
-}
 
 
 def _safe_line(value: object | None, *, fallback: str = "none") -> str:
@@ -163,30 +160,21 @@ def _join_names(names: tuple[str, ...]) -> str:
     return ", ".join(names) if names else "none"
 
 
-def user_block(text: str) -> Block:
-    """用户消息卡片：左侧短蓝线标记，保留原始纯文本。"""
-    return Block("user", sanitize_text(text, newlines=True), continuation="  ")
+def user_block(text: str) -> BlockLike:
+    """用户消息：左侧短蓝线标识，正文按纯文本（不解释 Markdown）。"""
+    return UserBlock(sanitize_text(text, newlines=True))
 
 
-def assistant_block(text: str) -> Block:
+def assistant_block(text: str) -> BlockLike:
+    """朴素的正式回复文本块（Markdown 渲染见 :mod:`markdown`）。"""
     return Block("assistant", sanitize_text(text, newlines=True))
 
 
-def reasoning_block(text: str) -> Block:
-    return Block("reasoning", sanitize_text(text, newlines=True), continuation="  ")
-
-
-def tool_block(name: object, status: str, detail: object = "") -> Block:
-    """单条工具记录：状态符号 + 工具名 + 安全详情（单行、无控制序列）。"""
-    symbol = TOOL_SYMBOLS.get(status, "○")
-    label = f"{symbol} {sanitize_scalar(name, fallback='tool')}"
-    cleaned = sanitize_scalar(detail, fallback="")
-    if cleaned:
-        label += f"  {cleaned}"
-    kind = f"tool_{status}"
-    if kind not in DEFAULT_TOOL_KINDS:
-        kind = "tool_cancelled"
-    return Block(kind, " " + label + " ")
+def reasoning_block(
+    text: str, mode: ReasoningDisplayMode = ReasoningDisplayMode.COLLAPSED
+) -> BlockLike:
+    """思考块：默认折叠，隐藏模式不产生任何行。"""
+    return ReasoningBlock(sanitize_text(text, newlines=True), mode)
 
 
 def status_line(
@@ -216,6 +204,105 @@ def _duration(seconds: float | None) -> str:
         return f"{minutes}m {remainder}s"
     hours, minutes = divmod(minutes, 60)
     return f"{hours}h {minutes}m"
+
+
+@dataclass(frozen=True, slots=True)
+class UserBlock:
+    """用户消息：整行低对比度深灰背景 + 左侧短蓝色身份标记，正文按纯文本。
+
+    用户原文不被解释为 Markdown：即使正文里出现 ``#``、``**`` 或围栏，
+    也只是普通字符。块自身不附加空行；相邻高层记录的间距由渲染器统一插入。
+    """
+
+    text: str = field(repr=False)
+    kind: str = "user"
+
+    def __repr__(self) -> str:
+        return f"<UserBlock chars={len(self.text)}>"
+
+    def render(self, width: int, palette: Palette, expanded: bool) -> list[str]:
+        width = max(1, width)
+        marker_width = cell_len(USER_MARKER)
+        limit = max(1, width - marker_width - 1)
+        rows = wrap_line(sanitize_text(self.text, newlines=True), limit)
+        indent = " " * marker_width
+        lines: list[str] = []
+        for index, row in enumerate(rows):
+            marker = USER_MARKER if index == 0 else indent
+            lines.append(_user_line(marker, row, width, palette))
+        return lines
+
+    def split(self, *args: object, **kwargs: object) -> None:
+        """用户消息不参与流式切分。"""
+
+
+@dataclass(frozen=True, slots=True)
+class ReasoningBlock:
+    """模型思考：灰色次要文字、左侧细灰线、比正式回复更深一级的缩进。
+
+    只有 ``ReasoningDelta`` 会创建本块；``hidden`` 不产生任何行，因此也
+    不会影响相邻块间距，``collapsed``（默认）最多两行并带克制省略提示。
+    """
+
+    text: str = field(repr=False)
+    mode: ReasoningDisplayMode = ReasoningDisplayMode.COLLAPSED
+    kind: str = "reasoning"
+
+    def __repr__(self) -> str:
+        return f"<ReasoningBlock mode={self.mode.value} chars={len(self.text)}>"
+
+    def render(self, width: int, palette: Palette, expanded: bool) -> list[str]:
+        if self.mode is ReasoningDisplayMode.HIDDEN:
+            return []
+        width = max(1, width)
+        body_width = max(1, width - cell_len(REASONING_BAR))
+        body = sanitize_text(self.text, newlines=True)
+        rows = wrap_line(body, body_width)
+        if self.mode is ReasoningDisplayMode.COLLAPSED:
+            rows = self._collapsed_rows(rows, body_width)
+        lines: list[str] = []
+        for row in rows:
+            text = REASONING_BAR + row
+            if cell_len(text) > width:
+                text = truncate_head(text, width)
+            lines.append(palette.paint(text, "reasoning"))
+        return lines
+
+    @staticmethod
+    def _collapsed_rows(rows: list[str], body_width: int) -> list[str]:
+        if len(rows) <= REASONING_COLLAPSED_ROWS:
+            return rows
+        first = rows[0]
+        suffix = REASONING_PREVIEW_SUFFIX
+        budget = max(0, body_width - cell_len(suffix))
+        second = truncate_head(rows[1], budget) + suffix
+        return [first, second]
+
+    def split(self, *args: object, **kwargs: object) -> None:
+        """思考块不参与流式切分。"""
+
+
+def _user_line(marker: str, row: str, width: int, palette: Palette) -> str:
+    content = f"{marker} {row}"
+    if cell_len(content) > width:
+        content = truncate_head(content, width)
+    pad = max(0, width - cell_len(content))
+    padded = content + " " * pad
+    if not palette.enabled:
+        return padded
+    styles = palette.styles
+    background = styles.get("user_bg", "")
+    marker_code = ";".join(
+        code for code in (styles.get("user_marker", ""), background) if code
+    )
+    body_code = ";".join(code for code in (styles.get("text", ""), background) if code)
+    if marker == USER_MARKER and content.startswith(marker):
+        rest = content[len(marker) :] + " " * pad
+        marker_text = f"\x1b[{marker_code}m{marker}\x1b[0m" if marker_code else marker
+        body_text = f"\x1b[{body_code}m{rest}\x1b[0m" if body_code else rest
+        return marker_text + body_text
+    filled = f"\x1b[{body_code}m{padded}\x1b[0m" if body_code else padded
+    return filled
 
 
 @dataclass(frozen=True, slots=True)
@@ -380,7 +467,13 @@ __all__ = [
     "COMPOSER_MAX_LINES",
     "COMPOSER_PLACEHOLDER",
     "IDLE_HINT",
+    "REASONING_BAR",
+    "REASONING_COLLAPSED_ROWS",
+    "REASONING_PREVIEW_SUFFIX",
+    "USER_MARKER",
     "ComposerFrame",
+    "ReasoningBlock",
+    "UserBlock",
     "assistant_block",
     "composer_frame",
     "facts_lines",
@@ -389,6 +482,5 @@ __all__ = [
     "reasoning_block",
     "startup_blocks",
     "status_line",
-    "tool_block",
     "user_block",
 ]

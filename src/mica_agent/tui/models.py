@@ -1,12 +1,25 @@
-"""只属于 TUI 的不可变视图状态。"""
+"""只属于 TUI 的不可变视图状态。
+
+本模块不导入 Textual；两个前端（旧 Textual 外壳与主缓冲区前端）共享的纯
+枚举也放在这里，避免主缓冲区为了复用契约而加载旧视图。
+"""
 
 from __future__ import annotations
 
 import unicodedata
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import PurePosixPath, PureWindowsPath
 
 from mica_agent.context_builder import AgentFileSource
+
+
+class ReasoningDisplayMode(Enum):
+    """思考正文的 TUI 显示模式。"""
+
+    FULL = "full"
+    COLLAPSED = "collapsed"
+    HIDDEN = "hidden"
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -139,4 +152,4 @@ class StartupResourceSnapshot:
         )
 
 
-__all__ = ["StartupResourceSnapshot", "TuiSessionSnapshot"]
+__all__ = ["ReasoningDisplayMode", "StartupResourceSnapshot", "TuiSessionSnapshot"]

@@ -475,9 +475,8 @@ def test_rejected_ask_response_keeps_the_interaction_and_the_selection(
         assert "Type your request or command..." not in frame_before
 
         # Enter 仍走真实输入队列；用「交互收到按键」这一可观察信号等待，
-        # 不用固定 sleep：拒绝响应是同步完成的，路由到即已处理完毕。
+        # 不用固定 sleep：拒绝响应在同一按键处理内同步完成，路由到即已处理。
         routed: list[Key] = []
-        frames_before = len(env.terminal.emitted)
         original_handle = interaction.handle
 
         def counting_handle(key: Key) -> InteractionOutcome:
@@ -487,10 +486,6 @@ def test_rejected_ask_response_keeps_the_interaction_and_the_selection(
         interaction.handle = counting_handle  # type: ignore[method-assign]
         env.fake.feed(ENTER)
         await pump(lambda: bool(routed), message="enter routed to the interaction")
-        await pump(
-            lambda: len(env.terminal.emitted) > frames_before,
-            message="enter produced a new frame",
-        )
 
         # 交互对象身份、模式与选择都不变，草稿也没被动过。
         assert env.screen.interaction is interaction
@@ -511,5 +506,344 @@ def test_rejected_ask_response_keeps_the_interaction_and_the_selection(
 
         env.fake.feed(ESCAPE)
         await pump(lambda: env.screen.mode != "ask", message="cancelled")
+
+    asyncio.run(with_screen(tmp_path, body))
+
+
+# -- P6-11B：名称与 kind、全局展开、活动工具预览 ---------------------------
+
+CTRL_O = KeyPress(Keys.ControlO, "\x0f")
+PAGE_UP = KeyPress(Keys.PageUp, chr(27) + chr(91) + "5~")
+PAGE_DOWN = KeyPress(Keys.PageDown, chr(27) + chr(91) + "6~")
+
+
+def test_tool_prepared_with_mismatched_kind_is_rejected(tmp_path: Path) -> None:
+    """名称与 presentation kind 不一致时拒绝投影，且不回退成 Generic。"""
+
+    async def body(env: SimpleNamespace) -> None:
+        await env.screen.handle_event(RunStarted(RUN))
+        prepared_event = prepared(RUN, "call-1", 1, "bash")
+        # 伪造一个「bash 名称 + read kind」的非法快照。
+        object.__setattr__(
+            prepared_event.presentation, "kind", ToolPresentationKind.READ
+        )
+        object.__setattr__(
+            prepared_event.presentation, "payload", {"path": "docs/a.md"}
+        )
+        await env.screen.handle_event(prepared_event)
+
+        await env.screen.handle_event(ToolStarted(RUN, 2, "call-1", "bash"))
+        frame = frame_of(env)
+        assert "bash" not in frame
+        assert "read" not in frame
+        assert "tool presentation rejected" in env.screen.diagnostics
+        assert "tool event without pending record" in env.screen.diagnostics
+
+    asyncio.run(with_screen(tmp_path, body))
+
+
+def _assistant_slots(env: SimpleNamespace) -> list[object]:
+    renderer = env.screen.renderer
+    assert renderer is not None
+    return [
+        slot.block
+        for slot in renderer._slots
+        if getattr(slot.block, "kind", "") == "assistant"
+    ]
+
+
+def _document(env: SimpleNamespace) -> list[str]:
+    renderer = env.screen.renderer
+    assert renderer is not None
+    return [row.rstrip() for row in renderer.document_lines()]
+
+
+def test_rejected_tool_prepared_does_not_split_the_assistant_stream(
+    tmp_path: Path,
+) -> None:
+    """被拒绝的 ToolPrepared 不得切断当前模型步骤；后续 TextDelta 仍追加同一流。"""
+
+    async def body(env: SimpleNamespace) -> None:
+        await env.screen.handle_event(RunStarted(RUN))
+        await env.screen.handle_event(TextDelta(RUN, "alpha", 1))
+        before_kind = env.screen._pending_kind
+        before_block = env.screen._assistant_block
+        before_slots = len(_assistant_slots(env))
+
+        mismatched = prepared(RUN, "call-bad", 2, "bash")
+        object.__setattr__(mismatched.presentation, "kind", ToolPresentationKind.READ)
+        object.__setattr__(mismatched.presentation, "payload", {"path": "docs/a.md"})
+        await env.screen.handle_event(mismatched)
+
+        assert env.screen._pending_kind == before_kind == "assistant"
+        assert env.screen._assistant_block is before_block
+        assert env.screen._pending_call_id is None
+        assert env.screen._pending_presentation is None
+        assert len(_assistant_slots(env)) == before_slots == 1
+        assert "tool presentation rejected" in env.screen.diagnostics
+        assert "call-bad" not in " ".join(env.screen.diagnostics)
+        assert "docs/a.md" not in " ".join(env.screen.diagnostics)
+
+        await env.screen.handle_event(TextDelta(RUN, "beta", 3))
+        lines = _document(env)
+        joined = "\n".join(lines)
+        assert "alpha" in joined and "beta" in joined
+        assert env.screen._assistant_block is before_block
+        assert env.screen._assistant_block is not None
+        assert env.screen._assistant_block.source == "alphabeta"
+        assert len(_assistant_slots(env)) == 1
+        assert "\n\n" not in joined
+        assert not any("bash" in row or "read" in row for row in lines)
+        assert "▌" in joined
+
+        await env.screen.handle_event(prepared(RUN, "call-read", 4, "read"))
+        after = _document(env)
+        joined = "\n".join(after)
+        assert any("read" in row for row in after)
+        assert env.screen._pending_kind == "tool"
+        assert env.screen._pending_call_id == "call-read"
+        assert env.screen._assistant_block is None
+        assistants = _assistant_slots(env)
+        assert len(assistants) == 1
+        finished = assistants[0]
+        assert getattr(finished, "streaming", True) is False
+        assert "alpha" in joined and "beta" in joined
+        alpha_at = next(i for i, row in enumerate(after) if "alpha" in row)
+        read_at = next(i for i, row in enumerate(after) if "read" in row)
+        assert alpha_at < read_at
+        assert after[read_at - 1] == ""
+
+    asyncio.run(with_screen(tmp_path, body))
+
+
+def test_missing_presentation_does_not_split_the_assistant_stream(
+    tmp_path: Path,
+) -> None:
+    """公共类型要求 presentation，但投影入口仍按缺失快照拒绝且不切断回复流。"""
+
+    async def body(env: SimpleNamespace) -> None:
+        await env.screen.handle_event(RunStarted(RUN))
+        await env.screen.handle_event(TextDelta(RUN, "alpha", 1))
+        before_block = env.screen._assistant_block
+        missing = prepared(RUN, "call-missing", 2, "bash")
+        object.__setattr__(missing, "presentation", None)
+        await env.screen.handle_event(missing)
+        assert env.screen._assistant_block is before_block
+        assert env.screen._pending_kind == "assistant"
+        await env.screen.handle_event(TextDelta(RUN, "beta", 3))
+        assert env.screen._assistant_block is before_block
+        assert env.screen._assistant_block is not None
+        assert env.screen._assistant_block.source == "alphabeta"
+        assert len(_assistant_slots(env)) == 1
+        assert "tool presentation rejected" in env.screen.diagnostics
+        assert not any("bash" in row for row in _document(env))
+
+    asyncio.run(with_screen(tmp_path, body))
+
+
+def test_new_tool_record_follows_the_current_expand_state(tmp_path: Path) -> None:
+    """Ctrl+O 后再完成的工具直接按当前全局状态展开。"""
+
+    async def body(env: SimpleNamespace) -> None:
+        env.fake.feed(CTRL_O)
+        await pump(
+            lambda: env.screen.renderer is not None and env.screen.renderer.expanded,
+            message="expanded",
+        )
+        await env.screen.handle_event(RunStarted(RUN))
+        request = ToolRequest("call-write", "write", {"path": "/a.txt"})
+        prepared_event = ToolPrepared(RUN, 1, prepare_tool_presentation(request))
+        content = chr(10).join(f"line {index}" for index in range(14))
+        result = ToolResult(
+            call_id="call-write",
+            tool_name="write",
+            status=ToolResultStatus.SUCCESS,
+            message="write completed",
+            data={"content": content},
+        )
+        await env.screen.handle_event(prepared_event)
+        snapshot = complete_tool_presentation(
+            request,
+            result,
+            detail={"content": content},
+        )
+        object.__setattr__(
+            snapshot, "payload", {"path": "docs/a.md", "content": content}
+        )
+        await env.screen.handle_event(
+            ToolFinished(
+                RUN,
+                2,
+                "call-write",
+                "write",
+                ToolResultStatus.SUCCESS,
+                snapshot,
+            )
+        )
+        frame = frame_of(env)
+
+        assert "line 13" in frame
+        assert "ctrl+o to collapse" in frame
+
+    asyncio.run(with_screen(tmp_path, body))
+
+
+def test_active_bash_preview_ignores_page_keys_and_keeps_no_scroll(
+    tmp_path: Path,
+) -> None:
+    """活动 Bash 只保留有界预览，不建立内部滚动，也不抢翻页键。"""
+
+    async def body(env: SimpleNamespace) -> None:
+        await start_bash(env)
+        for index in range(20):
+            await env.screen.handle_event(
+                ToolOutputDelta(RUN, 3 + index, "call-bash", "bash", f"out {index}\n")
+            )
+        before = frame_of(env)
+        outputs_before = [row for row in before.split(chr(10)) if row.startswith("out")]
+        assert 0 < len(outputs_before) <= 8
+
+        env.fake.feed(PAGE_UP, DOWN, PAGE_DOWN)
+        # 不等固定时长：等到输入替身队列变空（屏幕已取走这批按键）。
+        await pump(lambda: _keys_consumed(env), message="page keys consumed")
+        after = frame_of(env)
+        outputs_after = [row for row in after.split(chr(10)) if row.startswith("out")]
+
+        assert outputs_after == outputs_before
+        assert env.screen.composer_text == ""
+
+    asyncio.run(with_screen(tmp_path, body))
+
+
+# -- P6-11B 返工：Bash 动态输出的逻辑行语义 --------------------------------
+
+
+def _keys_consumed(env: SimpleNamespace) -> bool:
+    """测试输入替身的待处理队列已空 = 屏幕已取走这批按键。
+
+    替身定义在屏幕测试文件中（本轮不在修改范围），因此这里只读取其内部
+    队列；本模块其余断言一律走公开屏幕接口。
+    """
+    return not env.fake._pending
+
+
+def bash_prepared(seq: int, command: str = "printf a") -> ToolPrepared:
+    return ToolPrepared(
+        run_id=RUN,
+        seq=seq,
+        presentation=prepare_tool_presentation(
+            ToolRequest("call-bash", "bash", {"command": command})
+        ),
+    )
+
+
+async def start_bash(env: SimpleNamespace) -> None:
+    await env.screen.handle_event(RunStarted(RUN))
+    await env.screen.handle_event(bash_prepared(1))
+    await env.screen.handle_event(ToolStarted(RUN, 2, "call-bash", "bash"))
+    env.seq = 3  # 后续增量按真实顺序递增编号，避免被乱序保护丢弃
+
+
+async def push_bash_output(env: SimpleNamespace, *chunks: str) -> None:
+    for chunk in chunks:
+        await env.screen.handle_event(
+            ToolOutputDelta(RUN, env.seq, "call-bash", "bash", chunk)
+        )
+        env.seq += 1
+
+
+def test_active_bash_keeps_blank_logical_lines(tmp_path: Path) -> None:
+    """``first\\n`` + ``\\n`` + ``last`` 必须保留为三条逻辑行。"""
+
+    async def body(env: SimpleNamespace) -> None:
+        await start_bash(env)
+        await push_bash_output(env, "first\n", "\n", "last")
+        frame = frame_of(env)
+
+        assert "first\n\nlast" in frame
+
+    asyncio.run(with_screen(tmp_path, body))
+
+
+def test_active_bash_keeps_crlf_and_unterminated_tail(tmp_path: Path) -> None:
+    async def body(env: SimpleNamespace) -> None:
+        await start_bash(env)
+        await push_bash_output(env, "head\r\n\r\n", "tail")
+        frame = frame_of(env)
+
+        # CRLF 与连续空行归一为逻辑行；尾部无换行的片段仍作为一条进行中行。
+        assert "head\n\ntail" in frame
+        assert "\r" not in frame
+
+    asyncio.run(with_screen(tmp_path, body))
+
+
+def test_active_bash_joins_fragments_split_across_events(tmp_path: Path) -> None:
+    async def body(env: SimpleNamespace) -> None:
+        await start_bash(env)
+        await push_bash_output(env, "abc", "def\n")
+        frame = frame_of(env)
+
+        assert "abcdef" in frame
+        # 两个片段不能被当成两条逻辑行。
+        assert "abc\n" not in frame
+        assert frame.count("abcdef") == 1
+
+    asyncio.run(with_screen(tmp_path, body))
+
+
+def test_active_bash_window_and_hidden_count_are_exact(tmp_path: Path) -> None:
+    async def body(env: SimpleNamespace) -> None:
+        await start_bash(env)
+        await push_bash_output(env, *[f"out {index:02d}\n" for index in range(20)])
+        frame = frame_of(env)
+
+        assert "out 19" in frame and "out 12" in frame
+        assert "out 11" not in frame
+        assert "(12 earlier lines)" in frame
+
+    asyncio.run(with_screen(tmp_path, body))
+
+
+def test_active_bash_counts_the_in_flight_line(tmp_path: Path) -> None:
+    async def body(env: SimpleNamespace) -> None:
+        await start_bash(env)
+        await push_bash_output(env, *[f"out {index:02d}\n" for index in range(8)])
+        await push_bash_output(env, "partial tail")
+        frame = frame_of(env)
+
+        # 进行中行也占一条逻辑行：八条可见行里包含它，更早行数仍准确。
+        assert "partial tail" in frame
+        assert "out 01" in frame
+        assert "out 00" not in frame
+        assert "(1 earlier lines)" in frame
+
+    asyncio.run(with_screen(tmp_path, body))
+
+
+def test_finished_bash_uses_the_final_snapshot_only(tmp_path: Path) -> None:
+    async def body(env: SimpleNamespace) -> None:
+        await start_bash(env)
+        await push_bash_output(env, "stale line\n")
+        final = complete_tool_presentation(
+            ToolRequest("call-bash", "bash", {"command": "printf a"}),
+            ToolResult(
+                "call-bash",
+                "bash",
+                ToolResultStatus.SUCCESS,
+                "ok",
+                data={"output": "authoritative line\n", "exit_code": 0},
+            ),
+        )
+        await env.screen.handle_event(
+            ToolFinished(
+                RUN, env.seq, "call-bash", "bash", ToolResultStatus.SUCCESS, final
+            )
+        )
+        frame = frame_of(env)
+
+        assert "authoritative line" in frame
+        assert "stale line" not in frame
+        assert "✓ bash" in frame
 
     asyncio.run(with_screen(tmp_path, body))

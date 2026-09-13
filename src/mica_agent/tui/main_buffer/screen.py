@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Literal
 
 from mica_agent.app import MicaApp
@@ -39,17 +39,17 @@ from mica_agent.tool_presentation import (
     ToolPresentationStatus,
 )
 
+from ..models import ReasoningDisplayMode
 from .components import (
     IDLE_HINT,
+    ReasoningBlock,
     assistant_block,
     composer_body_width,
     composer_frame,
     facts_lines,
     read_git_branch,
-    reasoning_block,
     startup_blocks,
     status_line,
-    tool_block,
     user_block,
 )
 from .editor import ComposerEditor, Key, normalize_key, windowed_lines
@@ -58,10 +58,12 @@ from .interactions import (
     InteractionOutcome,
     PermissionInteraction,
 )
-from .renderer import MainBufferRenderer, Palette, truncate_head
+from .markdown import MarkdownBlock, StreamingMarkdownBlock
+from .renderer import Block, BlockLike, MainBufferRenderer, Palette, truncate_head
 from .runtime import InterruptedMarker, MainBufferRuntime
-from .sanitize import sanitize_text
+from .sanitize import sanitize_scalar, sanitize_text
 from .terminal import Terminal
+from .tool_views import GenericToolView, ToolView, ToolViewFactory
 
 Mode = Literal["idle", "running", "ask", "permission", "closed"]
 Status = Literal["idle", "working", "done", "stop", "error"]
@@ -70,7 +72,7 @@ CTRL_C_WINDOW = 2.0
 DONE_VISIBLE_SECONDS = 2.0
 REFRESH_INTERVAL = 0.25
 MAX_TOOL_DETAIL = 72
-MAX_OUTPUT_LINES = 4
+MAX_OUTPUT_LINES = 8
 
 # 内部终止类别到工作状态的映射；真实公共终态事件优先。
 _STOP_REASONS = frozenset({"cancelled"})
@@ -110,6 +112,8 @@ class MainBufferScreen:
         clock: Any = time.monotonic,
         sleep: Any = asyncio.sleep,
         branch_reader: Any = read_git_branch,
+        reasoning_mode: ReasoningDisplayMode = ReasoningDisplayMode.COLLAPSED,
+        tool_views: Mapping[str, Any] | None = None,
     ) -> None:
         self._app = app
         self._terminal = Terminal() if terminal is None else terminal
@@ -120,6 +124,15 @@ class MainBufferScreen:
         self._clock = clock
         self._sleep = sleep
         self._read_branch = branch_reader
+        self._reasoning_mode = (
+            reasoning_mode
+            if isinstance(reasoning_mode, ReasoningDisplayMode)
+            else ReasoningDisplayMode.COLLAPSED
+        )
+        # 工厂映射在构造时复制；内置工具名不会被外部视图覆盖。
+        self._tool_views = ToolViewFactory(tool_views)
+        self._assistant_block: StreamingMarkdownBlock | None = None
+        self._pending_tool: ToolView | None = None
         self._palette = Palette(False)
         self._renderer: MainBufferRenderer | None = None
         self._editor = ComposerEditor()
@@ -137,6 +150,8 @@ class MainBufferScreen:
         self._pending_presentation: ToolPresentationSnapshot | None = None
         self._pending_call_id: str | None = None
         self._tool_output: list[str] = []
+        self._tool_output_total = 0
+        self._tool_partial = ""
         self._ctrl_c_at: float | None = None
         self._refresh_task: asyncio.Task[None] | None = None
         self._branch: str | None = None
@@ -309,22 +324,28 @@ class MainBufferScreen:
             }
             for message in turn.intermediate_messages:
                 for call in message.tool_calls:
-                    presentation = presentations.get(call.call_id)
-                    if presentation is not None and presentation.status in {
-                        ToolPresentationStatus.SUCCESS,
-                        ToolPresentationStatus.FAILED,
-                    }:
-                        renderer.append(
-                            tool_block(
-                                presentation.tool_name,
-                                presentation.status.value,
-                                self._presentation_detail(presentation),
-                            )
-                        )
-                    else:
-                        renderer.append(tool_block(call.name, _RECORDED, ""))
+                    renderer.append(
+                        self._history_tool_block(call, presentations.get(call.call_id))
+                    )
             if turn.assistant_message.content:
-                renderer.append(assistant_block(turn.assistant_message.content))
+                renderer.append(MarkdownBlock(turn.assistant_message.content))
+
+    def _history_tool_block(
+        self, call: object, presentation: ToolPresentationSnapshot | None
+    ) -> BlockLike:
+        """历史工具记录：v3 专用视图，缺少快照时退化为中性记录。"""
+        name = getattr(call, "name", None)
+        if isinstance(
+            presentation, ToolPresentationSnapshot
+        ) and self._accept_presentation(presentation):
+            view = self._tool_views.create(
+                presentation, state=presentation.status.value
+            )
+            if view is not None:
+                return view
+        return Block(
+            "muted", f"tool {sanitize_scalar(name, fallback='tool')} · {_RECORDED}"
+        )
 
     # -- 输入 ---------------------------------------------------------------
 
@@ -347,6 +368,12 @@ class MainBufferScreen:
         """处理一个按键；返回 True 表示应当退出。"""
         if key.name == "ctrl_c":
             return self._handle_interrupt()
+        if key.name == "ctrl_o":
+            # 全局工具详情开关：只影响工具记录，不改变思考/Ask/composer/facts。
+            renderer = self._renderer
+            if renderer is not None:
+                renderer.toggle_expanded()
+            return False
         if self._mode in {"ask", "permission"}:
             self._handle_interaction_key(key)
             return False
@@ -408,7 +435,11 @@ class MainBufferScreen:
         self._pending_text = ""
         self._pending_presentation = None
         self._pending_call_id = None
+        self._pending_tool = None
+        self._assistant_block = None
         self._tool_output = []
+        self._tool_output_total = 0
+        self._tool_partial = ""
         self._run_id = None
         self._last_seq = -1
         self._terminal_run_id = None
@@ -486,18 +517,27 @@ class MainBufferScreen:
         if isinstance(event, ReasoningDelta):
             self._start_pending("reasoning")
             self._pending_text += sanitize_text(event.text, newlines=True)
-            self._update_pending(reasoning_block(self._pending_text))
+            self._update_pending(
+                ReasoningBlock(self._pending_text, self._reasoning_mode)
+            )
             return
         if isinstance(event, TextDelta):
             self._start_pending("assistant")
-            self._pending_text += sanitize_text(event.text, newlines=True)
-            self._update_pending(assistant_block(self._pending_text))
+            if self._assistant_block is None:
+                self._assistant_block = StreamingMarkdownBlock()
+            self._assistant_block.append(sanitize_text(event.text, newlines=True))
+            self._update_pending(self._assistant_block)
             return
         if isinstance(event, ToolPrepared):
+            if not self._accept_presentation(event.presentation):
+                self.diagnostics.append("tool presentation rejected")
+                return
             self._start_pending("tool")
             self._pending_presentation = event.presentation
             self._pending_call_id = event.call_id
             self._tool_output = []
+            self._tool_output_total = 0
+            self._tool_partial = ""
             self._update_pending(self._tool_record_block("pending"))
             return
         if isinstance(event, ToolStarted):
@@ -546,6 +586,21 @@ class MainBufferScreen:
             self._finish_run("stop")
             self._facts_dirty = True
             return
+
+    def _accept_presentation(
+        self, presentation: ToolPresentationSnapshot | None
+    ) -> bool:
+        """校验名称与 presentation kind 一致；不一致时拒绝投影。"""
+        if presentation is None:
+            return False
+        expected = {
+            ToolPresentationKind.READ: "read",
+            ToolPresentationKind.WRITE: "write",
+            ToolPresentationKind.EDIT: "edit",
+            ToolPresentationKind.BASH: "bash",
+            ToolPresentationKind.ASK: "ask",
+        }.get(presentation.kind)
+        return expected is None or presentation.tool_name == expected
 
     def _is_current_tool(self, event: object) -> bool:
         call_id = getattr(event, "call_id", None)
@@ -611,29 +666,68 @@ class MainBufferScreen:
     def _commit_pending(self) -> None:
         renderer = self._renderer
         if renderer is not None:
+            if self._assistant_block is not None:
+                # 结束流式：用完整累计源文本做一次稳定 Markdown 渲染。
+                self._assistant_block.finish()
+                renderer.set_pending(self._assistant_block)
             renderer.commit_pending()
         self._pending_kind = None
         self._pending_text = ""
+        self._assistant_block = None
 
     def _update_pending(self, block: object) -> None:
         renderer = self._renderer
         if renderer is not None:
             renderer.set_pending(block)  # type: ignore[arg-type]
 
-    def _append_tool_output(self, text: str) -> None:
-        cleaned = sanitize_text(text, newlines=True)
-        for line in cleaned.split("\n"):
-            if line:
-                self._tool_output.append(line)
-        del self._tool_output[:-MAX_OUTPUT_LINES]
+    def _live_output(self) -> str:
+        """活动 Bash 的有界实时输出（最近八条完整逻辑行 + 至多一条进行中行）。"""
+        lines = [*self._tool_output]
+        if self._tool_partial:
+            lines.append(self._tool_partial)
+        if not lines:
+            return ""
+        text = "\n".join(lines)
+        # 末尾空行必须显式补换行，否则会被逻辑行解析当成行结束符吞掉。
+        return f"{text}\n" if lines[-1] == "" else text
 
-    def _tool_record_block(self, status: str) -> object:
-        presentation = self._pending_presentation
-        name = presentation.tool_name if presentation is not None else "tool"
-        detail = self._presentation_detail(presentation)
-        if status == "running" and self._tool_output:
-            detail = self._tool_output[-1]
-        return tool_block(name, status, truncate_head(detail, MAX_TOOL_DETAIL))
+    def _live_total(self) -> int:
+        """已收到的真实逻辑行数（含尚未换行的进行中行）。"""
+        return self._tool_output_total + (1 if self._tool_partial else 0)
+
+    def _append_tool_output(self, text: str) -> None:
+        """按逻辑行累积动态输出：保留空行、跨事件片段与尾部无换行文本。
+
+        跨事件到达的片段先拼回同一条逻辑行；``\n`` 结尾终止该行，尾部
+        不完整的部分留待下一次事件继续拼接，因此不会把两个片段错误地
+        拆成两条逻辑行，也不会丢掉连续空白行。
+        """
+        cleaned = sanitize_text(text, newlines=True)
+        if not cleaned:
+            return
+        parts = cleaned.split("\n")
+        self._tool_partial += parts[0]
+        for part in parts[1:]:
+            self._tool_output.append(self._tool_partial)
+            self._tool_output_total += 1
+            self._tool_partial = part
+        # 有界预览：未结束的进行中行也占一条，因此完整行至多七条。
+        limit = MAX_OUTPUT_LINES - 1 if self._tool_partial else MAX_OUTPUT_LINES
+        del self._tool_output[:-limit]
+
+    def _tool_record_block(self, state: str) -> BlockLike:
+        view = self._tool_views.create(
+            self._pending_presentation,
+            state=state,
+            live_output=self._live_output(),
+            live_total=self._live_total(),
+        )
+        if view is None:
+            # 名称与 presentation kind 不一致：拒绝投影，不回退通用视图。
+            self.diagnostics.append("tool view identity mismatch")
+            view = GenericToolView(self._pending_presentation, state=state)
+        self._pending_tool = view
+        return view
 
     def _permission_detail(self, event: PermissionRequested) -> str:
         if self._pending_presentation is not None:
@@ -664,7 +758,10 @@ class MainBufferScreen:
         self._commit_pending()
         self._pending_presentation = None
         self._pending_call_id = None
+        self._pending_tool = None
         self._tool_output = []
+        self._tool_output_total = 0
+        self._tool_partial = ""
         if self._run_started is not None:
             self._elapsed = max(0.0, self._clock() - self._run_started)
         self._run_started = None

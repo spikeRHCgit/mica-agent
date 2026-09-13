@@ -465,7 +465,9 @@ def test_wheel_contains_only_mica_package_and_metadata(
         "mica_agent/tui/main_buffer/components.py",
         "mica_agent/tui/main_buffer/editor.py",
         "mica_agent/tui/main_buffer/interactions.py",
+        "mica_agent/tui/main_buffer/markdown.py",
         "mica_agent/tui/main_buffer/renderer.py",
+        "mica_agent/tui/main_buffer/tool_views.py",
         "mica_agent/tui/main_buffer/runtime.py",
         "mica_agent/tui/main_buffer/sanitize.py",
         "mica_agent/tui/main_buffer/screen.py",
@@ -510,7 +512,7 @@ def test_installed_distribution_declares_runtime_dependencies(
     assert result.returncode == 0
     assert result.stdout == (
         "['httpx>=0.28.1', 'jsonschema>=4.25.1', 'textual>=8.2.8', "
-        "'prompt-toolkit>=3.0.52']\n"
+        "'prompt-toolkit>=3.0.52', 'rich>=15.0.0']\n"
     )
     assert result.stderr == ""
 

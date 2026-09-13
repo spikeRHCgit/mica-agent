@@ -130,7 +130,8 @@ def test_identical_frames_never_creep_upwards() -> None:
     harness.assert_cursor_at("› hello", 3)
 
 
-def test_second_frame_returns_to_previous_frame_cursor_row() -> None:
+def test_changed_frame_returns_to_the_first_changed_row() -> None:
+    """内容变化时，渲染器回到「第一个变化的行」而不是向下开头。"""
     harness = Harness(cols=40).shell(*SHELL_LINES)
     harness.renderer.set_chrome(["status", "› hello", "facts"], cursor=(1, 3))
     harness.renderer.update_pending("assistant", "one")
@@ -138,11 +139,29 @@ def test_second_frame_returns_to_previous_frame_cursor_row() -> None:
     cursor_row = harness.renderer.frame_cursor_row
 
     before = len(harness.terminal.emitted)
+    harness.renderer.update_pending("assistant", "changed")
     harness.frame()
     chunk = "".join(harness.terminal.emitted[before:])
 
     assert cursor_row == 1 + 1  # 1 行正文 + chrome 内的第 1 行
     assert chunk.startswith(f"\r\x1b[{cursor_row}A"), repr(chunk)
+    assert harness.row_of("changed") == harness.row_of("status") - 1
+    harness.assert_cursor_at("› hello", 3)
+    harness.assert_safe()
+
+
+def test_identical_frames_write_nothing() -> None:
+    """完全相同的帧不产生任何字节：普通增量只重绘变化尾部。"""
+    harness = Harness(cols=40).shell(*SHELL_LINES)
+    harness.renderer.set_chrome(["status", "› hello", "facts"], cursor=(1, 3))
+    harness.renderer.update_pending("assistant", "stable")
+    harness.frame()
+
+    before = len(harness.terminal.emitted)
+    harness.frame()
+
+    assert harness.terminal.emitted[before:] == []
+    harness.assert_cursor_at("› hello", 3)
 
 
 def test_pending_block_grows_from_one_row_to_many() -> None:
@@ -399,5 +418,61 @@ def test_overlong_pending_with_changing_chrome_height() -> None:
     assert harness.vt.screen()[harness.row_of("› hello") + 1] == ""
     assert _body_rows(harness) == OVERFLOW_BODY
     _assert_composer_not_overwritten(harness)
+    harness.assert_cursor_at("› hello", 3)
+    harness.assert_safe()
+
+
+# -- 全局 Ctrl+O 的物理重排（P6-11B §4.6）------------------------------------
+
+
+def _write_view(lines: int):
+    from mica_agent.tool_presentation import (
+        ToolPresentationKind,
+        ToolPresentationSnapshot,
+        ToolPresentationStatus,
+    )
+    from mica_agent.tui.main_buffer.tool_views import ToolViewFactory
+
+    content = chr(10).join(f"line {index}" for index in range(lines))
+    snapshot = ToolPresentationSnapshot(
+        "call-write",
+        "write",
+        ToolPresentationKind.WRITE,
+        ToolPresentationStatus.SUCCESS,
+        {"path": "docs/a.md", "content": content},
+    )
+    view = ToolViewFactory().create(snapshot, state="success")
+    assert view is not None
+    return view
+
+
+def test_global_expansion_reflows_earlier_rows_in_the_main_buffer() -> None:
+    """Ctrl+O 改变较早工具高度时从该处受控重排，不丢 sentinel 与草稿。"""
+    harness = Harness(rows=30, cols=48).shell(*SHELL_LINES)
+    sentinel = harness.vt.screen()[:3]
+    harness.renderer.append(_write_view(14))
+    harness.renderer.set_chrome(["status", "› hello", "facts"], cursor=(1, 3))
+    harness.frame()
+    # 再多写两帧，让工具块从「上一帧区域」退到更早的已写出行。
+    harness.renderer.update_pending("assistant", "tail one")
+    harness.frame()
+    harness.renderer.update_pending("assistant", "tail one\ntail two")
+    harness.frame()
+    assert harness.row_of("line 13") == -1
+
+    harness.renderer.toggle_expanded()
+    harness.frame()
+
+    assert harness.row_of("line 13") >= 0
+    assert harness.vt.screen()[:3] == sentinel
+    assert harness.vt.all_lines().count("line 9") == 1
+    harness.assert_cursor_at("› hello", 3)
+    harness.assert_safe()
+
+    harness.renderer.toggle_expanded()
+    harness.frame()
+
+    assert harness.row_of("line 13") == -1
+    assert harness.vt.all_lines().count("line 9") == 1
     harness.assert_cursor_at("› hello", 3)
     harness.assert_safe()

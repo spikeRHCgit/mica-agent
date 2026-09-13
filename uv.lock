@@ -179,6 +179,7 @@ dependencies = [
     { name = "httpx" },
     { name = "jsonschema" },
     { name = "prompt-toolkit" },
+    { name = "rich" },
     { name = "textual" },
 ]
 
@@ -193,6 +194,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "jsonschema", specifier = ">=4.25.1" },
     { name = "prompt-toolkit", specifier = ">=3.0.52" },
+    { name = "rich", specifier = ">=15.0.0" },
     { name = "textual", specifier = ">=8.2.8" },
 ]
 

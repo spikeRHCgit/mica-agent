@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from enum import Enum
 from typing import ClassVar
 
 from rich.cells import cell_len
@@ -13,13 +12,13 @@ from textual.events import Resize
 from textual.geometry import Region
 from textual.widgets import Markdown, Static
 
+from .models import ReasoningDisplayMode
 
-class ReasoningDisplayMode(Enum):
-    """思考正文的 TUI 显示模式。"""
-
-    FULL = "full"
-    COLLAPSED = "collapsed"
-    HIDDEN = "hidden"
+__all__ = [
+    "AssistantResponseView",
+    "ReasoningDisplayMode",
+    "ReasoningView",
+]
 
 
 class AssistantResponseView(Static):

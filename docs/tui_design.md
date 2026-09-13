@@ -84,6 +84,8 @@ Context 中已成功加载的 global/workspace `AGENTS.md` 必须显示装配层
 - [动态工具色块正向参考](assets/tui/runtime-tool-blocks-pi-reference.png)
 - [P6-11A 当前内容拥挤与原始 Markdown](assets/tui/runtime-main-buffer-current-p6-11a.png)
 - [Pi 风格正文层级参考](assets/tui/runtime-content-hierarchy-pi-reference.png)
+- [P6-11B 负向：用户卡片收缩与记录拥挤](assets/tui/runtime-p6-11b-hierarchy-still-crowded.png)
+- [P6-11B 负向：行内代码灰块过密](assets/tui/runtime-p6-11b-inline-code-overhighlighted.png)
 
 三张图的具体角色和使用限制见 [资源说明](assets/tui/README.md)。正向目标图决定构图、边界、
 间距和信息层级，但其中的旧示例数据不是当前产品事实。当前内置工具固定为 `ask`、`bash`、
@@ -157,8 +159,8 @@ Ask 或权限等待属于阻塞式交互。此时上方文档和待处理工具�
 用户消息使用左对齐的低对比度卡片：
 
 - 不显示 `You` 或其他角色标题。
-- 使用与终端背景轻微区分的深灰色背景。
-- 左侧使用一条短蓝线作为身份标记。
+- 使用与终端背景轻微区分的深灰色背景，并且每一条物理行都填满当前可用内容宽度。
+- 左侧使用一条短蓝线作为身份标记；后续行保持稳定缩进，不重复身份标记。
 - 正文使用清晰的浅色文字。
 - 不使用完整边框、圆角气泡、头像或阴影。
 - 用户原始文本按纯文本显示，不主动解释为 Markdown。
@@ -278,12 +280,12 @@ Mica · stop
 思考内容只有在 Provider 返回独立思考信息时才能展示。TUI 不从普通回复、标签文本或模型
 措辞中猜测思考内容。
 
-思考内容采用灰色文字、左侧细灰线和比正式回复更深一级的缩进，不使用背景卡片。提供三种
-显示模式：
+思考内容采用灰色文字、左侧细灰线和比正式回复更深一级的缩进，不使用背景卡片。彩色模式
+使用 muted + dim，使思考明显弱于正式回复。提供三种显示模式：
 
 1. `full`：完整展示实际收到的思考内容。
-2. `collapsed`：只显示前几十个字符或最多两行。
-3. `hidden`：不显示思考正文。
+2. `collapsed`：最多两条物理正文行；省略号计入第二行宽度预算，不得在满宽行后追加。
+3. `hidden`：不显示思考正文，也不留下额外空白占位。
 
 显示模式完全由用户设置决定，不响应 `Ctrl+O`，也不依赖历史组件焦点；设置入口和持久化仍
 属于 Phase 7。
@@ -323,9 +325,11 @@ Mica 不主动探测或判断某个模型支持哪些档位。后续模型配置
 - 不使用背景卡片、角色标题、头像或聊天气泡。
 - 正文使用清晰的终端浅色。
 - Markdown 标题、列表标记和链接使用克制的蓝色。
-- 行内代码使用轻微灰色背景。
+- 行内代码只使用协调的蓝灰色前景，不使用背景色块。
 - 代码块使用比终端稍亮的深灰区域，显示语言名称并进行基础语法着色。
 - 思考内容结束后，正式回复沿同一阅读主轴自然开始。
+- 相邻高层语义记录（用户消息、思考、正式回复、工具）之间恰好保留一条无背景空白物理行；
+  间距由渲染器统一插入，组件自身不附加空行。
 
 P6-11A 已经验证主缓冲区运行闭环，但其验收截图仍把用户消息、模型思考、工具记录和正式回复
 压在相邻行中，并把 Markdown 源标记直接暴露给用户。P6-11B 必须在不引入聊天气泡或全屏背景的
@@ -371,6 +375,8 @@ P6-11A 已经验证主缓冲区运行闭环，但其验收截图仍把用户消�
 - [动态工具色块参考](assets/tui/runtime-tool-blocks-pi-reference.png)
 - [P6-11A 当前内容拥挤与原始 Markdown](assets/tui/runtime-main-buffer-current-p6-11a.png)
 - [Pi 风格正文层级参考](assets/tui/runtime-content-hierarchy-pi-reference.png)
+- [P6-11B 负向：用户卡片收缩与记录拥挤](assets/tui/runtime-p6-11b-hierarchy-still-crowded.png)
+- [P6-11B 负向：行内代码灰块过密](assets/tui/runtime-p6-11b-inline-code-overhighlighted.png)
 
 这些图片只约束对应组件的结构、密度和信息层级；其中的产品背景、旧工具集合、授权选项和
 示例数据不是 Mica 当前事实，具体行为继续以下文及现有公共契约为准。

@@ -284,7 +284,8 @@ def test_submit_runs_model_stream_and_restores_composer(tmp_path: Path) -> None:
                 message="done",
             )
             frame = screen.renderer.frame()
-            assert "hi there" in frame
+            # 用户消息带左侧身份标识，因此按行包含判断。
+            assert any("hi there" in line for line in frame)
             assert any("Hello" in line for line in frame)
             assert app.history[-1].content == "Hello"
             assert screen.composer_text == ""
