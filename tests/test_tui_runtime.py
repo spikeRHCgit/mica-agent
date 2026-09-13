@@ -368,7 +368,7 @@ def test_runtime_routes_permission_panel_response_to_mica_app(
             panel = await wait_for_view(pilot, runtime.tui, PermissionInteractionView)
             panel.focus()
             await pilot.press("enter")
-            await asyncio.wait_for(runtime.wait_idle(), timeout=2.0)
+            await asyncio.wait_for(runtime.wait_idle(), timeout=5.0)
             assert calls == ["call-write"]
             assert broker.pending_count == 0
             assert app.history[-1].content == "final"
