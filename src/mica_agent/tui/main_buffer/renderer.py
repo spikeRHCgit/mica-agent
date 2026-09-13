@@ -691,14 +691,27 @@ class MainBufferRenderer:
 
     # -- chrome -------------------------------------------------------------
 
-    def set_chrome(self, lines: list[str], *, cursor: tuple[int, int] | None) -> None:
-        """设置底部重绘区与 chrome 内的光标坐标（行号为 chrome 内下标）。"""
+    def set_chrome(
+        self,
+        lines: list[str],
+        *,
+        cursor: tuple[int, int] | None,
+        anchor: int | None = None,
+    ) -> None:
+        """设置底部重绘区与 chrome 内的光标坐标（行号为 chrome 内下标）。
+
+        chrome 高于屏幕预算时按 ``anchor`` 取窗口：锚点行（交互面板当前选中
+        行）必须留在屏幕上，绝不无声地从顶部丢掉它。未提供锚点时保持原有的
+        「保留尾部」行为。
+        """
         rows = list(lines)
         limit = max(1, self._height - 1)
         shift = 0
         if len(rows) > limit:
-            shift = len(rows) - limit
-            rows = rows[shift:]
+            focus = len(rows) - 1 if anchor is None else anchor
+            focus = min(max(focus, 0), len(rows) - 1)
+            shift = min(max(0, focus - limit + 1), len(rows) - limit)
+            rows = rows[shift : shift + limit]
         self._chrome = rows
         if cursor is None:
             self._cursor = None

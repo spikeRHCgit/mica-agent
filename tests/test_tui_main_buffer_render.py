@@ -481,3 +481,308 @@ def test_interaction_panels_fit_declared_width(width: int) -> None:
     assert ask_lines and permission_lines
     assert any("Pick one" in line for line in ask_lines)
     assert any("Do you want to proceed?" in line for line in permission_lines)
+
+
+# -- P6-11C-MR2：超高交互面板的紧凑降级 --------------------------------------
+
+
+def tall_ask_prompt() -> AskPrompt:
+    """一个远超可视高度的 ask 面板：4 个带长说明的选项 + 自定义行。"""
+    return AskPrompt(
+        "选择接下来要执行的操作。",
+        title="后续任务",
+        options=tuple(
+            AskOption(f"option {index}", f"description {index} " * 24)
+            for index in range(1, 5)
+        ),
+        allow_custom=True,
+    )
+
+
+def test_ask_panel_without_a_budget_keeps_the_full_layout() -> None:
+    """未给出可用行数时布局不变：说明、标题、footer 与分隔线都还在。"""
+    from mica_agent.tui.main_buffer.renderer import Palette
+
+    palette = Palette(False)
+    ask = AskInteraction("i-1", tall_ask_prompt())
+    lines = ask.panel_lines(80, palette)
+    assert len(lines) > 20
+    assert any("后续任务" in line for line in lines)
+    assert any("description 1" in line for line in lines)
+    assert any("Enter 选择" in line for line in lines)
+    assert "─" in lines[0] and "─" in lines[-1]
+
+
+@pytest.mark.parametrize("selected", [0, 2, 4])
+def test_super_tall_ask_panel_keeps_the_selected_row_visible(selected: int) -> None:
+    """80×12 终端的可用高度下，当前选中行必须在可见行里。"""
+    from mica_agent.tui.main_buffer.renderer import Palette
+
+    palette = Palette(False)
+    ask = AskInteraction("i-1", tall_ask_prompt())
+    ask.selected = selected
+    view = ask.panel(80, palette, limit=11)
+    assert len(view.lines) <= 11
+    assert 0 <= view.selected_row < len(view.lines)
+    marker = view.lines[view.selected_row]
+    assert marker.startswith("›")
+    if selected == 4:
+        assert "Type something." in marker
+    else:
+        assert f"{selected + 1}. option {selected + 1}" in marker
+    # 未进入窗口化：全部固定选项标签仍然保留。
+    assert all(
+        any(f"{index}. option {index}" in line for line in view.lines)
+        for index in range(1, 5)
+    )
+
+
+def test_ask_panel_windows_around_the_selection_and_reports_hidden_rows() -> None:
+    """连核心行都放不下时取窗口，并用固定提示说明被隐藏的行数。"""
+    from mica_agent.tui.main_buffer.renderer import Palette
+
+    palette = Palette(False)
+    # 选中靠上的选项时窗口优先保住问题主句，被隐藏的尾部用下方提示表达。
+    ask = AskInteraction("i-1", tall_ask_prompt())
+    ask.selected = 2
+    view = ask.panel(80, palette, limit=5)
+    assert len(view.lines) <= 5
+    assert view.lines[view.selected_row].startswith("›")
+    assert "3. option 3" in view.lines[view.selected_row]
+    text = "\n".join(view.lines)
+    assert "选择接下来要执行的操作。" in text
+    assert "下方还有" in text
+    assert "上方还有" not in text
+
+    # 选中最后一个可选项（自定义行）时改为上方提示，选中行依然可见。
+    ask.selected = 4
+    view = ask.panel(80, palette, limit=5)
+    assert len(view.lines) <= 5
+    assert view.lines[view.selected_row].startswith("›")
+    assert "Type something." in view.lines[view.selected_row]
+    assert "上方还有" in "\n".join(view.lines)
+
+
+def test_permission_panel_keeps_the_current_choice_with_a_long_detail() -> None:
+    """权限详情很长时也不能把 Yes/No 的当前选择裁掉。"""
+    from mica_agent.tui.main_buffer.renderer import Palette
+
+    palette = Palette(False)
+    detail = " ".join(f"segment{index}" for index in range(80))
+    for selected in (0, 1):
+        permission = PermissionInteraction("i-2", "bash", detail)
+        permission.selected = selected
+        view = permission.panel(80, palette, limit=12)
+        assert len(view.lines) <= 12
+        assert 0 <= view.selected_row < len(view.lines)
+        assert view.lines[view.selected_row].startswith(f"› {selected + 1}.")
+        assert any("Do you want to proceed?" in line for line in view.lines)
+
+
+def test_panel_budget_never_drops_the_question_or_the_hint() -> None:
+    from mica_agent.tui.main_buffer.interactions import (
+        HINT_RESPONSE_REJECTED,
+    )
+    from mica_agent.tui.main_buffer.interactions import (
+        AskInteraction as Ask,
+    )
+    from mica_agent.tui.main_buffer.renderer import Palette
+
+    palette = Palette(False)
+    ask = Ask("i-1", tall_ask_prompt())
+    ask.fail()
+    view = ask.panel(80, palette, limit=7)
+    assert len(view.lines) <= 7
+    text = "\n".join(view.lines)
+    # 提示、问题主句与当前选中行是这一屏必须同时看到的三件事。
+    assert HINT_RESPONSE_REJECTED in text
+    assert "选择接下来要执行的操作。" in text
+    assert view.lines[view.selected_row].startswith("›")
+
+    # 高度再低时至少保证当前选中行：窗口化不允许丢掉锚点。
+    tight = ask.panel(80, palette, limit=3)
+    assert len(tight.lines) <= 3
+    assert tight.lines[tight.selected_row].startswith("›")
+
+
+# -- P6-11C-MR2 返工：选中行是窗口选择的硬约束 --------------------------------
+
+
+@pytest.mark.parametrize("limit", [1, 2, 3])
+@pytest.mark.parametrize("anchor", [5, 8])
+def test_fit_panel_rows_never_drops_the_anchor_for_distant_hints(
+    limit: int, anchor: int
+) -> None:
+    """多行提示离选中行很远时，锚点仍然是窗口选择的硬约束。
+
+    「命中多少必留行」只能作为次级评分：这里提示行在最上面、选中行在中间或
+    靠下，旧评分会为了两条提示行而挑出不含选中行的窗口。
+    """
+    from mica_agent.tui.main_buffer.interactions import (
+        RANK_CORE,
+        PanelRow,
+        fit_panel_rows,
+    )
+
+    rows = [PanelRow(f"row {index}", RANK_CORE) for index in range(11)]
+    rows[anchor] = PanelRow(f"anchor {anchor}", RANK_CORE)
+    preferred = [0, 1]
+    assert min(abs(anchor - index) for index in preferred) >= 4
+
+    visible, selected = fit_panel_rows(rows, limit, anchor, preferred)
+    assert len(visible) <= limit
+    assert 0 <= selected < len(visible)
+    assert visible[selected] is rows[anchor]
+    assert visible[selected].text == f"anchor {anchor}"
+
+
+@pytest.mark.parametrize("limit", [1, 2, 3, 4, 5])
+def test_fit_panel_rows_keeps_the_anchor_next_to_wrapped_hints(limit: int) -> None:
+    """拒绝提示换成两行时，窗口不能改成只显示提示行与计数行。"""
+    from mica_agent.tui.main_buffer.interactions import (
+        RANK_CORE,
+        PanelRow,
+        fit_panel_rows,
+    )
+
+    rows = [
+        PanelRow("question", RANK_CORE),
+        PanelRow("yes", RANK_CORE),
+        PanelRow("no", RANK_CORE),
+        PanelRow("hint line 1", RANK_CORE),
+        PanelRow("hint line 2", RANK_CORE),
+    ]
+    visible, selected = fit_panel_rows(rows, limit, 2, [3, 4])
+    assert len(visible) <= limit
+    assert 0 <= selected < len(visible)
+    assert visible[selected] is rows[2]
+    assert visible[selected].text == "no"
+
+
+@pytest.mark.parametrize("width", [20, 24, 30])
+@pytest.mark.parametrize("limit", [1, 2, 3, 4, 5])
+def test_permission_panel_keeps_the_selected_row_after_a_wrapped_rejection(
+    width: int, limit: int
+) -> None:
+    """业务拒绝后的多行提示不得把当前选项挤出面板（含极窄与极矮预算）。"""
+    from mica_agent.tui.main_buffer.interactions import HINT_RESPONSE_REJECTED
+    from mica_agent.tui.main_buffer.renderer import Palette, wrap_line
+
+    # 场景本身必须成立：这条提示在窄终端里真的会换行。
+    assert len(wrap_line(HINT_RESPONSE_REJECTED, 20)) >= 2
+
+    palette = Palette(False)
+    for selected, marker in ((0, "› 1. Yes"), (1, "› 2. No")):
+        permission = PermissionInteraction("perm-1", "bash", "run the command")
+        permission.selected = selected
+        permission.fail()
+        view = permission.panel(width, palette, limit=limit)
+        assert len(view.lines) <= limit
+        assert 0 <= view.selected_row < len(view.lines)
+        assert view.lines[view.selected_row].startswith(marker)
+
+
+@pytest.mark.parametrize("limit", [2, 3, 4])
+@pytest.mark.parametrize(
+    ("selected", "marker"),
+    [(0, "› 1. option 1"), (3, "› 4. option 4"), (4, "› Type something.")],
+)
+def test_ask_panel_keeps_the_selected_row_after_a_wrapped_rejection(
+    limit: int, selected: int, marker: str
+) -> None:
+    """固定选项首项/末项与自定义行都必须在拒绝提示换行后仍然可见。"""
+    from mica_agent.tui.main_buffer.interactions import HINT_RESPONSE_REJECTED
+    from mica_agent.tui.main_buffer.renderer import Palette, wrap_line
+
+    assert len(wrap_line(HINT_RESPONSE_REJECTED, 20)) >= 2
+
+    palette = Palette(False)
+    ask = AskInteraction("i-1", tall_ask_prompt())
+    ask.selected = selected
+    ask.fail()
+    view = ask.panel(20, palette, limit=limit)
+    assert len(view.lines) <= limit
+    assert 0 <= view.selected_row < len(view.lines)
+    assert view.lines[view.selected_row].startswith(marker)
+
+
+def test_only_consumed_keys_clear_the_rejection_hint() -> None:
+    """只有被交互消费且改变状态的按键才能清掉拒绝提示。"""
+    from mica_agent.tui.main_buffer.editor import Key
+    from mica_agent.tui.main_buffer.interactions import (
+        HINT_EMPTY_ANSWER,
+        HINT_RESPONSE_REJECTED,
+    )
+
+    unconsumed = (
+        Key("unknown", "\x1b[5~"),  # PageUp
+        Key("unknown", "\x1b[6~"),  # PageDown
+        Key("unknown", "\x1b[15~"),  # 未知功能键
+        Key("left", "\x1b[D"),  # 不适用的方向键
+        Key("text", "9"),  # 越界数字
+        Key("text", "\x00"),  # 清洗后为空的文本，不改变草稿
+    )
+
+    prompt = AskPrompt(
+        "继续吗？", options=(AskOption("是"), AskOption("否")), allow_custom=True
+    )
+    ask = AskInteraction("ask-1", prompt)
+    for key in unconsumed:
+        ask.fail()
+        assert ask.handle(key).action == "none"
+        assert ask.selected == 0
+        assert ask.editing == "options"
+        assert ask.hint == HINT_RESPONSE_REJECTED
+
+    # 有效导航、有效数字定位、进入备注、进入自定义与文本编辑都会清除旧提示。
+    for key in (Key("down"), Key("text", "2"), Key("text", "n")):
+        ask.fail()
+        assert ask.handle(key).action == "none"
+        assert ask.hint == ""
+        ask.editing = "options"
+
+    ask.fail()
+    assert ask.handle(Key("text", "n")).action == "none"
+    assert (ask.editing, ask.hint) == ("notes", "")
+    ask.fail()
+    assert ask.handle(Key("backspace")).action == "none"
+    assert ask.hint == ""
+    ask.fail()
+    assert ask.handle(Key("enter")).action == "none"
+    assert (ask.editing, ask.hint) == ("options", "")
+
+    ask.selected = ask.row_count - 1
+    ask.fail()
+    assert ask.handle(Key("enter")).action == "none"
+    assert (ask.editing, ask.hint) == ("custom", "")
+    # 清洗后为空的文本不改变草稿，因此也不清除提示。
+    ask.fail()
+    assert ask.handle(Key("text", "\x00")).action == "none"
+    assert ask.hint == HINT_RESPONSE_REJECTED
+    assert ask.handle(Key("text", "x")).action == "none"
+    assert ask.hint == ""
+    ask.fail()
+    assert ask.handle(Key("delete")).action == "none"
+    assert ask.hint == ""
+    ask.fail()
+    assert ask.handle(Key("up")).action == "none"
+    assert (ask.editing, ask.hint) == ("options", "")
+
+    # 空答案的提示会顶掉旧的拒绝提示。
+    free = AskInteraction("ask-2", AskPrompt("Type anything"))
+    free.fail()
+    assert free.handle(Key("enter")).action == "none"
+    assert free.hint == HINT_EMPTY_ANSWER
+
+    permission = PermissionInteraction("perm-1", "bash", "run it")
+    for key in unconsumed:
+        permission.fail()
+        assert permission.handle(key).action == "none"
+        assert permission.selected == 0
+        assert permission.hint == HINT_RESPONSE_REJECTED
+    permission.fail()
+    assert permission.handle(Key("down")).action == "none"
+    assert (permission.selected, permission.hint) == (1, "")
+    permission.fail()
+    assert permission.handle(Key("text", "1")).action == "none"
+    assert (permission.selected, permission.hint) == (0, "")

@@ -2,12 +2,12 @@
 
 Mica 是一个面向个人开发者的轻量 Agent 基座。
 
-> 当前状态：Textual TUI、基础文字降级 CLI、五个内置工具、权限确认、交互式 ask、持久化会话和仓库收口已完成。`mica cli` 默认启动 Textual TUI；`mica cli --plain` 使用基础文字界面。两种入口都按当前工作区创建、恢复和继续会话。
+> 当前状态：主缓冲区终端前端、基础文字降级 CLI、五个内置工具、权限确认、交互式 ask、持久化会话和仓库收口已完成。`mica cli` 默认启动主缓冲区终端界面；`mica cli --plain` 使用基础文字界面。两种入口都按当前工作区创建、恢复和继续会话。
 
 ## 当前可用能力
 
 - 独立源码包：`src/mica_agent/`。
-- 交互式对话：`mica cli` 与 `python -m mica_agent cli`；默认启动 Textual TUI。
+- 交互式对话：`mica cli` 与 `python -m mica_agent cli`；默认启动主缓冲区终端界面。
 - 基础文字降级入口：`mica cli --plain` 与 `python -m mica_agent cli --plain`。
 - 连接参数通过环境变量提供：
 
@@ -41,7 +41,7 @@ Mica 是一个面向个人开发者的轻量 Agent 基座。
 - `read`、`write`、`edit`、`bash` 和自定义工具可能需要输入 ASCII `y`/`yes` 确认；`n`/`no` 或空回答拒绝本次调用，其他输入会提示后重新询问。`ask` 的回答可以为空，并只作为当前工具结果返回模型；结构化 ask 会在 stderr 显示带编号的 2—4 个选项，输入选项编号提交该选项，允许自定义回答时还会显示 `Type something.` 入口。
 - 持久化多轮历史：完整成功的轮次写入当前工作区的 JSONL 会话，后续请求携带完整前文和工具历史。
 - 默认 `mica cli` 创建当前工作区的新会话；`mica cli --continue` 恢复该工作区最后活跃的健康会话；`mica cli --resume` 展示并选择该工作区的健康会话。以上参数均可与 `--plain` 组合，例如 `mica cli --continue --plain`。
-- TUI 和基础文字入口共享同一套会话选择、启动上下文、系统提示词、工具、权限模式和 Provider 装配；TUI 会直接显示已选会话的历史，但不会重放历史工具或重新执行历史 Run。
+- 终端前端和基础文字入口共享同一套会话选择、启动上下文、系统提示词、工具、权限模式和 Provider 装配；终端前端会直接显示已选会话的历史，但不会重放历史工具或重新执行历史 Run。
 - 只有正常完成的一轮才会持久化；失败、取消、等待中断或流式输出不完整时不会形成半轮。工具执行后的工作区副作用不会自动回滚；后续失败时请检查工作区。
 - 分类错误诊断与有限重试：鉴权、限流、超时与临时服务端错误按类别报告，仅对可重试类别重试。
 - `Ctrl+C` 可取消进行中的请求并清理退出；EOF 正常结束（Windows 下按 `Ctrl+Z` 再按 `Enter`，Unix/macOS 下按 `Ctrl+D`）。
@@ -90,7 +90,7 @@ uv build --offline
 - `pyproject.toml`：分发元数据、入口与开发依赖。
 - `PROJECT_PLAN.md`：Mica 的正式项目方向和长期架构边界。
 - `docs/module_map.md`：按单个源码文件说明职责的技术地图，用于快速定位修改入口。
-- `docs/tui_design.md`：已经确认的 Textual TUI 交互、视觉和动态呈现规则。
+- `docs/tui_design.md`：已经确认的终端前端交互、视觉和动态呈现规则。
 - `docs/phase1_plan.md`：第一阶段的范围、验收标准和未包含内容。
 - `docs/phase2_plan.md`：第二阶段（Engine、Provider、App、CLI 闭环）的范围与验收标准。
 - `docs/phase3_plan.md`：第三阶段（工作区隔离、JSONL 会话、恢复与上下文）的范围与验收标准。

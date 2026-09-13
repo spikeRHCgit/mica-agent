@@ -16,10 +16,12 @@ from __future__ import annotations
 import os
 import shutil
 import sys
-from collections.abc import Callable
-from contextlib import AbstractContextManager
+from collections.abc import Callable, Iterable
+from contextlib import AbstractContextManager, suppress
 from dataclasses import dataclass
 from typing import Any, Protocol, TextIO
+
+from prompt_toolkit.input.vt100_parser import Vt100Parser
 
 _BEL = "\x07"
 _ESC = "\x1b"
@@ -62,7 +64,7 @@ class KeyInput(Protocol):
         """返回当前已就绪的按键，不阻塞。"""
 
     def flush_keys(self) -> list[Any]:
-        """丢弃已缓冲的按键。"""
+        """结束未完成的输入序列并返回因此产生的按键。"""
 
     def attach(self, callback: Callable[[], None]) -> AbstractContextManager[None]:
         """在事件循环中注册输入就绪回调。"""
@@ -72,10 +74,189 @@ class KeyInput(Protocol):
 
 
 def default_input_factory() -> KeyInput:
-    """构造平台默认的低层输入；只在进入原始模式时调用。"""
+    """构造平台默认的低层输入；只在进入原始模式时调用。
+
+    Windows 控制台在 VT 输入模式下偶尔只给出 ``uChar`` 为 ``\\x00`` 的导航
+    记录，锁定版读取器会丢弃它们，因此这里就地叠加一层 VirtualKeyCode 后备。
+    其他平台、非 VT 模式与管道输入保持锁定版行为。
+    """
     from prompt_toolkit.input import create_input
 
-    return create_input()
+    acquired = create_input()
+    install_windows_navigation_fallback(acquired)
+    return acquired
+
+
+# -- Windows 控制台记录的导航后备 ---------------------------------------------
+
+# Windows 控制台记录类型（Win32 ABI）：1 = KEY_EVENT。
+KEY_EVENT_TYPE = 0x0001
+
+# 受支持的导航 VirtualKeyCode 及其等效 VT 序列。序列与锁定版 prompt_toolkit
+# 的 ANSI 序列表一致，因此后备路径与标准终端路径产生完全相同的按键。
+NAVIGATION_VIRTUAL_KEYS: dict[int, str] = {
+    0x26: "\x1b[A",  # VK_UP
+    0x28: "\x1b[B",  # VK_DOWN
+    0x25: "\x1b[D",  # VK_LEFT
+    0x27: "\x1b[C",  # VK_RIGHT
+    0x24: "\x1b[H",  # VK_HOME
+    0x23: "\x1b[F",  # VK_END
+    0x2E: "\x1b[3~",  # VK_DELETE
+}
+
+
+def windows_key_event(record: Any) -> Any | None:
+    """取出记录中的按键按下事件；非按键事件、key-up 与未知记录返回 ``None``。
+
+    只按属性读取（``EventType``/``Event.KeyEvent``），因此不需要导入任何
+    Win32 类型，测试也能用等价替身构造记录。
+    """
+    if getattr(record, "EventType", None) != KEY_EVENT_TYPE:
+        return None
+    event = getattr(getattr(record, "Event", None), "KeyEvent", None)
+    if event is None or not getattr(event, "KeyDown", False):
+        return None
+    return event
+
+
+def windows_record_sequences(records: Iterable[Any]) -> list[str]:
+    """把一批 Windows 控制台记录解释为按原顺序排列的待解析输入串。
+
+    * ``uChar != "\\x00"``：原样产出该字符，继续走标准 VT 路径；
+    * ``uChar == "\\x00"`` 且是明确支持的导航 VirtualKeyCode：产出等效 VT
+      序列（例如 ``VK_UP`` → ``"\\x1b[A"``），由同一个 ``Vt100Parser`` 解析；
+    * key-up、鼠标/菜单/焦点事件、未知记录与不支持的 VirtualKeyCode：不产出。
+
+    同一批记录里已经有字符记录的 VirtualKeyCode 不再使用后备，因此同一个
+    物理按键既不会既走标准序列又走后备，也不会被合并成两次导航。
+    """
+    events = [event for event in map(windows_key_event, records) if event is not None]
+    typed = {
+        event.VirtualKeyCode for event in events if event.uChar.UnicodeChar != "\x00"
+    }
+    sequences: list[str] = []
+    for event in events:
+        character = event.uChar.UnicodeChar
+        if character != "\x00":
+            sequences.append(character)
+            continue
+        sequence = NAVIGATION_VIRTUAL_KEYS.get(event.VirtualKeyCode)
+        if sequence is not None and event.VirtualKeyCode not in typed:
+            sequences.append(sequence)
+    return sequences
+
+
+class WindowsVtKeyReader:
+    """Windows 控制台记录到按键的纯解释器，不做任何平台 IO。
+
+    它只持有锁定版 ``Vt100Parser``：标准字符与导航后备都变成同一批输入串，
+    因此解析结果与真实 VT 序列完全一致（例如 ``Keys.Up`` + ``"\\x1b[A"``）。
+    单独 ``Esc`` 仍要等 :meth:`flush` 结束未完成序列之后才产生按键。
+    """
+
+    def __init__(self) -> None:
+        self._buffer: list[Any] = []
+        self._parser = Vt100Parser(lambda key_press: self._buffer.append(key_press))
+
+    def feed(self, text: str) -> None:
+        """喂入一段已经确定是 VT 输入的文本。"""
+        self._parser.feed(text)
+
+    def feed_records(self, records: Iterable[Any]) -> None:
+        """喂入一批控制台记录：记录 → 输入串 → 锁定版解析器。"""
+        for sequence in windows_record_sequences(records):
+            self._parser.feed(sequence)
+
+    def flush(self) -> list[Any]:
+        """结束未完成的序列并返回因此产生的按键（单独 ``Esc`` 在这里出现）。"""
+        self._parser.flush()
+        return self.take()
+
+    def take(self) -> list[Any]:
+        """取出并清空当前已解析出的按键。"""
+        keys, self._buffer = self._buffer, []
+        return keys
+
+
+def is_windows_vt_reader(reader: Any) -> bool:
+    """该对象是否为可叠加导航后备的 Windows VT 读取器。
+
+    按形状判断（``read``/``flush_keys``/``handle``/``_vt100_parser``）而不是
+    导入具体类型，因此不需要任何 Win32 导入，测试也能用等价替身验证适配器。
+    """
+    if not callable(getattr(reader, "read", None)):
+        return False
+    if not callable(getattr(reader, "flush_keys", None)):
+        return False
+    if not hasattr(reader, "handle"):
+        return False
+    return hasattr(reader, "_vt100_parser")
+
+
+def _hybrid_reader_type(base_type: type) -> type:
+    """构造「标准 VT 字符 + 零字符导航后备」的混合读取器类型。
+
+    平台 IO（控制台句柄、事件等待、``ReadConsoleInputW``）仍由锁定版
+    prompt_toolkit 完成；这里只接管「记录 → 待解析输入串」这一步并复用它的
+    解析器语义。
+    """
+
+    class WindowsVtInputReader(base_type):  # type: ignore[misc, valid-type]
+        def __init__(self) -> None:
+            super().__init__()
+            self._mica_keys = WindowsVtKeyReader()
+
+        def _get_keys(self, count: Any, input_records: Any) -> tuple[()]:
+            """把这一批记录交给 Mica 的解释器，锁定版解析器不再经手。"""
+            self._mica_keys.feed_records(
+                input_records[index] for index in range(count.value)
+            )
+            return ()
+
+        def read(self) -> list[Any]:
+            """走锁定版平台 IO，返回 Mica 解释后的按键。"""
+            super().read()
+            return self._mica_keys.take()
+
+        def flush_keys(self) -> list[Any]:
+            """结束未完成的序列；单独 ``Esc`` 只在这里成为按键。"""
+            return self._mica_keys.flush()
+
+    return WindowsVtInputReader
+
+
+def windows_navigation_reader(reader: Any) -> Any:
+    """返回叠加了零字符导航后备的新读取器。
+
+    以 ``type(reader)`` 为基类就地扩展，因此不导入任何 Win32 类型，也不
+    复制控制台句柄与记录轮询。
+    """
+    return _hybrid_reader_type(type(reader))()
+
+
+def install_windows_navigation_fallback(inner: Any) -> bool:
+    """就地为 Windows VT 输入安装导航后备；返回是否已安装。
+
+    Windows 专属能力全部通过被替换的读取器本身获得，本模块不导入 Win32
+    类型；替换只作用于**这一个输入实例**，不修改 prompt_toolkit 源码，也不
+    做进程级全局替换。任何失败都保留锁定版读取器不变。
+    """
+    if sys.platform != "win32":
+        return False
+    current = getattr(inner, "console_input_reader", None)
+    if not is_windows_vt_reader(current):
+        return False
+    try:
+        replacement = windows_navigation_reader(current)
+    except Exception:  # noqa: BLE001 - 安装失败时保留锁定版读取器
+        return False
+    close = getattr(current, "close", None)
+    if callable(close):
+        # 旧读取器的句柄释放失败不该影响替换：新读取器已经建好自己的句柄。
+        with suppress(Exception):
+            close()
+    inner.console_input_reader = replacement
+    return True
 
 
 def find_forbidden_sequences(text: str) -> list[str]:
@@ -341,6 +522,15 @@ class Terminal:
         """消费当前所有就绪按键。"""
         return self.input.read_keys()
 
+    def flush_keys(self) -> list[Any]:
+        """结束输入中未完成的序列并返回因此产生的按键。
+
+        单独 ``Esc`` 只有在有界延迟后调用本方法时才成为按键，因此调用方必须
+        使用结果，而不是像丢弃缓冲那样忽略返回值。与 :meth:`drain_keys`
+        对称：没有未完成序列时返回空列表。
+        """
+        return self.input.flush_keys()
+
     def close_input(self) -> None:
         """恢复终端状态并释放输入对象；重复调用安全。
 
@@ -379,9 +569,17 @@ class Terminal:
 
 __all__ = [
     "FORBIDDEN_SEQUENCES",
+    "KEY_EVENT_TYPE",
+    "NAVIGATION_VIRTUAL_KEYS",
     "Capabilities",
     "KeyInput",
     "Terminal",
+    "WindowsVtKeyReader",
     "default_input_factory",
     "find_forbidden_sequences",
+    "install_windows_navigation_fallback",
+    "is_windows_vt_reader",
+    "windows_key_event",
+    "windows_navigation_reader",
+    "windows_record_sequences",
 ]

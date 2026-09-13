@@ -26,7 +26,7 @@ from mica_agent.tui.main_buffer.editor import (
     normalize_key,
     windowed_lines,
 )
-from mica_agent.tui.main_buffer.interactions import AskInteraction
+from mica_agent.tui.main_buffer.interactions import HINT_EMPTY_ANSWER, AskInteraction
 from mica_agent.tui.main_buffer.renderer import (
     TAB_WIDTH,
     Block,
@@ -255,7 +255,105 @@ def test_arrow_keys_reach_the_custom_row_and_enter_starts_text_entry() -> None:
     assert outcome.action == "response"
     assert outcome.response is not None
     assert outcome.response.answer == "hi"
-    assert outcome.response.selected_option_index == 3
+    # 自定义回答不是任何一个编号选项，因此不得伪装成选项下标。
+    assert outcome.response.selected_option_index is None
+
+
+def test_custom_up_and_down_return_to_the_fixed_options_and_keep_the_draft() -> None:
+    ask = make_ask()
+    for _ in range(3):
+        ask.handle(Key("down"))
+    ask.handle(Key("enter"))
+    assert ask.editing == "custom"
+    for character in "draft":
+        ask.handle(Key("text", character))
+
+    # custom 中 Up 退出编辑并落到最后一个固定选项。
+    assert ask.handle(Key("up")).action == "none"
+    assert ask.editing == "options"
+    assert ask.selected == 2
+    assert ask.custom == "draft"
+    assert ask.handle(Key("enter")).action == "response"
+
+    ask = make_ask()
+    for _ in range(3):
+        ask.handle(Key("down"))
+    ask.handle(Key("enter"))
+    for character in "draft":
+        ask.handle(Key("text", character))
+
+    # custom 中 Down 退出编辑并落到第一个固定选项。
+    assert ask.handle(Key("down")).action == "none"
+    assert ask.editing == "options"
+    assert ask.selected == 0
+
+    # 再次进入 Type something. 时恢复原草稿，且不自动提交。
+    for _ in range(3):
+        ask.handle(Key("down"))
+    assert ask.handle(Key("enter")).action == "none"
+    assert ask.editing == "custom"
+    assert ask.custom == "draft"
+
+
+def test_empty_custom_answer_shows_a_hint_and_clears_it_on_typing() -> None:
+    ask = make_ask()
+    for _ in range(3):
+        ask.handle(Key("down"))
+    ask.handle(Key("enter"))
+
+    outcome = ask.handle(Key("enter"))
+    assert outcome.action == "none"
+    assert outcome.response is None
+    assert ask.editing == "custom"
+    assert ask.hint == HINT_EMPTY_ANSWER
+    assert any(
+        HINT_EMPTY_ANSWER in line for line in ask.panel_lines(60, Palette(False))
+    )
+
+    ask.handle(Key("text", "x"))
+    assert ask.hint == ""
+    assert not any(
+        HINT_EMPTY_ANSWER in line for line in ask.panel_lines(60, Palette(False))
+    )
+
+    # 全空白同样不提交。
+    ask.custom = "   "
+    assert ask.editing == "custom"
+    assert ask.handle(Key("enter")).action == "none"
+    assert ask.hint == HINT_EMPTY_ANSWER
+
+
+def test_empty_free_text_answer_shows_a_hint() -> None:
+    ask = AskInteraction("i-3", AskPrompt("Type anything"))
+    outcome = ask.handle(Key("enter"))
+    assert outcome.action == "none"
+    assert outcome.response is None
+    assert ask.hint == HINT_EMPTY_ANSWER
+    for character in "ok":
+        ask.handle(Key("text", character))
+    assert ask.hint == ""
+    assert ask.handle(Key("enter")).action == "response"
+
+
+def test_notes_survive_the_custom_row_and_a_draft() -> None:
+    ask = make_ask()
+    ask.handle(Key("text", "n"))
+    for character in "why":
+        ask.handle(Key("text", character))
+    ask.handle(Key("enter"))
+    assert ask.editing == "options"
+    assert ask.note == "why"
+
+    for _ in range(3):
+        ask.handle(Key("down"))
+    ask.handle(Key("enter"))
+    for character in "free form":
+        ask.handle(Key("text", character))
+    outcome = ask.handle(Key("enter"))
+    assert outcome.response is not None
+    assert outcome.response.answer == "free form"
+    assert outcome.response.selected_option_index is None
+    assert outcome.response.notes == "why"
 
 
 def test_arrow_wrap_includes_the_custom_row() -> None:

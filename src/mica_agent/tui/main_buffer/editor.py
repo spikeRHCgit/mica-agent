@@ -11,9 +11,7 @@
 
 长粘贴片段是不可拆分的编辑单元：光标整体跨过它，Backspace/Delete 一接触
 就整体删除。片段身份由内部的登记表决定，因此手打一段同名摘要只是普通
-文本，不会被当作真实粘贴。片段折叠阈值与摘要格式沿用既有 Textual
-composer 的纯逻辑规则（``mica_agent.tui.paste``），但这里不导入该模块——
-它位于 Textual 产品包内，导入会连带加载旧前端。
+文本，不会被当作真实粘贴。
 """
 
 from __future__ import annotations

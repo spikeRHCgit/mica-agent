@@ -516,3 +516,140 @@ TUI runner 只接收已装配的 `MicaTuiRuntime`，不接收 Provider、Engine�
 - 本切片不切换默认 `mica cli`、不删除旧 Textual、不开始 P6-11C 与 P6-10G；会话格式、Engine、Provider、权限后端与工具执行未改动。
 - 屏幕外历史的高度重排受终端物理限制（见上）；若未来需要改变已滚出屏幕的旧记录高度，只能选择清屏重绘或另起一段重复内容，两者都违反当前主缓冲区原则，因此保持现状并等待产品决策。
 - 思考显示模式的配置入口与持久化仍属 Phase 7；本轮只提供注入接缝与默认折叠。
+
+# P6-11C 默认切换与旧前端退役
+
+## 任务目标
+
+将 `mica cli` 默认入口切到主缓冲区终端前端，删除临时 `--main-buffer-preview`，退役无调用方的旧全屏实现、专属测试和 Textual 依赖，并保留 `--plain` 基础文字降级。
+
+## 入口与装配
+
+- 正式 `mica cli` 与旧预览路径共用同一套会话选择、启动快照、工具、Provider 与 `MicaApp` 装配；非 `--plain` 直接构造 `MainBufferScreen`。
+- `run_interactive(..., plain=True)` 的测试默认值保持不变，避免既有基础 CLI 集成测试误入终端前端。
+- 默认路径不安装 SIGINT 接缝；原始模式下 Ctrl+C 仍由前端模式机处理。构造或运行失败只给出固定诊断 `mica: unable to start terminal interface`，并在未自行收敛时兜底关闭 Provider。
+
+## 退役边界
+
+- 删除 16 个旧全屏模块及其 20 个专属测试；`mica_agent.tui` 只导出 `MainBufferScreen`、`StartupResourceSnapshot`、`TuiSessionSnapshot` 和 `ReasoningDisplayMode`。
+- 产品依赖移除 `textual>=8.2.8`，保留 `prompt-toolkit` 与 `rich`；安装态 wheel 成员与公开导入不再包含 `MicaTuiApp` / Pilot。
+- 共享快照与枚举契约迁到 `tests/test_tui_models.py`，不依赖任何前端实现。
+
+## 验证结果
+
+- 聚焦组（CLI / 主缓冲区 / 公开导入 / 分发 / P6-09 / 共享模型）`-W error` **477 通过**。
+- 全量 `pytest -q -W error` **1665 通过、2 跳过**。
+- `ruff check` 全绿；`ruff format --check`（102 文件）通过；`uv lock --check` 通过；`uv build --offline` 成功。wheel 只收录 `tui/__init__.py`、`tui/models.py` 与 `tui/main_buffer/**`，依赖为 `httpx` / `jsonschema` / `prompt-toolkit` / `rich`。
+- 虚拟终端截图输出到系统临时目录 `mica-p6-11c/`；后续输入可靠性返工完成后，使用者已在真实 Windows Terminal 中复验通过。
+
+## 验收口径
+
+自动化、静态检查、离线构建、安装态验证和后续真实 Windows Terminal 复验均已通过，P6-11C 已完成。Phase 6 仍等待 P6-10G1～G2，不因本切片完成而关闭。Engine、Provider、权限后端、会话格式与主缓冲区视觉规则未改。
+
+# P6-11C-MR2 输入可靠性与 Ask/Permission 闭环
+
+## 根因
+
+- 使用者两次真实 Windows Terminal 探针确认：VT 输入模式下部分物理导航键只给出
+  `uChar == "\x00"` 的记录，锁定版 `Vt100ConsoleInputReader` 只转发带字符的记录，因此
+  `read_keys()` 返回空、方向键从未进入 Screen；单独 `Esc` 一直停留在未完成的转义序列里，
+  因为产品链路只调用 `drain_keys()`、从不调用 `flush_keys()`。
+- `AskInteraction` 用 `selected_option_index = len(options)` 提交自定义答案，被 Broker 的
+  越界校验拒绝，而 UI 对拒绝没有任何反馈；自定义输入还会吞掉 `↑`/`↓` 且空答案静默失败。
+- 渲染器的 chrome 只从顶部保留尾部行：面板高于可视高度时会整行丢掉当前选中行（80×12 +
+  17 行面板可复现）。
+- 已排除：入口/解释器漂移、Textual、旧安装包、selected 状态机、差分未写出、后续帧覆盖、
+  终端失焦、数字键与方向键路由不同。
+
+## 最小实现
+
+- `terminal.py`：`Terminal.flush_keys()` 与 `drain_keys()` 对称；`default_input_factory()`
+  就地安装 Windows 导航后备——`windows_record_sequences()` 把零字符的受支持导航记录换成
+  等效 VT 序列，`WindowsVtKeyReader` 用锁定版 `Vt100Parser` 解析，混合读取器只接管
+  「记录 → 输入串」并复用 prompt_toolkit 的平台 IO；key-up、非按键事件、不支持的 VK 与
+  同批已由字符记录覆盖的 VK 都不产出，因此不会重复发键。
+- `screen.py`：空 `drain` 时用一次性 `loop.call_later`（`ESCAPE_FLUSH_DELAY = 0.1`，可注入）
+  安排 flush，非空 `drain` 取消句柄，flush 结果与 drain 共用同一个归一化入队路径，关闭时
+  先取消句柄；面板按 `渲染器高度 - 1` 拿到可用行数与选中行锚点；响应被拒绝时保留面板与
+  交互状态并显示固定提示。
+- `interactions.py`：自定义答案改用 `None` 下标提交；自定义输入中 `↑`/`↓` 返回固定选项并
+  保留草稿；空答案与拒绝只设置固定短提示、下一次有效输入清除；新增按可用行数降级的面板
+  排版（空行 → 说明/详情 → 标题 → footer → 分隔线 → 带「上方/下方还有 N 行」的确定性窗口）。
+- `renderer.py`：`set_chrome()` 接受选中行锚点，裁剪时保证锚点可见（未提供锚点时行为不变）。
+
+## 测试边界
+
+- 建模 Windows 记录（含真实 `INPUT_RECORD` 结构）→ 混合读取器 → `Keys.Up/Down`，并断言旧
+  读取器对同一批记录返回空；标准 `ESC[A`/`ESC[B` 与后备不合成两次；key-up 不产键。
+- 建模控制台输入驱动真实 Screen/Ask/Permission/渲染器，并用仓库自带 `VirtualTerminal`
+  回放物理帧确认标记行移动；单独 `Esc` 只在 flush 后取消真实 Run，完整序列不被拆开，关闭
+  取消待触发句柄。
+- `Type something.` 全链路打到真实 `MainBufferRuntime`/`MicaApp`/`InteractionBroker`/ask
+  handler，断言 `selected_option_index is None`、pending 清零、Run 继续；并保留旧越界下标被
+  拒绝的回归断言。
+- 80×12（及 resize 到 80×8、60×10）下 Ask/Permission 的当前选中行必须出现在物理帧里，
+  且不发送 alternate screen、不清 scrollback、不捕获鼠标、`PageUp`/`PageDown` 不滚动。
+
+## 验收口径
+
+自动化、Ruff、lock、离线构建与 diff 检查通过后，本返工仍只报告等待使用者真实 Windows
+Terminal 复验（Ask/Permission 方向键、自定义回答、空答案提示、拒绝重试、Esc 取消、超高
+面板、失焦恢复、退出后终端恢复），不得自行宣布 P6-11C 或 Phase 6 完成。Engine、Provider、
+权限后端、Broker 校验、事件 Schema 与会话格式未改。
+
+# P6-11C-MR2 第二轮极小返工：锚点硬约束与提示清除语义
+
+## 已确认的两个缺陷
+
+- `_window_rows()` 把「命中多少必留行」当作首要评分，锚点 `inside` 只是同级的第二项。
+  拒绝提示换成多行后，`PermissionInteraction(width=20, limit=3, selected=1)` + `fail()`
+  会选中「不含选中行、但含两条提示行」的窗口：`› 2. No` 从可见行里消失，`selected_row`
+  甚至算成 `-1` 或指向计数行。
+- `AskInteraction.handle()` / `PermissionInteraction.handle()` 在入口无条件 `self.hint = ""`，
+  于是 `PageUp`/`PageDown`/未知功能键/越界数字这类既不消费也不改变状态的按键也会删掉
+  拒绝提示。
+
+## 最小实现
+
+- `_window_rows()`：候选窗口先被限制在 `start <= focus < end`，锚点由评分项改成**硬约束**；
+  窗口之间再按「覆盖的提示行数 → 是否交代了被隐藏的行（两条计数行放不下时宁可不显示）→
+  内容行数 → 更靠上」排序。空间不足时先丢上下计数行，再丢其他内容行，绝不为低优先级内容
+  丢掉选中行；上下计数行只在两条都放得下时才显示，避免半个误导性说明。
+- `fit_panel_rows()`：`rows` 为空时返回空结果，否则保证 `0 <= selected < len(visible)` 且
+  `visible[selected]` 就是原 `anchor` 行。
+- 提示清除改为「按消费点清除」：`↑`/`↓` 导航、有效数字定位、`n` 进入备注、备注 `Enter`
+  返回、进入自定义、文本编辑（`text`/`paste` 且清洗后非空）、`Backspace`/`Delete`、`Enter`
+  重试，以及自定义中 `↑`/`↓` 退出编辑；其余按键保持提示不变。`Esc` 关闭交互，不保留提示。
+
+## 取舍
+
+- 极端预算下的显示优先级按任务书为「选中行 → 与选择相关的核心信息 → 拒绝/空答案提示 →
+  上下隐藏计数 → 其他装饰」；本实现把「提示行」排在「隐藏计数」之前，把「内容行数」放在
+  两者之后，因此极窄极矮时可能先丢问题主句或计数行，但绝不会丢选中行。若 master 要求把
+  核心信息提到提示之前，只需调整 `_window_rows()` 里那一个评分元组。
+
+## 测试边界
+
+- 直接对 `fit_panel_rows()` 断言「锚点行仍在结果中、`selected_row` 合法且精确指向锚点」：
+  多行提示、提示离锚点很远、`limit = 1/2/3`。
+- Permission/Ask 公共面板在 `fail()` 后（提示在 20 列下确实换行）于 `width = 20/24/30`、
+  `limit = 1..5` 下断言 `› 2. No` / 固定选项首项、末项、`Type something.` 始终可见。
+- 30×5 极窄极矮终端 + 业务拒绝的物理帧：`_build_chrome()` 的锚点合法且指向当前选择，
+  回放帧里能看到 `› 2. No`、`› 1. Yes` 与拒绝提示；`PageUp`/`PageDown`/未知功能键不清提示、
+  不移动选择；不出现 alternate screen、scrollback 清除或鼠标捕获序列。
+- 把返工前的 `_window_rows()` 与入口无条件清除语义装回进程（临时目录里的 pytest 插件，
+  不改仓库）后，上述新增断言全部失败：Permission 出现 `selected_row = -1`、计数行顶替
+  `› 1. Yes`、提示被 `PageUp` 清空等。
+
+## 验收口径
+
+只报告自动化结果，等待 master 复审与使用者真实 Windows Terminal 复验；不宣布 P6-11C 或
+Phase 6 完成，不启动 P6-10G，不做 Git 收口。
+
+## 最终验收
+
+- master 已复审锚点硬约束、提示清除语义及对应回归测试，指定聚焦组 `-W error` 143 通过；
+  Ruff、格式与两项 diff 检查通过。
+- 使用者已在真实 Windows Terminal 中完成 Ask 固定选项、自定义回答、Permission、Esc、
+  失焦恢复与窄窗口等冒烟测试，确认功能运行正常。
+- P6-11C 正式验收通过并完成 Git 收口；P6-10G1～G2 仍未开始，Phase 6 仍保持构建中。

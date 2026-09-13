@@ -446,21 +446,14 @@ def test_wheel_contains_only_mica_package_and_metadata(
         f"mica_agent-{VERSION}.dist-info",
     }
     assert "mica_agent/prompts/system.md" in members
-    assert {
+    tui_members = {
+        member
+        for member in members
+        if member.startswith("mica_agent/tui/") and member.endswith(".py")
+    }
+    assert tui_members == {
         "mica_agent/tui/__init__.py",
-        "mica_agent/tui/app.py",
-        "mica_agent/tui/composer.py",
-        "mica_agent/tui/history.py",
-        "mica_agent/tui/logo.py",
         "mica_agent/tui/models.py",
-        "mica_agent/tui/output.py",
-        "mica_agent/tui/permissions.py",
-        "mica_agent/tui/runtime.py",
-        "mica_agent/tui/startup.py",
-        "mica_agent/tui/status.py",
-        "mica_agent/tui/theme.py",
-        "mica_agent/tui/tool_cards.py",
-        "mica_agent/tui/transcript.py",
         "mica_agent/tui/main_buffer/__init__.py",
         "mica_agent/tui/main_buffer/components.py",
         "mica_agent/tui/main_buffer/editor.py",
@@ -472,7 +465,10 @@ def test_wheel_contains_only_mica_package_and_metadata(
         "mica_agent/tui/main_buffer/sanitize.py",
         "mica_agent/tui/main_buffer/screen.py",
         "mica_agent/tui/main_buffer/terminal.py",
-    } <= members
+    }
+    assert "mica_agent/tui/app.py" not in members
+    assert "mica_agent/tui/runtime.py" not in members
+    assert "mica_agent/tui/transcript.py" not in members
     assert 'name="ls"' not in file_tools_source
     assert "MAX_LIST_ENTRIES" not in file_tools_source
     assert "MAX_LIST_OUTPUT_BYTES" not in file_tools_source
@@ -511,7 +507,7 @@ def test_installed_distribution_declares_runtime_dependencies(
 
     assert result.returncode == 0
     assert result.stdout == (
-        "['httpx>=0.28.1', 'jsonschema>=4.25.1', 'textual>=8.2.8', "
+        "['httpx>=0.28.1', 'jsonschema>=4.25.1', "
         "'prompt-toolkit>=3.0.52', 'rich>=15.0.0']\n"
     )
     assert result.stderr == ""
@@ -520,49 +516,37 @@ def test_installed_distribution_declares_runtime_dependencies(
 def test_installed_wheel_explicitly_imports_tui(
     full_distribution: InstalledDistribution,
 ) -> None:
+    source = textwrap.dedent(
+        """
+        import sys
+        import mica_agent
+        assert not hasattr(mica_agent, "MicaTuiApp")
+        assert not hasattr(mica_agent, "MicaComposer")
+        assert not hasattr(mica_agent, "StartupResourceSnapshot")
+        from mica_agent.context_builder import AgentFileSource
+        from mica_agent.tui import (
+            MainBufferScreen,
+            ReasoningDisplayMode,
+            StartupResourceSnapshot,
+            TuiSessionSnapshot,
+        )
+        from mica_agent.tui.main_buffer import MainBufferRuntime, Terminal
+        snapshot = StartupResourceSnapshot(
+            agent_sources=(AgentFileSource.GLOBAL,), tool_names=("read",)
+        )
+        session = TuiSessionSnapshot(model="loopback-model")
+        assert snapshot.tool_names == ("read",)
+        assert session.model == "loopback-model"
+        assert ReasoningDisplayMode.COLLAPSED.value == "collapsed"
+        assert MainBufferScreen.__name__ == "MainBufferScreen"
+        assert MainBufferRuntime.__name__ == "MainBufferRuntime"
+        assert Terminal.__name__ == "Terminal"
+        assert "textual" not in sys.modules
+        """
+    )
     result = run_installed(
         full_distribution,
-        [
-            full_distribution.python,
-            "-c",
-            (
-                "import asyncio\n"
-                "import mica_agent\n"
-                "assert not hasattr(mica_agent, 'MicaTuiApp')\n"
-                "assert not hasattr(mica_agent, 'MicaComposer')\n"
-                "assert not hasattr(mica_agent, 'StartupResourceSnapshot')\n"
-                "from mica_agent.context_builder import AgentFileSource\n"
-                "from mica_agent.tui import (\n"
-                " ConversationTranscript, MicaComposer, MicaTuiApp, MicaTuiRuntime,\n"
-                " NewOutputIndicator, BashToolCard, EditToolCard, PermissionInteractionView, ReadToolCard, StartupResourceSnapshot,\n"
-                " WriteToolCard,\n"
-                ")\n"
-                "snapshot = StartupResourceSnapshot(\n"
-                " agent_sources=(AgentFileSource.GLOBAL,), tool_names=('read',)\n"
-                ")\n"
-                "async def main():\n"
-                " app = MicaTuiApp(startup_resources=snapshot)\n"
-                " async with app.run_test(size=(40, 12)) as pilot:\n"
-                "  await pilot.pause()\n"
-                "  text = app.query_one('#startup-resources').render().plain\n"
-                "  assert 'Global AGENTS.md' in text and 'Workspace AGENTS.md' in text\n"
-                "  composer = app.query_one('#composer', MicaComposer)\n"
-                "  assert composer.has_focus\n"
-                "  await pilot.press('安', '装')\n"
-                "  assert composer.text == '安装'\n"
-                "  transcript = app.query_one(ConversationTranscript)\n"
-                "  assert transcript.is_following is True\n"
-                "  assert transcript.has_pending_new_output is False\n"
-                "  assert len(app.query(NewOutputIndicator)) == 0\n"
-                "  assert ReadToolCard.__name__ == 'ReadToolCard'\n"
-                "  assert WriteToolCard.__name__ == 'WriteToolCard'\n"
-                "  assert BashToolCard.__name__ == 'BashToolCard'\n"
-                "  assert EditToolCard.__name__ == 'EditToolCard'\n"
-                "  assert PermissionInteractionView.__name__ == 'PermissionInteractionView'\n"
-                "  assert MicaTuiRuntime.__name__ == 'MicaTuiRuntime'\n"
-                "asyncio.run(main())"
-            ),
-        ],
+        [full_distribution.python, "-c", source],
     )
 
     assert result.returncode == 0, result.stderr
@@ -1248,7 +1232,7 @@ def test_installed_wheel_write_and_continue_restore_complete_tool_history(
 def test_installed_wheel_default_tui_tool_dialog_and_continue_restore(
     full_distribution: InstalledDistribution,
 ) -> None:
-    """Installed wheel: injected Pilot runner covers default TUI and continue."""
+    """Installed wheel: fake Screen drives the default frontend and continue."""
     dist = full_distribution
     case_root = dist.outside_repository / "P6-09 TUI 工作区"
     home = case_root / "隔离 HOME"
@@ -1266,36 +1250,26 @@ def test_installed_wheel_default_tui_tool_dialog_and_continue_restore(
         """
         import asyncio
         import os
+        from contextlib import aclosing
 
         from mica_agent.cli import run_interactive
         from mica_agent.permissions import PermissionMode
-        from mica_agent.tui.output import AssistantResponseView
-        from mica_agent.tui.tool_cards import ToolCard, ToolCardState
+        from mica_agent.tui import main_buffer
 
-        async def runner(runtime):
-            async with runtime.tui.run_test(size=(80, 24)) as pilot:
-                await pilot.pause()
-                assert runtime.submit(PROMPT) is True
-                await runtime.wait_idle()
-                for _ in range(100):
-                    if runtime.tui.query(AssistantResponseView):
-                        break
-                    await pilot.pause()
-                else:
-                    raise AssertionError("TUI response view did not mount")
-                responses = [
-                    view.text for view in runtime.tui.query(AssistantResponseView)
-                ]
-                assert EXPECTED in responses[-1]
-                if CONTINUE:
-                    assert "first tool answer" in responses
-                cards = list(runtime.tui.query(ToolCard))
-                if CONTINUE is False:
-                    assert len(cards) == 1
-                    assert cards[0].state is ToolCardState.SUCCESS
-                assert runtime.tui.query_one("#work-status").render().plain.startswith(
-                    "Mica · done"
-                )
+        class DrivingScreen:
+            def __init__(self, app, **kwargs):
+                self._app = app
+                self.closed = False
+                self.kwargs = kwargs
+
+            async def run(self):
+                async with aclosing(self._app.run(PROMPT)) as stream:
+                    async for _event in stream:
+                        pass
+                await self._app.aclose()
+                self.closed = True
+
+        main_buffer.MainBufferScreen = DrivingScreen
 
         async def main():
             code = await run_interactive(
@@ -1305,7 +1279,6 @@ def test_installed_wheel_default_tui_tool_dialog_and_continue_restore(
                 session_mode=SESSION_MODE,
                 permission_mode=PermissionMode.SOLO,
                 plain=False,
-                tui_runner=runner,
             )
             assert code == 0
 
@@ -1317,11 +1290,8 @@ def test_installed_wheel_default_tui_tool_dialog_and_continue_restore(
     def run_driver(
         session_mode: str, prompt: str, expected: str, continue_run: bool
     ) -> subprocess.CompletedProcess[str]:
-        source = (
-            driver.replace("SESSION_MODE", repr(session_mode))
-            .replace("PROMPT", repr(prompt))
-            .replace("EXPECTED", repr(expected))
-            .replace("CONTINUE", repr(continue_run))
+        source = driver.replace("SESSION_MODE", repr(session_mode)).replace(
+            "PROMPT", repr(prompt)
         )
         return run_command(
             [dist.python, "-c", source],
@@ -1339,9 +1309,9 @@ def test_installed_wheel_default_tui_tool_dialog_and_continue_restore(
         )
 
     assert first.returncode == 0, first.stderr
-    assert first.stdout == "p6-09-tui-driver-ok\n"
+    assert first.stdout == "p6-09-tui-driver-ok" + chr(10)
     assert second.returncode == 0, second.stderr
-    assert second.stdout == "p6-09-tui-driver-ok\n"
+    assert second.stdout == "p6-09-tui-driver-ok" + chr(10)
     assert first.stderr == ""
     assert second.stderr == ""
     observed = first.stdout + first.stderr + second.stdout + second.stderr

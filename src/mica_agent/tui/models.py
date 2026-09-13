@@ -1,7 +1,6 @@
-"""只属于 TUI 的不可变视图状态。
+"""只属于终端前端的不可变视图状态。
 
-本模块不导入 Textual；两个前端（旧 Textual 外壳与主缓冲区前端）共享的纯
-枚举也放在这里，避免主缓冲区为了复用契约而加载旧视图。
+本模块不导入任何终端 UI 框架；共享枚举与快照供主缓冲区前端使用。
 """
 
 from __future__ import annotations
@@ -24,7 +23,7 @@ class ReasoningDisplayMode(Enum):
 
 @dataclass(frozen=True, slots=True, repr=False)
 class TuiSessionSnapshot:
-    """CLI 注入的安全底部事实，不让 TUI 读取业务对象。"""
+    """CLI 注入的安全底部事实，不让前端读取业务对象。"""
 
     workspace: str | None = None
     session_label: str | None = None

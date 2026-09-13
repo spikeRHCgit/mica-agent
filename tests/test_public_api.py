@@ -310,6 +310,8 @@ import mica_agent
 assert 'mica_agent.tui' not in sys.modules
 assert 'textual' not in sys.modules
 assert not hasattr(mica_agent, 'MicaTuiApp')
+assert not hasattr(mica_agent, 'MainBufferScreen')
+assert not hasattr(mica_agent, 'StartupResourceSnapshot')
 
 def blocked(*args, **kwargs):
     raise AssertionError('runtime side effect')
@@ -321,10 +323,19 @@ pathlib.Path.cwd = blocked
 pathlib.Path.mkdir = blocked
 pathlib.Path.open = blocked
 asyncio.create_task = blocked
-from mica_agent.tui import MicaTuiApp
-app = MicaTuiApp()
-assert app is not None
+from mica_agent.tui import (
+    MainBufferScreen,
+    ReasoningDisplayMode,
+    StartupResourceSnapshot,
+    TuiSessionSnapshot,
+)
+assert MainBufferScreen.__name__ == 'MainBufferScreen'
+assert StartupResourceSnapshot().__class__.__name__ == 'StartupResourceSnapshot'
+assert TuiSessionSnapshot.__name__ == 'TuiSessionSnapshot'
+assert ReasoningDisplayMode.COLLAPSED.value == 'collapsed'
+assert 'textual' not in sys.modules
 assert 'MicaTuiApp' not in mica_agent.__all__
+assert 'MainBufferScreen' not in mica_agent.__all__
 assert 'mica_agent.app' not in sys.modules
 assert 'mica_agent.engine' not in sys.modules
 assert 'mica_agent.cli' not in sys.modules

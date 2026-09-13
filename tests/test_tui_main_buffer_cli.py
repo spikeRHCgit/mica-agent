@@ -1,9 +1,11 @@
-"""P6-11A `--main-buffer-preview` 参数、路由与依赖分发测试。"""
+"""默认 ``mica cli`` 路由、主缓冲区装配与资源关闭测试。"""
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from pathlib import Path
 
 import pytest
@@ -45,28 +47,29 @@ def make_dependencies(tmp_path: Path):
 
 
 @pytest.mark.parametrize(
-    ("argv", "expected_plain", "expected_preview"),
+    ("argv", "expected_plain"),
     [
-        (["mica", "cli"], False, False),
-        (["mica", "cli", "--main-buffer-preview"], False, True),
-        (["mica", "cli", "--plain"], True, False),
-        (["mica", "cli", "--plain", "--main-buffer-preview"], True, False),
-        (["mica", "cli", "--continue", "--main-buffer-preview"], False, True),
+        (["mica", "cli"], False),
+        (["mica", "cli", "--plain"], True),
+        (["mica", "cli", "--continue"], False),
+        (["mica", "cli", "--resume"], False),
+        (["mica", "cli", "--permission-mode", "solo"], False),
+        (["mica", "cli", "--plain", "--permission-mode", "solo"], True),
+        (["mica", "cli", "--continue", "--plain"], True),
     ],
 )
-def test_cli_routes_preview_flag_without_changing_default_or_plain(
+def test_cli_routes_default_main_buffer_and_plain(
     monkeypatch: pytest.MonkeyPatch,
     argv: list[str],
     expected_plain: bool,
-    expected_preview: bool,
 ) -> None:
     monkeypatch.setenv("MICA_API_URL", "http://127.0.0.1:1/v1")
     monkeypatch.setenv("MICA_API_KEY", "fake-key")
     monkeypatch.setenv("MICA_MODEL", "fake-model")
-    calls: list[tuple[bool, bool]] = []
+    calls: list[bool] = []
 
-    def fake_main_cli(mode, permission, *, plain, main_buffer_preview=False):
-        calls.append((plain, main_buffer_preview))
+    def fake_main_cli(mode, permission, *, plain):
+        calls.append(plain)
         return 0
 
     monkeypatch.setattr(cli, "_main_cli", fake_main_cli)
@@ -75,10 +78,22 @@ def test_cli_routes_preview_flag_without_changing_default_or_plain(
         cli.main()
 
     assert raised.value.code == 0
-    assert calls == [(expected_plain, expected_preview)]
+    assert calls == [expected_plain]
 
 
-def test_cli_help_documents_preview_and_default_tui(
+def test_preview_flag_is_rejected_as_unknown_argument(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["mica", "cli", "--main-buffer-preview"])
+    with pytest.raises(SystemExit) as raised:
+        cli.main()
+    captured = capsys.readouterr()
+    assert raised.value.code == 2
+    assert "unrecognized arguments" in captured.err
+    assert "--main-buffer-preview" in captured.err
+
+
+def test_cli_help_documents_default_terminal_and_plain(
     monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     monkeypatch.setattr(sys, "argv", ["mica", "cli", "--help"])
@@ -86,17 +101,19 @@ def test_cli_help_documents_preview_and_default_tui(
         cli.main()
     captured = capsys.readouterr()
     assert raised.value.code == 0
-    assert "Textual TUI" in captured.out
-    assert "--main-buffer-preview" in captured.out
     assert "--plain" in captured.out
+    assert "basic text interface" in captured.out
+    assert "Textual" not in captured.out
+    assert "--main-buffer-preview" not in captured.out
+    assert "preview" not in captured.out.lower()
 
 
-def test_default_route_never_builds_main_buffer_screen(
+def test_plain_route_never_builds_main_buffer_screen(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def scenario() -> None:
         workspace, service, builder = make_dependencies(tmp_path)
-        provider = ScriptedProvider([ProviderTextDelta("x"), Finish()])
+        provider = ScriptedProvider([ProviderTextDelta("plain"), Finish()])
         called: list[str] = []
 
         async def fake_screen(*args, **kwargs):
@@ -104,10 +121,13 @@ def test_default_route_never_builds_main_buffer_screen(
             return 0
 
         monkeypatch.setattr(cli, "_run_main_buffer", fake_screen)
+        lines = iter(["hello"])
 
-        async def runner(runtime) -> None:
-            called.append("textual")
-            await runtime.aclose()
+        async def read_line() -> str:
+            try:
+                return next(lines)
+            except StopIteration:
+                raise EOFError from None
 
         code = await cli.run_interactive(
             "http://127.0.0.1:1/v1",
@@ -115,22 +135,23 @@ def test_default_route_never_builds_main_buffer_screen(
             "fake-model",
             session_mode="new",
             permission_mode=PermissionMode.DEFAULT,
-            plain=False,
-            tui_runner=runner,
+            plain=True,
             provider_factory=lambda url, key: provider,
+            read_line=read_line,
+            write_out=lambda _text: None,
+            write_err=lambda _text: None,
             workspace=workspace,
             session_service=service,
             context_builder=builder,
         )
         assert code == 0
-        assert called == ["textual"]
-
-    import asyncio
+        assert called == []
+        assert provider.aclose_calls == 1
 
     asyncio.run(scenario())
 
 
-def test_preview_route_uses_main_buffer_screen(
+def test_default_route_uses_main_buffer_screen(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def scenario() -> None:
@@ -144,10 +165,12 @@ def test_preview_route_uses_main_buffer_screen(
             def __init__(self, app, **kwargs) -> None:
                 recorded["app"] = app
                 recorded["kwargs"] = kwargs
+                self.closed = False
 
             async def run(self) -> None:
                 recorded["ran"] = True
                 await recorded["app"].aclose()  # type: ignore[union-attr]
+                self.closed = True
 
         monkeypatch.setattr(main_buffer, "MainBufferScreen", FakeScreen)
 
@@ -158,7 +181,6 @@ def test_preview_route_uses_main_buffer_screen(
             session_mode="new",
             permission_mode=PermissionMode.DEFAULT,
             plain=False,
-            main_buffer_preview=True,
             provider_factory=lambda url, key: provider,
             workspace=workspace,
             session_service=service,
@@ -172,12 +194,10 @@ def test_preview_route_uses_main_buffer_screen(
         assert kwargs["workspace_path"] == workspace.workspace_path
         assert provider.aclose_calls == 1
 
-    import asyncio
-
     asyncio.run(scenario())
 
 
-def test_preview_startup_failure_uses_fixed_diagnostic(
+def test_startup_failure_uses_fixed_diagnostic(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def scenario() -> None:
@@ -203,7 +223,6 @@ def test_preview_startup_failure_uses_fixed_diagnostic(
             session_mode="new",
             permission_mode=PermissionMode.DEFAULT,
             plain=False,
-            main_buffer_preview=True,
             provider_factory=lambda url, key: provider,
             write_err=written.append,
             workspace=workspace,
@@ -212,14 +231,13 @@ def test_preview_startup_failure_uses_fixed_diagnostic(
         )
         assert code == 2
         assert written == ["mica: unable to start terminal interface\n"]
+        assert "secret" not in "".join(written)
         assert provider.aclose_calls == 1
-
-    import asyncio
 
     asyncio.run(scenario())
 
 
-def test_preview_run_failure_closes_app_once_with_fixed_diagnostic(
+def test_run_failure_closes_app_once_with_fixed_diagnostic(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def scenario() -> None:
@@ -230,8 +248,6 @@ def test_preview_run_failure_closes_app_once_with_fixed_diagnostic(
         written: list[str] = []
 
         class ExplodingScreen:
-            """构造成功但运行失败：CLI 必须兜底收敛业务资源。"""
-
             def __init__(self, app, **kwargs) -> None:
                 self.closed = False
                 self._app = app
@@ -248,7 +264,6 @@ def test_preview_run_failure_closes_app_once_with_fixed_diagnostic(
             session_mode="new",
             permission_mode=PermissionMode.DEFAULT,
             plain=False,
-            main_buffer_preview=True,
             provider_factory=lambda url, key: provider,
             write_err=written.append,
             workspace=workspace,
@@ -257,14 +272,13 @@ def test_preview_run_failure_closes_app_once_with_fixed_diagnostic(
         )
         assert code == 2
         assert written == ["mica: unable to start terminal interface" + chr(10)]
+        assert "secret" not in "".join(written)
         assert provider.aclose_calls == 1
-
-    import asyncio
 
     asyncio.run(scenario())
 
 
-def test_preview_normal_exit_never_double_closes_the_provider(
+def test_normal_exit_never_double_closes_the_provider(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def scenario() -> None:
@@ -274,8 +288,6 @@ def test_preview_normal_exit_never_double_closes_the_provider(
         provider = ScriptedProvider([ProviderTextDelta("x"), Finish()])
 
         class ClosingScreen:
-            """正常退出：屏幕自己收敛，CLI 不得重复关闭。"""
-
             def __init__(self, app, **kwargs) -> None:
                 self._app = app
                 self.closed = False
@@ -293,7 +305,6 @@ def test_preview_normal_exit_never_double_closes_the_provider(
             session_mode="new",
             permission_mode=PermissionMode.DEFAULT,
             plain=False,
-            main_buffer_preview=True,
             provider_factory=lambda url, key: provider,
             workspace=workspace,
             session_service=service,
@@ -302,13 +313,139 @@ def test_preview_normal_exit_never_double_closes_the_provider(
         assert code == 0
         assert provider.aclose_calls == 1
 
-    import asyncio
+    asyncio.run(scenario())
+
+
+def test_cancelled_screen_propagates_and_closes_provider_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        from mica_agent.tui import main_buffer
+
+        workspace, service, builder = make_dependencies(tmp_path)
+        provider = ScriptedProvider()
+
+        class CancelledScreen:
+            def __init__(self, app, **kwargs) -> None:
+                self._app = app
+                self.closed = False
+
+            async def run(self) -> None:
+                raise asyncio.CancelledError
+
+        monkeypatch.setattr(main_buffer, "MainBufferScreen", CancelledScreen)
+
+        with pytest.raises(asyncio.CancelledError):
+            await cli.run_interactive(
+                "http://127.0.0.1:1/v1",
+                "fake-key",
+                "fake-model",
+                session_mode="new",
+                permission_mode=PermissionMode.DEFAULT,
+                plain=False,
+                provider_factory=lambda url, key: provider,
+                workspace=workspace,
+                session_service=service,
+                context_builder=builder,
+            )
+        assert provider.aclose_calls == 1
 
     asyncio.run(scenario())
 
 
-def test_distribution_declares_prompt_toolkit_dependency() -> None:
+def test_already_closed_screen_failure_does_not_double_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        from mica_agent.tui import main_buffer
+
+        workspace, service, builder = make_dependencies(tmp_path)
+        provider = ScriptedProvider([ProviderTextDelta("x"), Finish()])
+        written: list[str] = []
+
+        class ClosedThenBoom:
+            def __init__(self, app, **kwargs) -> None:
+                self._app = app
+                self.closed = False
+
+            async def run(self) -> None:
+                await self._app.aclose()
+                self.closed = True
+                raise RuntimeError("after close: secret")
+
+        monkeypatch.setattr(main_buffer, "MainBufferScreen", ClosedThenBoom)
+
+        code = await cli.run_interactive(
+            "http://127.0.0.1:1/v1",
+            "fake-key",
+            "fake-model",
+            session_mode="new",
+            permission_mode=PermissionMode.DEFAULT,
+            plain=False,
+            provider_factory=lambda url, key: provider,
+            write_err=written.append,
+            workspace=workspace,
+            session_service=service,
+            context_builder=builder,
+        )
+        assert code == 2
+        assert written == ["mica: unable to start terminal interface\n"]
+        assert provider.aclose_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_default_route_drives_the_assembled_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        from mica_agent.tui import main_buffer
+
+        workspace, service, builder = make_dependencies(tmp_path)
+        provider = ScriptedProvider([ProviderTextDelta("assembled"), Finish()])
+        recorded: dict[str, object] = {}
+
+        class DrivingScreen:
+            def __init__(self, app, **kwargs) -> None:
+                self._app = app
+                recorded["kwargs"] = kwargs
+                self.closed = False
+
+            async def run(self) -> None:
+                async with aclosing(self._app.run("hello from tui")) as stream:
+                    async for _event in stream:
+                        pass
+                await self._app.aclose()
+                self.closed = True
+
+        monkeypatch.setattr(main_buffer, "MainBufferScreen", DrivingScreen)
+
+        code = await cli.run_interactive(
+            "http://127.0.0.1:1/v1",
+            "fake-key",
+            "fake-model",
+            session_mode="new",
+            permission_mode=PermissionMode.SOLO,
+            plain=False,
+            provider_factory=lambda url, key: provider,
+            workspace=workspace,
+            session_service=service,
+            context_builder=builder,
+        )
+        assert code == 0
+        assert provider.requests[0].messages[-1].content == "hello from tui"
+        kwargs = recorded["kwargs"]
+        assert isinstance(kwargs, dict)
+        assert kwargs["session_snapshot"].model == "fake-model"
+        assert provider.aclose_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_distribution_declares_prompt_toolkit_and_rich() -> None:
     from importlib.metadata import requires
 
     declared = requires("mica-agent") or []
     assert any(entry.startswith("prompt-toolkit") for entry in declared)
+    assert any(entry.startswith("rich") for entry in declared)
+    assert not any(entry.startswith("textual") for entry in declared)

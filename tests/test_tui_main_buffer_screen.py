@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import io
-from collections.abc import AsyncIterator
+import sys
+from collections.abc import AsyncIterator, Iterator
 from contextlib import AbstractContextManager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Self
 
 import pytest
+from prompt_toolkit.input.vt100_parser import Vt100Parser
 from prompt_toolkit.key_binding.key_processor import KeyPress
 from prompt_toolkit.keys import Keys
 
@@ -20,6 +23,7 @@ from mica_agent.interactions import (
     AskOption,
     AskPrompt,
     InteractionBroker,
+    UserInputResponse,
 )
 from mica_agent.jsonl_store import JsonlSessionStore
 from mica_agent.permissions import PermissionMode
@@ -37,7 +41,17 @@ from mica_agent.tool_contracts import (
 from mica_agent.tool_executor import ToolExecutor
 from mica_agent.tool_registry import ToolRegistry
 from mica_agent.tui.main_buffer import MainBufferScreen, Terminal
-from mica_agent.tui.main_buffer.terminal import FORBIDDEN_SEQUENCES
+from mica_agent.tui.main_buffer.editor import normalize_key
+from mica_agent.tui.main_buffer.terminal import (
+    FORBIDDEN_SEQUENCES,
+    KEY_EVENT_TYPE,
+    NAVIGATION_VIRTUAL_KEYS,
+    WindowsVtKeyReader,
+    install_windows_navigation_fallback,
+    windows_key_event,
+    windows_navigation_reader,
+    windows_record_sequences,
+)
 from mica_agent.tui.models import StartupResourceSnapshot, TuiSessionSnapshot
 from mica_agent.workspace import resolve_workspace
 
@@ -46,6 +60,104 @@ ESCAPE = KeyPress(Keys.Escape, "\x1b")
 CTRL_C = KeyPress(Keys.ControlC, "\x03")
 DOWN = KeyPress(Keys.Down, "\x1b[B")
 TIMEOUT = 5.0
+
+VK_UP = 0x26
+VK_DOWN = 0x28
+WIN32_ONLY = pytest.mark.skipif(
+    sys.platform != "win32", reason="windows console records require win32"
+)
+# 等效 VT 序列与其解析结果：读取层产出的按键必须与标准终端路径完全一致。
+NAVIGATION_KEYS = {
+    "\x1b[A": Keys.Up,
+    "\x1b[B": Keys.Down,
+    "\x1b[D": Keys.Left,
+    "\x1b[C": Keys.Right,
+    "\x1b[H": Keys.Home,
+    "\x1b[F": Keys.End,
+    "\x1b[3~": Keys.Delete,
+}
+
+
+def console_record(
+    unicode_char: str = "\x00",
+    virtual_key_code: int = 0,
+    *,
+    key_down: bool = True,
+    event_type: int = KEY_EVENT_TYPE,
+) -> SimpleNamespace:
+    """建模一条 Windows 控制台 INPUT_RECORD（只含读取层真正用到的字段）。"""
+    key_event = SimpleNamespace(
+        KeyDown=1 if key_down else 0,
+        VirtualKeyCode=virtual_key_code,
+        uChar=SimpleNamespace(UnicodeChar=unicode_char),
+    )
+    return SimpleNamespace(
+        EventType=event_type, Event=SimpleNamespace(KeyEvent=key_event)
+    )
+
+
+def real_console_record(
+    unicode_char: str, virtual_key_code: int, *, key_down: bool = True
+) -> Any:
+    """构造锁定版 prompt_toolkit 的真实 ``INPUT_RECORD``：不需要控制台句柄。"""
+    from prompt_toolkit.win32_types import INPUT_RECORD
+
+    record = INPUT_RECORD()
+    record.EventType = KEY_EVENT_TYPE
+    record.Event.KeyEvent.KeyDown = 1 if key_down else 0
+    record.Event.KeyEvent.VirtualKeyCode = virtual_key_code
+    record.Event.KeyEvent.uChar.UnicodeChar = unicode_char
+    return record
+
+
+def batch_of(records: list[Any]) -> SimpleNamespace:
+    """按 ``ReadConsoleInputW`` 的输出形状包装一批记录。"""
+    return SimpleNamespace(value=len(records))
+
+
+class ModelledConsoleReader:
+    """按锁定版 ``Vt100ConsoleInputReader`` 形状建模的 Windows 读取器替身。
+
+    平台 IO 只有一个可注入的记录队列：``read()`` 的语义与 prompt_toolkit
+    完全一致（取一批记录 → ``_get_keys`` → 喂 ``Vt100Parser``），因此叠加
+    导航后备之后的行为可以在没有控制台句柄的环境里断言。
+    """
+
+    def __init__(self) -> None:
+        self._buffer: list[Any] = []
+        self._vt100_parser = Vt100Parser(
+            lambda key_press: self._buffer.append(key_press)
+        )
+        self.handle = None
+        self.batches: list[list[Any]] = []
+        self.close_calls = 0
+
+    def push(self, *records: Any) -> None:
+        self.batches.append([*records])
+
+    def read(self) -> list[Any]:
+        records = self.batches.pop(0) if self.batches else []
+        for data in self._get_keys(batch_of(records), records):
+            self._vt100_parser.feed(data)
+        return self._take()
+
+    def _get_keys(self, count: Any, input_records: Any) -> Iterator[str]:
+        """锁定版旧实现的语义：只产出带字符的记录。"""
+        for index in range(count.value):
+            event = windows_key_event(input_records[index])
+            if event is not None and event.uChar.UnicodeChar != "\x00":
+                yield event.uChar.UnicodeChar
+
+    def flush_keys(self) -> list[Any]:
+        self._vt100_parser.flush()
+        return self._take()
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+    def _take(self) -> list[Any]:
+        result, self._buffer = self._buffer, []
+        return result
 
 
 def typed(value: str) -> list[KeyPress]:
@@ -102,6 +214,35 @@ class FakeInput:
 
     def close(self) -> None:
         self.close_calls += 1
+
+
+class WindowsConsoleInput(FakeInput):
+    """把建模的 Windows 控制台记录接入真实前端的输入替身。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reader = windows_navigation_reader(ModelledConsoleReader())
+        self.direct: list[Any] = []
+
+    def feed(self, *keypresses: Any) -> None:
+        """直接喂入已构造的按键，语义与 ``FakeInput.feed`` 一致。"""
+        self.direct.extend(keypresses)
+        if self._callback is not None:
+            self._callback()
+
+    def push(self, *records: Any) -> None:
+        """喂入一批控制台记录，并按真实输入回调的语义通知前端。"""
+        self.reader.push(*records)
+        if self._callback is not None:
+            self._callback()
+
+    def read_keys(self) -> list[Any]:
+        direct, self.direct = self.direct, []
+        return [*direct, *self.reader.read()]
+
+    def flush_keys(self) -> list[Any]:
+        direct, self.direct = self.direct, []
+        return [*direct, *self.reader.flush_keys()]
 
 
 class ScriptedProvider:
@@ -171,6 +312,7 @@ def make_screen(
     *,
     output: io.StringIO | None = None,
     size: tuple[int, int] = (80, 24),
+    escape_flush_delay: float = 0.0,
 ) -> tuple[MainBufferScreen, io.StringIO]:
     stream = io.StringIO() if output is None else output
     terminal = Terminal(
@@ -193,12 +335,25 @@ def make_screen(
             model="test-model",
         ),
         workspace_path=tmp_workspace(app),
+        escape_flush_delay=escape_flush_delay,
     )
     return screen, stream
 
 
 def tmp_workspace(app: MicaApp) -> Path:
     return app._session_service.store.workspace.workspace_path
+
+
+def freeze_done_window(screen: MainBufferScreen) -> None:
+    """冻结屏幕时钟，让 ``done`` 状态在测试里稳定存在。
+
+    ``done`` 按设计只显示 ``DONE_VISIBLE_SECONDS``（2 秒）后淡出为 ``idle``。
+    把「恰好抓到 done」当作同步点时，负载造成的调度延迟会让测试错过这个窗口，
+    从而把「产品已经正常结束」误判为超时（P6-11C-MR2 已用探针单独复现并证明：
+    停顿 2.5 秒后 Run 仍已完成，只是状态已淡出）。冻结时钟不改变任何产品行为，
+    只把被观测的瞬时状态固定下来。
+    """
+    screen._clock = lambda: 0.0
 
 
 async def pump(predicate: Any, *, message: str = "condition") -> None:
@@ -273,6 +428,7 @@ def test_submit_runs_model_stream_and_restores_composer(tmp_path: Path) -> None:
         app = make_app(tmp_path, provider)
         fake = FakeInput()
         screen, _ = make_screen(app, fake)
+        freeze_done_window(screen)
         async with ScreenHarness(screen, fake) as harness:
             assert screen.status == "idle"
             fake.feed(*typed("hi there"))
@@ -312,6 +468,7 @@ def test_running_state_ignores_composer_input_and_second_submit(
         app = make_app(tmp_path, provider)
         fake = FakeInput()
         screen, _ = make_screen(app, fake)
+        freeze_done_window(screen)
         async with ScreenHarness(screen, fake) as harness:
             fake.feed(*typed("first"), ENTER)
             await asyncio.wait_for(provider.started.wait(), timeout=TIMEOUT)
@@ -365,7 +522,9 @@ def test_escape_cancels_active_run_without_committing_turn(tmp_path: Path) -> No
 # -- Ask 与权限阻塞模式 -----------------------------------------------------
 
 
-def make_ask_executor(broker: InteractionBroker) -> tuple[ToolExecutor, list[str]]:
+def make_ask_executor(
+    broker: InteractionBroker, *, allow_custom: bool = False
+) -> tuple[ToolExecutor, list[str]]:
     calls: list[str] = []
     registry = ToolRegistry()
     spec = ToolSpec("ask", "Ask", {"type": "object", "required": ["question"]})
@@ -378,6 +537,7 @@ def make_ask_executor(broker: InteractionBroker) -> tuple[ToolExecutor, list[str
             AskPrompt(
                 request.arguments["question"],
                 options=(AskOption("Alice"), AskOption("Bob")),
+                allow_custom=allow_custom,
             ),
             cancellation,
         )
@@ -419,6 +579,7 @@ def test_ask_blocks_composer_and_returns_selected_answer(tmp_path: Path) -> None
         app = make_app(tmp_path, provider, tool_executor=executor)
         fake = FakeInput()
         screen, _ = make_screen(app, fake)
+        freeze_done_window(screen)
         async with ScreenHarness(screen, fake) as harness:
             fake.feed(*typed("run ask"), ENTER)
             await pump(lambda: screen.mode == "ask", message="ask mode")
@@ -482,6 +643,7 @@ def test_permission_blocks_and_allow_once_executes_tool(tmp_path: Path) -> None:
         app = make_app(tmp_path, provider, tool_executor=executor)
         fake = FakeInput()
         screen, _ = make_screen(app, fake)
+        freeze_done_window(screen)
         async with ScreenHarness(screen, fake) as harness:
             fake.feed(*typed("write it"), ENTER)
             await pump(lambda: screen.mode == "permission", message="permission")
@@ -517,6 +679,7 @@ def test_permission_deny_keeps_run_alive_without_executing(tmp_path: Path) -> No
         app = make_app(tmp_path, provider, tool_executor=executor)
         fake = FakeInput()
         screen, _ = make_screen(app, fake)
+        freeze_done_window(screen)
         async with ScreenHarness(screen, fake) as harness:
             fake.feed(*typed("write it"), ENTER)
             await pump(lambda: screen.mode == "permission", message="permission")
@@ -600,6 +763,7 @@ def test_failed_tool_record_shows_failure_and_run_continues(tmp_path: Path) -> N
         app = make_app(tmp_path, provider, tool_executor=executor)
         fake = FakeInput()
         screen, _ = make_screen(app, fake)
+        freeze_done_window(screen)
         async with ScreenHarness(screen, fake) as harness:
             fake.feed(*typed("read it"), ENTER)
             await pump(
@@ -745,6 +909,517 @@ def test_rejected_submit_keeps_the_paste_fragment(tmp_path: Path) -> None:
             assert screen.run_id is None
             assert screen.refresh_task is None
             assert "pasted line 0" not in chr(10).join(screen.renderer.document_lines())
+
+            fake.feed(CTRL_C, CTRL_C)
+            await asyncio.wait_for(harness.task, timeout=TIMEOUT)
+
+    asyncio.run(scenario())
+
+
+# -- P6-11C-MR2：Windows VT 零字符导航后备与 Esc flush ------------------------
+
+
+def test_windows_record_sequences_map_zero_char_navigation_records() -> None:
+    """零字符导航记录必须映射为等效 VT 序列；其余记录一律不产出。"""
+    for virtual_key_code, sequence in NAVIGATION_VIRTUAL_KEYS.items():
+        records = [console_record("\x00", virtual_key_code)]
+        assert windows_record_sequences(records) == [sequence]
+
+    # key-up 不是第二次按键。
+    assert (
+        windows_record_sequences([console_record("\x00", VK_UP, key_down=False)]) == []
+    )
+    # 不支持的 VirtualKeyCode 与鼠标/焦点等非按键事件不产出任何输入。
+    assert windows_record_sequences([console_record("\x00", 0x70)]) == []
+    assert (
+        windows_record_sequences([console_record("\x00", VK_UP, event_type=16)]) == []
+    )
+    assert windows_record_sequences([]) == []
+
+
+def test_windows_record_sequences_keep_standard_character_records() -> None:
+    """标准 VT 字符继续原样进入锁定版解析器，不被后备改写。"""
+    arrow = [console_record(character, VK_DOWN) for character in "\x1b[B"]
+    assert windows_record_sequences(arrow) == ["\x1b", "[", "B"]
+    assert windows_record_sequences([console_record("a")]) == ["a"]
+    assert windows_record_sequences([console_record("\r")]) == ["\r"]
+    assert windows_record_sequences([console_record("中")]) == ["中"]
+
+
+def test_windows_record_sequences_never_double_a_single_physical_key() -> None:
+    """同一批里已有字符记录的按键不再走后备。"""
+    mixed = [
+        console_record("\x1b", VK_UP),
+        console_record("\x00", VK_UP),
+        console_record("[", VK_UP),
+        console_record("A", VK_UP),
+    ]
+    assert windows_record_sequences(mixed) == ["\x1b", "[", "A"]
+    # 不同 VirtualKeyCode 的零字符记录不受影响。
+    both = [console_record("a", 0x41), console_record("\x00", VK_UP)]
+    assert windows_record_sequences(both) == ["a", "\x1b[A"]
+
+
+def test_windows_vt_key_reader_parses_backup_and_standard_records() -> None:
+    for virtual_key_code, sequence in NAVIGATION_VIRTUAL_KEYS.items():
+        reader = WindowsVtKeyReader()
+        reader.feed_records([console_record("\x00", virtual_key_code)])
+        keys = reader.take()
+        assert [keypress.key for keypress in keys] == [NAVIGATION_KEYS[sequence]]
+        assert [keypress.data for keypress in keys] == [sequence]
+
+    reader = WindowsVtKeyReader()
+    reader.feed_records(
+        [console_record("\x00", VK_UP), console_record("\x00", VK_DOWN)]
+    )
+    assert [keypress.key for keypress in reader.take()] == [Keys.Up, Keys.Down]
+
+    # 标准路径：三条字符记录合成一次导航，且不会有第二次。
+    reader.feed_records([console_record(character, VK_DOWN) for character in "\x1b[B"])
+    keys = reader.take()
+    assert len(keys) == 1
+    assert (keys[0].key, keys[0].data) == (Keys.Down, "\x1b[B")
+
+    # 普通按键不回归：数字、Enter、Backspace、中文。
+    reader.feed_records(
+        [
+            console_record("2"),
+            console_record("\r"),
+            console_record("\x7f"),
+            console_record("中"),
+        ]
+    )
+    assert [normalize_key(keypress).name for keypress in reader.take()] == [
+        "text",
+        "enter",
+        "backspace",
+        "text",
+    ]
+
+
+def test_lone_escape_arrives_only_after_the_bounded_flush() -> None:
+    reader = WindowsVtKeyReader()
+    reader.feed_records([console_record("\x1b")])
+    assert reader.take() == []
+    keys = reader.flush()
+    assert [keypress.key for keypress in keys] == [Keys.Escape]
+
+
+@WIN32_ONLY
+def test_real_windows_records_confirm_the_stock_reader_gap() -> None:
+    """真实 INPUT_RECORD：旧实现丢弃零字符导航记录，新读取器补上按键。"""
+    from prompt_toolkit.input.win32 import Vt100ConsoleInputReader
+
+    records = [real_console_record("\x00", VK_UP), real_console_record("\x00", VK_DOWN)]
+    # 旧实现只测记录解释这一步，因此不需要真的拥有控制台句柄。
+    stock = Vt100ConsoleInputReader.__new__(Vt100ConsoleInputReader)
+    assert list(stock._get_keys(batch_of(records), records)) == []
+
+    reader = WindowsVtKeyReader()
+    reader.feed_records(records)
+    assert [keypress.key for keypress in reader.take()] == [Keys.Up, Keys.Down]
+
+    reader.feed_records([real_console_record("\x00", VK_UP, key_down=False)])
+    assert reader.take() == []
+
+
+@WIN32_ONLY
+def test_navigation_reader_installs_once_and_keeps_standard_records() -> None:
+    class FakeWin32Input:
+        def __init__(self, reader: Any) -> None:
+            self.console_input_reader = reader
+
+    original = ModelledConsoleReader()
+    inner = FakeWin32Input(original)
+    assert install_windows_navigation_fallback(inner) is True
+    reader = inner.console_input_reader
+    assert reader is not original
+    assert original.close_calls == 1
+
+    reader.push(console_record("\x00", VK_UP))
+    assert [keypress.key for keypress in reader.read()] == [Keys.Up]
+
+    reader.push(*[console_record(character, VK_DOWN) for character in "\x1b[B"])
+    keys = reader.read()
+    assert [(keypress.key, keypress.data) for keypress in keys] == [
+        (Keys.Down, "\x1b[B")
+    ]
+
+    # 非 VT 读取器与非 Windows 控制台输入都不改造。
+    assert install_windows_navigation_fallback(FakeWin32Input(object())) is False
+    assert install_windows_navigation_fallback(object()) is False
+
+
+def test_zero_char_records_move_the_ask_marker_on_the_physical_screen(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        from test_tui_main_buffer_vt import VirtualTerminal
+
+        broker = RecordingBroker()
+        executor, calls = make_ask_executor(broker, allow_custom=True)
+        provider = ScriptedProvider(
+            [
+                [
+                    Finish(
+                        tool_calls=(ToolCall("call-ask", "ask", {"question": "Who?"}),)
+                    )
+                ],
+                [ProviderTextDelta("final"), Finish()],
+            ]
+        )
+        app = make_app(tmp_path, provider, tool_executor=executor)
+        fake = WindowsConsoleInput()
+        screen, _ = make_screen(app, fake)
+        async with ScreenHarness(screen, fake) as harness:
+            fake.feed(*typed("run ask"), ENTER)
+            await pump(lambda: screen.mode == "ask", message="ask mode")
+            interaction = screen.interaction
+            assert interaction is not None
+
+            fake.push(console_record("\x00", VK_DOWN))
+            await pump(lambda: interaction.selected == 1, message="down")
+            fake.push(console_record("\x00", VK_UP))
+            await pump(lambda: interaction.selected == 0, message="up")
+
+            view = VirtualTerminal(rows=24, cols=80)
+            view.feed(screen._terminal.emitted_text())
+            assert view.row_index("› 1. Alice") >= 0
+            assert view.violations == []
+
+            fake.push(*[console_record(character, VK_DOWN) for character in "\x1b[B"])
+            await pump(lambda: interaction.selected == 1, message="standard down")
+            view = VirtualTerminal(rows=24, cols=80)
+            view.feed(screen._terminal.emitted_text())
+            assert view.row_index("› 2. Bob") >= 0
+
+            fake.feed(ENTER)
+            # done 状态只保留 2 秒（设计内的淡出窗口），因此同步点用稳定的
+            # 「Run 结束 + 最终回复已落地」，而不是必须恰好抓到 done。
+            await pump(
+                lambda: (
+                    screen.mode == "idle"
+                    and "final" in "\n".join(screen.renderer.frame())
+                ),
+                message="run finished",
+            )
+            assert screen.status in {"done", "idle"}
+            assert broker.responses[-1].answer == "Bob"
+            assert calls == ["call-ask"]
+            assert "final" in "\n".join(screen.renderer.frame())
+
+            fake.feed(CTRL_C, CTRL_C)
+            await asyncio.wait_for(harness.task, timeout=TIMEOUT)
+
+    asyncio.run(scenario())
+
+
+def test_one_physical_navigation_record_is_handled_exactly_once(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        broker = RecordingBroker()
+        executor, _ = make_ask_executor(broker)
+        provider = ScriptedProvider(
+            [[Finish(tool_calls=(ToolCall("call-ask", "ask", {"question": "Who?"}),))]]
+        )
+        app = make_app(tmp_path, provider, tool_executor=executor)
+        fake = WindowsConsoleInput()
+        screen, _ = make_screen(app, fake)
+        async with ScreenHarness(screen, fake) as harness:
+            fake.feed(*typed("run ask"), ENTER)
+            await pump(lambda: screen.mode == "ask", message="ask mode")
+            interaction = screen.interaction
+            assert interaction is not None
+            routed: list[str] = []
+            original = interaction.handle
+
+            def counting_handle(key: Any) -> Any:
+                routed.append(key.name)
+                return original(key)
+
+            interaction.handle = counting_handle  # type: ignore[method-assign]
+            fake.push(console_record("\x00", VK_DOWN))
+            await pump(lambda: interaction.selected == 1, message="down")
+            await asyncio.sleep(0)
+            assert routed == ["down"]
+            assert interaction.selected == 1
+
+            fake.feed(CTRL_C, CTRL_C)
+            await asyncio.wait_for(harness.task, timeout=TIMEOUT)
+
+    asyncio.run(scenario())
+
+
+def test_lone_escape_after_flush_cancels_the_real_run(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        broker = RecordingBroker()
+        executor, calls = make_ask_executor(broker)
+        provider = ScriptedProvider(
+            [[Finish(tool_calls=(ToolCall("call-ask", "ask", {"question": "Who?"}),))]]
+        )
+        app = make_app(tmp_path, provider, tool_executor=executor)
+        fake = WindowsConsoleInput()
+        screen, _ = make_screen(app, fake)
+        async with ScreenHarness(screen, fake) as harness:
+            fake.feed(*typed("run ask"), ENTER)
+            await pump(lambda: screen.mode == "ask", message="ask mode")
+
+            fake.push(console_record("\x1b"))
+            assert screen.mode == "ask"  # 单独 Esc 先缓冲，不立即产生按键
+            await pump(
+                lambda: screen.status == "stop" and screen.mode == "idle",
+                message="stop",
+            )
+            # Esc 只取消 Run：不伪造拒绝回答，也不产生 ask 工具结果。
+            assert broker.responses == []
+            assert calls == []
+            assert app.history == ()
+
+            fake.feed(CTRL_C, CTRL_C)
+            await asyncio.wait_for(harness.task, timeout=TIMEOUT)
+
+    asyncio.run(scenario())
+
+
+def test_lone_escape_after_flush_cancels_a_permission_without_denying(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        broker = RecordingBroker()
+        executor, calls = make_permission_executor(broker)
+        provider = ScriptedProvider(
+            [[Finish(tool_calls=(ToolCall("call-write", "write", {}),))]]
+        )
+        app = make_app(tmp_path, provider, tool_executor=executor)
+        fake = WindowsConsoleInput()
+        screen, _ = make_screen(app, fake)
+        async with ScreenHarness(screen, fake) as harness:
+            fake.feed(*typed("write it"), ENTER)
+            await pump(lambda: screen.mode == "permission", message="permission")
+
+            fake.push(console_record("\x1b"))
+            await pump(
+                lambda: screen.status == "stop" and screen.mode == "idle",
+                message="stop",
+            )
+            assert broker.responses == []
+            assert calls == []
+
+            fake.feed(CTRL_C, CTRL_C)
+            await asyncio.wait_for(harness.task, timeout=TIMEOUT)
+
+    asyncio.run(scenario())
+
+
+def test_complete_escape_sequence_is_not_split_by_the_flush(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        broker = RecordingBroker()
+        executor, _ = make_ask_executor(broker)
+        provider = ScriptedProvider(
+            [
+                [
+                    Finish(
+                        tool_calls=(ToolCall("call-ask", "ask", {"question": "Who?"}),)
+                    )
+                ],
+                [ProviderTextDelta("final"), Finish()],
+            ]
+        )
+        app = make_app(tmp_path, provider, tool_executor=executor)
+        fake = WindowsConsoleInput()
+        screen, _ = make_screen(app, fake)
+        async with ScreenHarness(screen, fake) as harness:
+            fake.feed(*typed("run ask"), ENTER)
+            await pump(lambda: screen.mode == "ask", message="ask mode")
+            interaction = screen.interaction
+            assert interaction is not None
+
+            # 序列在 flush 触发前完成：先喂 ESC，再在同一轮事件循环里喂 "[B"。
+            fake.push(console_record("\x1b", VK_DOWN))
+            fake.push(console_record("[", VK_DOWN), console_record("B", VK_DOWN))
+            await pump(lambda: interaction.selected == 1, message="standard down")
+            await asyncio.sleep(0)
+            assert screen.mode == "ask"
+            assert screen.status == "working"
+
+            fake.feed(CTRL_C, CTRL_C)
+            await asyncio.wait_for(harness.task, timeout=TIMEOUT)
+
+    asyncio.run(scenario())
+
+
+def test_pending_escape_flush_is_cancelled_at_shutdown(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        broker = RecordingBroker()
+        executor, _ = make_ask_executor(broker)
+        provider = ScriptedProvider(
+            [[Finish(tool_calls=(ToolCall("call-ask", "ask", {"question": "Who?"}),))]]
+        )
+        app = make_app(tmp_path, provider, tool_executor=executor)
+        fake = WindowsConsoleInput()
+        # 长延迟：flush 一定还挂起，关闭必须取消它而不是等它超时。
+        screen, _ = make_screen(app, fake, escape_flush_delay=30.0)
+        async with ScreenHarness(screen, fake) as harness:
+            fake.feed(*typed("run ask"), ENTER)
+            await pump(lambda: screen.mode == "ask", message="ask mode")
+            fake.push(console_record("\x1b"))
+            await pump(
+                lambda: screen._flush_handle is not None, message="pending flush"
+            )
+
+            fake.feed(CTRL_C, CTRL_C)
+            await asyncio.wait_for(harness.task, timeout=TIMEOUT)
+
+        assert screen.closed is True
+        assert screen._flush_handle is None
+        assert screen.cleanup_errors == []
+
+    asyncio.run(scenario())
+
+
+def test_custom_answer_reaches_the_real_broker_and_continues_the_run(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        broker = RecordingBroker()
+        executor, calls = make_ask_executor(broker, allow_custom=True)
+        provider = ScriptedProvider(
+            [
+                [
+                    Finish(
+                        tool_calls=(ToolCall("call-ask", "ask", {"question": "Who?"}),)
+                    )
+                ],
+                [ProviderTextDelta("final"), Finish()],
+            ]
+        )
+        app = make_app(tmp_path, provider, tool_executor=executor)
+        fake = FakeInput()
+        screen, _ = make_screen(app, fake)
+        async with ScreenHarness(screen, fake) as harness:
+            fake.feed(*typed("run ask"), ENTER)
+            await pump(lambda: screen.mode == "ask", message="ask mode")
+            interaction = screen.interaction
+            assert interaction is not None
+
+            fake.feed(DOWN, DOWN, ENTER)
+            await pump(lambda: interaction.editing == "custom", message="custom")
+            fake.feed(*typed("Carol"))
+            await pump(lambda: interaction.custom == "Carol", message="draft")
+            fake.feed(ENTER)
+            # 同前：用「Run 结束 + 最终回复已落地」作为稳定同步点。
+            await pump(
+                lambda: (
+                    screen.mode == "idle"
+                    and "final" in "\n".join(screen.renderer.frame())
+                ),
+                message="run finished",
+            )
+            assert screen.status in {"done", "idle"}
+
+            response = broker.responses[-1]
+            assert response.answer == "Carol"
+            assert response.selected_option_index is None
+            assert calls == ["call-ask"]
+            assert broker._pending == {}
+            # 自定义回答不生成用户消息，也不启动新 Run。
+            assert all(message.content != "Carol" for message in app.history)
+            assert "final" in "\n".join(screen.renderer.frame())
+
+            fake.feed(CTRL_C, CTRL_C)
+            await asyncio.wait_for(harness.task, timeout=TIMEOUT)
+
+    asyncio.run(scenario())
+
+
+def test_legacy_custom_answer_index_is_rejected_and_the_panel_stays(
+    tmp_path: Path,
+) -> None:
+    """回归依据：旧的 ``selected_option_index=len(options)`` 提交会被业务侧拒绝。
+
+    旧实现因此既提交不出去、又没有任何可见反馈；这里先复现拒绝，再证明真实
+    的 ``Type something.`` 路径能通过同一个 Broker 完成闭环。
+    """
+
+    async def scenario() -> None:
+        broker = RecordingBroker()
+        executor, calls = make_ask_executor(broker, allow_custom=True)
+        provider = ScriptedProvider(
+            [
+                [
+                    Finish(
+                        tool_calls=(ToolCall("call-ask", "ask", {"question": "Who?"}),)
+                    )
+                ],
+                [ProviderTextDelta("final"), Finish()],
+            ]
+        )
+        app = make_app(tmp_path, provider, tool_executor=executor)
+        fake = FakeInput()
+        screen, _ = make_screen(app, fake)
+        async with ScreenHarness(screen, fake) as harness:
+            fake.feed(*typed("run ask"), ENTER)
+            await pump(lambda: screen.mode == "ask", message="ask mode")
+            interaction = screen.interaction
+            assert interaction is not None
+
+            legacy = UserInputResponse(interaction.interaction_id, "Carol", 2, None)
+            assert broker.respond(legacy) is False
+            assert screen.mode == "ask"
+            assert broker._pending != {}
+
+            fake.feed(DOWN, DOWN, ENTER)
+            await pump(lambda: interaction.editing == "custom", message="custom")
+            fake.feed(*typed("Carol"), ENTER)
+            # 同前：用「Run 结束 + 最终回复已落地」作为稳定同步点。
+            await pump(
+                lambda: (
+                    screen.mode == "idle"
+                    and "final" in "\n".join(screen.renderer.frame())
+                ),
+                message="run finished",
+            )
+            assert screen.status in {"done", "idle"}, (
+                screen.status,
+                list(screen.diagnostics),
+                "\n".join(screen.renderer.frame()),
+            )
+            assert broker.responses[-1].answer == "Carol"
+            assert broker.responses[-1].selected_option_index is None
+            assert calls == ["call-ask"]
+            assert "final" in "\n".join(screen.renderer.frame())
+
+            fake.feed(CTRL_C, CTRL_C)
+            await asyncio.wait_for(harness.task, timeout=TIMEOUT)
+
+    asyncio.run(scenario())
+
+
+def test_selection_survives_later_refresh_frames(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        broker = RecordingBroker()
+        executor, _ = make_ask_executor(broker)
+        provider = ScriptedProvider(
+            [[Finish(tool_calls=(ToolCall("call-ask", "ask", {"question": "Who?"}),))]]
+        )
+        app = make_app(tmp_path, provider, tool_executor=executor)
+        fake = WindowsConsoleInput()
+        screen, _ = make_screen(app, fake)
+        async with ScreenHarness(screen, fake) as harness:
+            fake.feed(*typed("run ask"), ENTER)
+            await pump(lambda: screen.mode == "ask", message="ask mode")
+            interaction = screen.interaction
+            assert interaction is not None
+
+            fake.push(console_record("\x00", VK_DOWN))
+            await pump(lambda: interaction.selected == 1, message="down")
+            for _ in range(4):
+                screen.render()
+                await asyncio.sleep(0)
+            assert interaction.selected == 1
+            frame = "\n".join(screen.renderer.frame())
+            assert "› 2. Bob" in frame
 
             fake.feed(CTRL_C, CTRL_C)
             await asyncio.wait_for(harness.task, timeout=TIMEOUT)

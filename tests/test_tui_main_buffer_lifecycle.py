@@ -463,3 +463,52 @@ def test_input_stream_eof_follows_the_same_idle_rule(tmp_path: Path) -> None:
         assert "input read failed" not in env.screen.diagnostics
 
     asyncio.run(scenario())
+
+
+def test_runtime_accepts_a_mica_app_subclass(tmp_path: Path) -> None:
+    from mica_agent.tui.main_buffer.runtime import MainBufferRuntime
+
+    async def sink(_event: object) -> None:
+        return None
+
+    env = build(tmp_path)
+    runtime = MainBufferRuntime(env.app, event_sink=sink)
+    assert isinstance(env.app, MicaApp)
+    assert runtime.is_closed is False
+
+
+def test_runtime_rejects_objects_that_only_look_like_mica_app() -> None:
+    from mica_agent.tui.main_buffer.runtime import MainBufferRuntime
+
+    async def sink(_event: object) -> None:
+        return None
+
+    class Impostor:
+        run = object()
+        aclose = object()
+
+    with pytest.raises(TypeError, match="app must be a MicaApp"):
+        MainBufferRuntime(object(), event_sink=sink)
+    with pytest.raises(TypeError, match="app must be a MicaApp"):
+        MainBufferRuntime(Impostor(), event_sink=sink)
+
+
+def test_importing_screen_and_runtime_does_not_load_mica_app() -> None:
+    import subprocess
+    import sys
+
+    code = """
+import sys
+from mica_agent.tui import MainBufferScreen
+from mica_agent.tui.main_buffer.runtime import MainBufferRuntime
+assert MainBufferScreen.__name__ == "MainBufferScreen"
+assert MainBufferRuntime.__name__ == "MainBufferRuntime"
+assert "mica_agent.app" not in sys.modules
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr

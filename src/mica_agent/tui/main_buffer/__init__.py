@@ -1,7 +1,7 @@
 """主缓冲区终端前端的显式导入入口。
 
-该子包不依赖 Textual，也不扩展 ``mica_agent`` 顶层公共 API；它只在
-``--main-buffer-preview`` 临时入口下由 CLI 装配。
+该子包不依赖 Textual，也不扩展 ``mica_agent`` 顶层公共 API；它是
+``mica cli`` 的默认终端前端。
 """
 
 from .components import (

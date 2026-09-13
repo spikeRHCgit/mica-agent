@@ -1,9 +1,8 @@
 """主缓冲区前端的单 Run 生命周期控制器。
 
-与 Textual 版 ``MicaTuiRuntime`` 职责相同但互不依赖：集中拥有唯一活动
-Run 的 ``CancellationToken``、消费任务、真实 ``run_id`` 和
-``MicaApp.run()`` 事件流，并转发公共交互响应。它不持有终端、不绘制、
-不导入 Textual。
+集中拥有唯一活动 Run 的 ``CancellationToken``、消费任务、真实
+``run_id`` 和 ``MicaApp.run()`` 事件流，并转发公共交互响应。它不持有
+终端、不绘制。
 """
 
 from __future__ import annotations
@@ -12,8 +11,11 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import aclosing
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from mica_agent.app import MicaApp
+if TYPE_CHECKING:
+    from mica_agent.app import MicaApp
+
 from mica_agent.cancellation import CancellationToken
 from mica_agent.events import (
     RunCancelled,
@@ -39,7 +41,9 @@ class MainBufferRuntime:
     """拥有一个已装配 ``MicaApp`` 的单 Run 控制器。"""
 
     def __init__(self, app: MicaApp, *, event_sink: EventSink) -> None:
-        if not isinstance(app, MicaApp):
+        from mica_agent.app import MicaApp as App
+
+        if not isinstance(app, App):
             raise TypeError("app must be a MicaApp")
         if not callable(event_sink):
             raise TypeError("event_sink must be callable")

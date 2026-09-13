@@ -14,9 +14,11 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable, Mapping
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from mica_agent.app import MicaApp
+if TYPE_CHECKING:
+    from mica_agent.app import MicaApp
+
 from mica_agent.events import (
     ErrorCategory,
     PermissionRequested,
@@ -73,6 +75,9 @@ DONE_VISIBLE_SECONDS = 2.0
 REFRESH_INTERVAL = 0.25
 MAX_TOOL_DETAIL = 72
 MAX_OUTPUT_LINES = 8
+# 单独 Esc 的有界等待窗口：只有在这段时间内没有后续字节时才结束未完成的
+# 转义序列，因此完整的 ESC[A / ESC[B 不会被拆成 Escape 加文本。
+ESCAPE_FLUSH_DELAY = 0.1
 
 # 内部终止类别到工作状态的映射；真实公共终态事件优先。
 _STOP_REASONS = frozenset({"cancelled"})
@@ -114,6 +119,7 @@ class MainBufferScreen:
         branch_reader: Any = read_git_branch,
         reasoning_mode: ReasoningDisplayMode = ReasoningDisplayMode.COLLAPSED,
         tool_views: Mapping[str, Any] | None = None,
+        escape_flush_delay: float = ESCAPE_FLUSH_DELAY,
     ) -> None:
         self._app = app
         self._terminal = Terminal() if terminal is None else terminal
@@ -154,6 +160,8 @@ class MainBufferScreen:
         self._tool_partial = ""
         self._ctrl_c_at: float | None = None
         self._refresh_task: asyncio.Task[None] | None = None
+        self._escape_flush_delay = max(0.0, float(escape_flush_delay))
+        self._flush_handle: asyncio.TimerHandle | None = None
         self._branch: str | None = None
         self._run_id: str | None = None
         self._last_seq = -1
@@ -267,10 +275,11 @@ class MainBufferScreen:
                 self.render()
 
     async def _shutdown(self) -> None:
-        """幂等关闭：先停刷新任务，再无条件下线终端，最后关闭业务资源。"""
+        """幂等关闭：先停刷新与待触发 flush，再无条件下线终端，最后关业务资源。"""
         if self._closed:
             return
         self._closed = True
+        self._cancel_escape_flush()
         try:
             await self._stop_refresh()
         except Exception as error:  # noqa: BLE001 - 清理失败只记账不外抛
@@ -350,6 +359,11 @@ class MainBufferScreen:
     # -- 输入 ---------------------------------------------------------------
 
     def _on_input_ready(self, loop: asyncio.AbstractEventLoop) -> None:
+        """输入就绪回调：把按键送入同一个队列，并管理唯一的待触发 flush。
+
+        回调可能来自输入线程，因此对事件循环的所有操作都通过线程安全入口，
+        顺序与调用顺序一致。
+        """
         try:
             keys = self._terminal.drain_keys()
         except EOFError:
@@ -359,10 +373,46 @@ class MainBufferScreen:
         except Exception as error:  # noqa: BLE001 - 读取失败不得终止前端
             self.diagnostics.append(f"input read failed: {type(error).__name__}")
             return
+        if not keys:
+            # 空 drain 可能是单独 Esc：安排一次性有界 flush；已有待触发句柄时
+            # 合并，不重复排程，也不轮询。
+            loop.call_soon_threadsafe(self._schedule_escape_flush, loop)
+            return
+        # 完整的序列已经解析出来：取消待触发 flush，避免把 ESC[A 拆开。
+        loop.call_soon_threadsafe(self._cancel_escape_flush)
+        self._enqueue_keys(loop, keys)
+
+    def _enqueue_keys(self, loop: asyncio.AbstractEventLoop, keys: list[Any]) -> None:
+        """按原顺序把按键送入前端队列（drain 与 flush 共用的唯一入口）。"""
         for keypress in keys:
             loop.call_soon_threadsafe(
                 self._queue.put_nowait, ("key", normalize_key(keypress))
             )
+
+    def _schedule_escape_flush(self, loop: asyncio.AbstractEventLoop) -> None:
+        """安排一次有界延迟的 flush；已关闭或已有待触发句柄时不做任何事。"""
+        if self._closed or self._flush_handle is not None:
+            return
+        self._flush_handle = loop.call_later(
+            self._escape_flush_delay, self._flush_pending_input, loop
+        )
+
+    def _flush_pending_input(self, loop: asyncio.AbstractEventLoop) -> None:
+        """结束输入里未完成的序列，并把结果按键走与 drain 相同的入队路径。"""
+        self._flush_handle = None
+        if self._closed:
+            return
+        try:
+            keys = self._terminal.flush_keys()
+        except Exception as error:  # noqa: BLE001 - flush 失败不得终止前端
+            self.diagnostics.append(f"input flush failed: {type(error).__name__}")
+            return
+        self._enqueue_keys(loop, keys)
+
+    def _cancel_escape_flush(self) -> None:
+        handle, self._flush_handle = self._flush_handle, None
+        if handle is not None:
+            handle.cancel()
 
     def _handle_key(self, key: Key) -> bool:
         """处理一个按键；返回 True 表示应当退出。"""
@@ -458,12 +508,15 @@ class MainBufferScreen:
             self._runtime.cancel(self._runtime.run_id)
             self._close_interaction()
             return
-        if (
-            outcome.action == "response"
-            and outcome.response is not None
-            and self._runtime.respond_interaction(outcome.response) is True
-        ):
+        if outcome.action != "response" or outcome.response is None:
+            return
+        if self._runtime.respond_interaction(outcome.response) is True:
             self._close_interaction()
+            return
+        # 业务侧拒绝：保留交互对象、选择、自定义草稿与备注，只在面板内显示
+        # 固定安全提示；使用者可以重试或按 Esc 取消，不回显任何内部信息。
+        self.diagnostics.append("interaction response rejected")
+        interaction.fail()
 
     def _close_interaction(self) -> None:
         self._ask = None
@@ -833,8 +886,8 @@ class MainBufferScreen:
         if renderer is None or self._closed:
             return
         self._sync_terminal_size(renderer)
-        chrome, cursor = self._build_chrome()
-        renderer.set_chrome(chrome, cursor=cursor)
+        chrome, cursor, anchor = self._build_chrome()
+        renderer.set_chrome(chrome, cursor=cursor, anchor=anchor)
         renderer.repaint()
 
     def _sync_terminal_size(self, renderer: MainBufferRenderer) -> None:
@@ -844,16 +897,22 @@ class MainBufferScreen:
         renderer.set_height(height)
         renderer.set_width(width)
 
-    def _build_chrome(self) -> tuple[list[str], tuple[int, int] | None]:
+    def _build_chrome(self) -> tuple[list[str], tuple[int, int] | None, int | None]:
+        """构造底部 chrome；返回（物理行, 光标位置, 选中行锚点）。
+
+        交互面板同时拿到当前可用行数与自己的选中行，因此超高面板可以降级而
+        不是被渲染器从顶部静默裁掉；锚点是渲染器的最后保护层。
+        """
         renderer = self._renderer
         assert renderer is not None
         width = renderer.width
+        limit = max(1, renderer.height - 1)
         if self._mode == "ask" and self._ask is not None:
-            lines = self._ask.panel_lines(width, self._palette)
-            return lines, (len(lines) - 1, 0)
+            view = self._ask.panel(width, self._palette, limit=limit)
+            return view.lines, (len(view.lines) - 1, 0), view.selected_row
         if self._mode == "permission" and self._permission is not None:
-            lines = self._permission.panel_lines(width, self._palette)
-            return lines, (len(lines) - 1, 0)
+            view = self._permission.panel(width, self._palette, limit=limit)
+            return view.lines, (len(view.lines) - 1, 0), view.selected_row
         lines: list[str] = []
         status = status_line(self._status, elapsed=self._live_elapsed())
         if status is not None:
@@ -875,7 +934,7 @@ class MainBufferScreen:
         cursor = (len(lines) + frame.cursor[0], frame.cursor[1])
         lines.extend(frame.lines)
         lines.extend(self._facts_lines())
-        return lines, cursor
+        return lines, cursor, None
 
     def _facts_lines(self) -> list[str]:
         snapshot = self._session_snapshot

@@ -14,10 +14,11 @@ from types import SimpleNamespace
 from prompt_toolkit.key_binding.key_processor import KeyPress
 from prompt_toolkit.keys import Keys
 from test_tui_main_buffer_lifecycle import build
-from test_tui_main_buffer_screen import CTRL_C, DOWN, ENTER, ESCAPE, pump
+from test_tui_main_buffer_screen import CTRL_C, DOWN, ENTER, ESCAPE, pump, typed
 
 from mica_agent.events import (
     ErrorCategory,
+    PermissionRequested,
     RunCancelled,
     RunCompleted,
     RunFailed,
@@ -41,11 +42,15 @@ from mica_agent.tool_presentation import (
     prepare_tool_presentation,
 )
 from mica_agent.tui.main_buffer.editor import Key
-from mica_agent.tui.main_buffer.interactions import InteractionOutcome
+from mica_agent.tui.main_buffer.interactions import (
+    HINT_RESPONSE_REJECTED,
+    InteractionOutcome,
+)
 from mica_agent.tui.main_buffer.runtime import InterruptedMarker
 
 TIMEOUT = 5.0
 UP = KeyPress(Keys.Up, chr(27) + chr(91) + "A")
+F5 = KeyPress(Keys.F5, chr(27) + "[15~")
 RUN = "synth-run"
 
 
@@ -446,7 +451,7 @@ def test_public_run_cancelled_event_wins_over_marker(tmp_path: Path) -> None:
 # -- §8 交互响应被拒绝时的真实回归 -------------------------------------------
 
 
-def test_rejected_ask_response_keeps_the_interaction_and_the_selection(
+def test_rejected_ask_response_keeps_the_interaction_and_shows_a_hint(
     tmp_path: Path,
 ) -> None:
     """响应被业务侧拒绝（responder 返回 False）时不得关闭面板或伪造终态。"""
@@ -487,25 +492,161 @@ def test_rejected_ask_response_keeps_the_interaction_and_the_selection(
         env.fake.feed(ENTER)
         await pump(lambda: bool(routed), message="enter routed to the interaction")
 
-        # 交互对象身份、模式与选择都不变，草稿也没被动过。
+        # 交互对象身份、模式与选择都不变，草稿也没被动过；面板内出现固定提示。
         assert env.screen.interaction is interaction
         assert env.screen.mode == "ask"
         assert interaction.selected == 1
         assert env.screen.composer_text == draft_before
-        # composer 与事实行仍然被交互区替代，面板还在。
         frame = frame_of(env)
         assert "sessions:" not in frame
         assert "Type your request or command..." not in frame
         assert "继续吗？" in frame
         assert "是" in frame and "否" in frame
-        # 还能继续用方向键操作，并且没有伪造任何业务终态。
+        assert HINT_RESPONSE_REJECTED in frame
+        # 提示只说明下一步能做什么，不回显响应、交互 ID 或 Broker 内部状态。
+        assert "ask-1" not in frame
+        assert "False" not in frame
+
+        # 可以再次提交：重试仍然打到同一个交互对象。
+        routed.clear()
+        env.fake.feed(ENTER)
+        await pump(lambda: bool(routed), message="retry routed")
+        assert env.screen.interaction is interaction
+        assert HINT_RESPONSE_REJECTED in frame_of(env)
+
+        # 未被消费的按键（PageUp/PageDown/未知功能键/越界数字）不改变交互状态，
+        # 因此不得清掉拒绝提示，也不得移动选择。
+        assert interaction.selected == 1
+        routed.clear()
+        env.fake.feed(PAGE_UP, PAGE_DOWN, F5, *typed("9"))
+        await pump(lambda: len(routed) == 4, message="unconsumed keys routed")
+        # 前三个是未被识别的功能键，第四个是越界数字（都不会改变交互状态）。
+        assert [key.name for key in routed] == ["unknown", "unknown", "unknown", "text"]
+        assert routed[-1].data == "9"
+        assert interaction.selected == 1
+        assert HINT_RESPONSE_REJECTED in frame_of(env)
+
+        # 导航是新的有效输入：旧提示按清晰规则消失。
         env.fake.feed(UP)
         await pump(lambda: interaction.selected == 0, message="navigate again")
+        assert HINT_RESPONSE_REJECTED not in frame_of(env)
+
+        # 再次提交仍被拒绝时提示重新出现，不被上一次的清除吞掉。
+        routed.clear()
+        env.fake.feed(ENTER)
+        await pump(lambda: bool(routed), message="second retry routed")
+        assert HINT_RESPONSE_REJECTED in frame_of(env)
         assert env.screen.status == "working"
         assert env.screen._terminal_run_id is None
 
         env.fake.feed(ESCAPE)
         await pump(lambda: env.screen.mode != "ask", message="cancelled")
+
+    asyncio.run(with_screen(tmp_path, body))
+
+
+def test_rejected_ask_response_keeps_notes_and_the_custom_draft(
+    tmp_path: Path,
+) -> None:
+    async def body(env: SimpleNamespace) -> None:
+        await env.screen.handle_event(RunStarted(RUN))
+        prompt = AskPrompt(
+            "继续吗？",
+            options=(AskOption("是"), AskOption("否")),
+            allow_custom=True,
+        )
+        await env.screen.handle_event(
+            UserInputRequested(RUN, 1, "ask-1", "继续吗？", prompt)
+        )
+        interaction = env.screen.interaction
+        assert interaction is not None
+
+        env.fake.feed(*typed("n"))
+        await pump(lambda: interaction.editing == "notes", message="notes mode")
+        env.fake.feed(*typed("why"))
+        await pump(lambda: interaction.note == "why", message="note text")
+        env.fake.feed(ENTER)
+        await pump(lambda: interaction.editing == "options", message="options")
+
+        env.fake.feed(DOWN, DOWN, ENTER)
+        await pump(lambda: interaction.editing == "custom", message="custom")
+        env.fake.feed(*typed("draft"))
+        await pump(lambda: interaction.custom == "draft", message="draft")
+
+        routed: list[Key] = []
+        original_handle = interaction.handle
+
+        def counting_handle(key: Key) -> InteractionOutcome:
+            routed.append(key)
+            return original_handle(key)
+
+        interaction.handle = counting_handle  # type: ignore[method-assign]
+        env.fake.feed(ENTER)
+        await pump(lambda: bool(routed), message="enter routed")
+
+        assert env.screen.interaction is interaction
+        assert env.screen.mode == "ask"
+        assert interaction.editing == "custom"
+        assert interaction.custom == "draft"
+        assert interaction.note == "why"
+        assert HINT_RESPONSE_REJECTED in frame_of(env)
+
+        env.fake.feed(ESCAPE)
+        await pump(lambda: env.screen.mode != "ask", message="cancelled")
+
+    asyncio.run(with_screen(tmp_path, body))
+
+
+def test_rejected_permission_response_keeps_the_panel_and_shows_a_hint(
+    tmp_path: Path,
+) -> None:
+    async def body(env: SimpleNamespace) -> None:
+        await env.screen.handle_event(RunStarted(RUN))
+        await env.screen.handle_event(
+            PermissionRequested(RUN, 1, "perm-1", "call-1", "bash", "run the command")
+        )
+        assert env.screen.mode == "permission"
+        interaction = env.screen.interaction
+        assert interaction is not None
+
+        env.fake.feed(DOWN)
+        await pump(lambda: interaction.selected == 1, message="selection")
+
+        routed: list[Key] = []
+        original_handle = interaction.handle
+
+        def counting_handle(key: Key) -> InteractionOutcome:
+            routed.append(key)
+            return original_handle(key)
+
+        interaction.handle = counting_handle  # type: ignore[method-assign]
+        env.fake.feed(ENTER)
+        await pump(lambda: bool(routed), message="enter routed")
+
+        assert env.screen.interaction is interaction
+        assert env.screen.mode == "permission"
+        assert interaction.selected == 1
+        frame = frame_of(env)
+        assert "Do you want to proceed?" in frame
+        assert "1. Yes" in frame and "2. No" in frame
+        assert HINT_RESPONSE_REJECTED in frame
+        assert "perm-1" not in frame
+        assert env.screen.status == "working"
+        assert env.screen._terminal_run_id is None
+
+        # 未被消费的按键不清提示，有效数字定位才清除。
+        routed.clear()
+        env.fake.feed(PAGE_DOWN, F5, *typed("7"))
+        await pump(lambda: len(routed) == 3, message="unconsumed keys routed")
+        assert interaction.selected == 1
+        assert HINT_RESPONSE_REJECTED in frame_of(env)
+
+        env.fake.feed(*typed("1"))
+        await pump(lambda: interaction.selected == 0, message="digit positioning")
+        assert HINT_RESPONSE_REJECTED not in frame_of(env)
+
+        env.fake.feed(ESCAPE)
+        await pump(lambda: env.screen.mode != "permission", message="cancelled")
 
     asyncio.run(with_screen(tmp_path, body))
 

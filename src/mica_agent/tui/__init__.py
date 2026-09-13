@@ -1,79 +1,23 @@
-"""Mica Textual TUI 的显式导入入口。"""
+"""Mica 终端前端的显式导入入口。
 
-from typing import TYPE_CHECKING
+本包不依赖 Textual；顶层只导出共享视图模型和主缓冲区编排入口，
+不扩展 ``mica_agent`` 顶层公共 API。编排入口按需加载，避免导入
+共享快照时连带装配业务运行时。
+"""
 
-from .app import MicaTuiApp, RunRequester
-from .composer import MicaComposer
-from .interactions import (
-    AskInteractionView,
-    HistoricalAskRecordView,
-    RunCancelRequester,
-    UserInputResponder,
-)
-from .models import StartupResourceSnapshot, TuiSessionSnapshot
-from .output import AssistantResponseView, ReasoningDisplayMode, ReasoningView
-from .permissions import PermissionInteractionView, PermissionResponder
-from .status import WorkPhase, WorkStatus, WorkStatusView
-from .tool_cards import (
-    BashToolCard,
-    EditToolCard,
-    GenericToolCard,
-    ReadToolCard,
-    ToolCard,
-    ToolCardFactory,
-    ToolCardState,
-    ToolCardStatus,
-    WriteToolCard,
-    create_tool_card,
-)
-from .transcript import (
-    ConversationTranscript,
-    HistoricalToolRecordView,
-    NewOutputIndicator,
-)
+from .models import ReasoningDisplayMode, StartupResourceSnapshot, TuiSessionSnapshot
 
-if TYPE_CHECKING:
-    from .runtime import MicaTuiRuntime
+__all__ = [
+    "MainBufferScreen",
+    "ReasoningDisplayMode",
+    "StartupResourceSnapshot",
+    "TuiSessionSnapshot",
+]
 
 
 def __getattr__(name: str):
-    if name == "MicaTuiRuntime":
-        from .runtime import MicaTuiRuntime
+    if name == "MainBufferScreen":
+        from .main_buffer.screen import MainBufferScreen
 
-        return MicaTuiRuntime
+        return MainBufferScreen
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-__all__ = [
-    "AskInteractionView",
-    "AssistantResponseView",
-    "BashToolCard",
-    "ConversationTranscript",
-    "EditToolCard",
-    "GenericToolCard",
-    "HistoricalAskRecordView",
-    "HistoricalToolRecordView",
-    "MicaComposer",
-    "MicaTuiApp",
-    "MicaTuiRuntime",
-    "NewOutputIndicator",
-    "PermissionInteractionView",
-    "PermissionResponder",
-    "ReadToolCard",
-    "ReasoningDisplayMode",
-    "ReasoningView",
-    "RunCancelRequester",
-    "RunRequester",
-    "StartupResourceSnapshot",
-    "ToolCard",
-    "ToolCardFactory",
-    "ToolCardState",
-    "ToolCardStatus",
-    "TuiSessionSnapshot",
-    "UserInputResponder",
-    "WorkPhase",
-    "WorkStatus",
-    "WorkStatusView",
-    "WriteToolCard",
-    "create_tool_card",
-]

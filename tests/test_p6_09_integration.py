@@ -1,11 +1,11 @@
-"""P6-09 CLI route, TUI assembly, and lifecycle integration tests."""
+"""P6-09 CLI 路由、主缓冲区装配与生命周期集成测试。"""
 
 from __future__ import annotations
 
 import asyncio
-import signal
 import sys
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from pathlib import Path
 
 import pytest
@@ -18,7 +18,6 @@ from mica_agent.permissions import PermissionMode
 from mica_agent.providers import Finish, ProviderEvent, ProviderRequest
 from mica_agent.providers import TextDelta as ProviderTextDelta
 from mica_agent.session_service import SessionService
-from mica_agent.tui.runtime import MicaTuiRuntime
 from mica_agent.workspace import resolve_workspace
 
 
@@ -96,7 +95,7 @@ def make_dependencies(tmp_path: Path):
         ),
     ],
 )
-def test_cli_main_routes_default_tui_and_plain_without_startup_work(
+def test_cli_main_routes_default_terminal_and_plain_without_startup_work(
     monkeypatch: pytest.MonkeyPatch,
     argv: list[str],
     expected_plain: bool,
@@ -108,8 +107,7 @@ def test_cli_main_routes_default_tui_and_plain_without_startup_work(
     monkeypatch.setenv("MICA_MODEL", "fake-model")
     calls: list[tuple[object, object, object]] = []
 
-    def fake_main_cli(mode, permission, *, plain, main_buffer_preview=False):
-        assert main_buffer_preview is False
+    def fake_main_cli(mode, permission, *, plain):
         calls.append((mode, permission, plain))
         return 0
 
@@ -122,7 +120,7 @@ def test_cli_main_routes_default_tui_and_plain_without_startup_work(
     assert calls == [(expected_mode, expected_permission, expected_plain)]
 
 
-def test_cli_help_explains_default_tui_and_plain(
+def test_cli_help_explains_default_terminal_and_plain(
     monkeypatch: pytest.MonkeyPatch, capsys
 ):
     monkeypatch.setattr(sys, "argv", ["mica", "cli", "--help"])
@@ -130,16 +128,19 @@ def test_cli_help_explains_default_tui_and_plain(
         cli.main()
     captured = capsys.readouterr()
     assert raised.value.code == 0
-    assert "Textual TUI" in captured.out
     assert "--plain" in captured.out
     assert "basic text interface" in captured.out
+    assert "Textual" not in captured.out
+    assert "--main-buffer-preview" not in captured.out
 
 
-def test_tui_route_freezes_context_snapshot_and_uses_selected_session(
+def test_default_route_freezes_context_snapshot_and_uses_selected_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario() -> None:
+        from mica_agent.tui import main_buffer
+
         workspace, service, builder = make_dependencies(tmp_path)
         (workspace.workspace_path / "AGENTS.md").write_text(
             "workspace-only rules", encoding="utf-8"
@@ -166,27 +167,31 @@ def test_tui_route_freezes_context_snapshot_and_uses_selected_session(
         monkeypatch.setattr(cli, "build_system_prompt", counted_prompt)
         observed: dict[str, object] = {}
 
-        async def runner(runtime: MicaTuiRuntime) -> None:
-            observed["session"] = runtime.tui.stored_session
-            observed["snapshot"] = runtime.tui.startup_resources
-            observed["session_snapshot"] = runtime.tui.session_snapshot
-            async with runtime.tui.run_test(size=(70, 18)) as pilot:
-                await pilot.pause()
-                assert runtime.submit("hello from tui") is True
-                await runtime.wait_idle()
-                await pilot.pause()
-                assert (
-                    runtime.tui.query_one("#work-status")
-                    .render()
-                    .plain.startswith("Mica · done")
-                )
+        class DrivingScreen:
+            def __init__(self, app, **kwargs) -> None:
+                self._app = app
+                observed["kwargs"] = kwargs
+                self.closed = False
+
+            async def run(self) -> None:
+                payload = observed["kwargs"]
+                assert isinstance(payload, dict)
+                observed["session"] = payload["stored_session"]
+                observed["snapshot"] = payload["startup_resources"]
+                observed["session_snapshot"] = payload["session_snapshot"]
+                async with aclosing(self._app.run("hello from tui")) as stream:
+                    async for _event in stream:
+                        pass
+                await self._app.aclose()
+                self.closed = True
+
+        monkeypatch.setattr(main_buffer, "MainBufferScreen", DrivingScreen)
 
         code = await cli.run_interactive(
             "http://127.0.0.1:1/v1",
             "fake-key",
             "fake-model",
             plain=False,
-            tui_runner=runner,
             provider_factory=lambda _url, _key: provider,
             read_line=InputScript(),
             write_out=out,
@@ -229,27 +234,33 @@ def test_tui_route_freezes_context_snapshot_and_uses_selected_session(
 
 
 @pytest.mark.parametrize("session_mode", ["continue", "resume"])
-def test_tui_route_passes_continue_or_resume_session_to_runtime(
-    tmp_path: Path, session_mode: str
+def test_default_route_passes_continue_or_resume_session_to_screen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, session_mode: str
 ) -> None:
     async def scenario() -> None:
+        from mica_agent.tui import main_buffer
+
         workspace, service, builder = make_dependencies(tmp_path / session_mode)
         selected = service.create_session(title="selected")
         provider = ScriptedProvider([ProviderTextDelta("restored"), Finish()])
         observed: list[object] = []
         observed_labels: list[str | None] = []
 
-        async def runner(runtime: MicaTuiRuntime) -> None:
-            observed.append(runtime.tui.stored_session)
-            observed_labels.append(runtime.tui.session_snapshot.session_label)
-            async with runtime.tui.run_test(size=(70, 18)) as pilot:
-                await pilot.pause()
-                assert runtime.submit("restored prompt") is True
-                await runtime.wait_idle()
-                for _ in range(100):
-                    if runtime.tui.query("#transcript"):
-                        break
-                    await pilot.pause()
+        class DrivingScreen:
+            def __init__(self, app, **kwargs) -> None:
+                self._app = app
+                observed.append(kwargs["stored_session"])
+                observed_labels.append(kwargs["session_snapshot"].session_label)
+                self.closed = False
+
+            async def run(self) -> None:
+                async with aclosing(self._app.run("restored prompt")) as stream:
+                    async for _event in stream:
+                        pass
+                await self._app.aclose()
+                self.closed = True
+
+        monkeypatch.setattr(main_buffer, "MainBufferScreen", DrivingScreen)
 
         code = await cli.run_interactive(
             "http://127.0.0.1:1/v1",
@@ -257,7 +268,6 @@ def test_tui_route_passes_continue_or_resume_session_to_runtime(
             "fake-model",
             session_mode=session_mode,  # type: ignore[arg-type]
             plain=False,
-            tui_runner=runner,
             provider_factory=lambda _url, _key: provider,
             read_line=InputScript("1"),
             write_out=Recorder(),
@@ -276,90 +286,30 @@ def test_tui_route_passes_continue_or_resume_session_to_runtime(
     asyncio.run(scenario())
 
 
-def test_tui_route_installs_and_restores_the_sigint_seam(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        workspace, service, builder = make_dependencies(tmp_path / "sigint")
-        service.create_session(title="selected")
-        provider = ScriptedProvider([Finish()])
-        observed: dict[str, object] = {}
-
-        async def runner(runtime: MicaTuiRuntime) -> None:
-            observed["during"] = signal.getsignal(signal.SIGINT)
-
-        before = signal.getsignal(signal.SIGINT)
-        code = await cli.run_interactive(
-            "http://127.0.0.1:1/v1",
-            "fake-key",
-            "fake-model",
-            plain=False,
-            tui_runner=runner,
-            provider_factory=lambda _url, _key: provider,
-            read_line=InputScript(),
-            write_out=Recorder(),
-            write_err=Recorder(),
-            workspace=workspace,
-            session_service=service,
-            context_builder=builder,
-        )
-
-        assert code == 0
-        installed = observed["during"]
-        assert callable(installed)
-        assert installed is not before
-        assert signal.getsignal(signal.SIGINT) is before
-
-    asyncio.run(scenario())
-
-
-def test_tui_route_restores_the_sigint_seam_after_runner_failure(
-    tmp_path: Path,
+def test_screen_failure_is_safe_and_closes_provider_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def scenario() -> None:
-        workspace, service, builder = make_dependencies(tmp_path / "sigint-failure")
-        service.create_session(title="selected")
-        provider = ScriptedProvider([Finish()])
+        from mica_agent.tui import main_buffer
 
-        async def failing_runner(runtime: MicaTuiRuntime) -> None:
-            raise RuntimeError("tui runner exploded")
-
-        before = signal.getsignal(signal.SIGINT)
-        code = await cli.run_interactive(
-            "http://127.0.0.1:1/v1",
-            "fake-key",
-            "fake-model",
-            plain=False,
-            tui_runner=failing_runner,
-            provider_factory=lambda _url, _key: provider,
-            read_line=InputScript(),
-            write_out=Recorder(),
-            write_err=Recorder(),
-            workspace=workspace,
-            session_service=service,
-            context_builder=builder,
-        )
-
-        assert code == 2
-        assert signal.getsignal(signal.SIGINT) is before
-        assert provider.aclose_calls == 1
-
-    asyncio.run(scenario())
-
-
-def test_tui_runner_failure_is_safe_and_closes_provider_once(tmp_path: Path) -> None:
-    async def scenario() -> None:
         workspace, service, builder = make_dependencies(tmp_path)
         provider = ScriptedProvider()
         err = Recorder()
 
-        async def failing_runner(_runtime: MicaTuiRuntime) -> None:
-            raise RuntimeError("fake-key https://private.example/path")
+        class FailingScreen:
+            def __init__(self, app, **kwargs) -> None:
+                self.closed = False
+
+            async def run(self) -> None:
+                raise RuntimeError("fake-key https://private.example/path")
+
+        monkeypatch.setattr(main_buffer, "MainBufferScreen", FailingScreen)
 
         code = await cli.run_interactive(
             "http://127.0.0.1:1/v1",
             "fake-key",
             "fake-model",
             plain=False,
-            tui_runner=failing_runner,
             provider_factory=lambda _url, _key: provider,
             read_line=InputScript(),
             write_out=Recorder(),
@@ -379,13 +329,23 @@ def test_tui_runner_failure_is_safe_and_closes_provider_once(tmp_path: Path) -> 
     asyncio.run(scenario())
 
 
-def test_cancelled_tui_runner_closes_runtime_and_provider_once(tmp_path: Path) -> None:
+def test_cancelled_screen_closes_provider_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     async def scenario() -> None:
+        from mica_agent.tui import main_buffer
+
         workspace, service, builder = make_dependencies(tmp_path)
         provider = ScriptedProvider()
 
-        async def cancelled_runner(_runtime: MicaTuiRuntime) -> None:
-            raise asyncio.CancelledError
+        class CancelledScreen:
+            def __init__(self, app, **kwargs) -> None:
+                self.closed = False
+
+            async def run(self) -> None:
+                raise asyncio.CancelledError
+
+        monkeypatch.setattr(main_buffer, "MainBufferScreen", CancelledScreen)
 
         with pytest.raises(asyncio.CancelledError):
             await cli.run_interactive(
@@ -393,7 +353,6 @@ def test_cancelled_tui_runner_closes_runtime_and_provider_once(tmp_path: Path) -
                 "fake-key",
                 "fake-model",
                 plain=False,
-                tui_runner=cancelled_runner,
                 provider_factory=lambda _url, _key: provider,
                 read_line=InputScript(),
                 write_out=Recorder(),
@@ -418,6 +377,7 @@ def test_direct_run_interactive_remains_plain_compatible(tmp_path: Path) -> None
             "http://127.0.0.1:1/v1",
             "fake-key",
             "fake-model",
+            plain=True,
             provider_factory=lambda _url, _key: provider,
             read_line=InputScript("plain prompt"),
             write_out=out,
