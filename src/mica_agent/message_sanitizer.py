@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
+from itertools import chain
 
 from .models import Message, MessageRole
 from .tool_contracts import ToolCall, to_mutable_json
@@ -33,6 +34,12 @@ _SENSITIVE_KEY = re.compile(
     r"client[_-]?secret|private[_-]?key)\b",
     re.IGNORECASE,
 )
+_WINDOWS_ABSOLUTE_PATH = re.compile(
+    r"(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/]|\\\\)[^\s\"']+"
+)
+_POSIX_ABSOLUTE_PATH = re.compile(r"(?<![A-Za-z0-9_])/(?!/)[^\s\"']+")
+_PATH_REDACTION = "[REDACTED_PATH]"
+_HTTP_URL = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
 
 
 def _value_start(value: str, match: re.Match[str]) -> int | None:
@@ -124,11 +131,33 @@ def _redact_assignments(value: str) -> str:
     return "".join(parts)
 
 
+def _redact_local_paths(value: str) -> str:
+    url_spans = [match.span() for match in _HTTP_URL.finditer(value)]
+    parts: list[str] = []
+    cursor = 0
+    path_matches = chain(
+        _WINDOWS_ABSOLUTE_PATH.finditer(value),
+        _POSIX_ABSOLUTE_PATH.finditer(value),
+    )
+    for match in sorted(path_matches, key=lambda item: item.start()):
+        if match.start() < cursor or any(
+            start <= match.start() < end for start, end in url_spans
+        ):
+            continue
+        parts.extend((value[cursor : match.start()], _PATH_REDACTION))
+        cursor = match.end()
+    if not parts:
+        return value
+    parts.append(value[cursor:])
+    return "".join(parts)
+
+
 def _redact_text(value: str) -> str:
-    return _BEARER_CREDENTIAL.sub(
+    value = _BEARER_CREDENTIAL.sub(
         REDACTED,
         _SK_CREDENTIAL.sub(REDACTED, _redact_assignments(value)),
     )
+    return _redact_local_paths(value)
 
 
 def sanitize_presentation_text(value: str) -> str:

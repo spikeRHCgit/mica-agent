@@ -28,6 +28,8 @@ from mica_agent.jsonl_store import (
 from mica_agent.models import Message, MessageRole
 from mica_agent.session_contracts import (
     CURRENT_SESSION_FORMAT_VERSION,
+    RunCheckpoint,
+    RunCheckpointKind,
     SessionMeta,
     TurnEntry,
     serialize_session_record,
@@ -144,6 +146,7 @@ def test_fixed_v2_tool_jsonl_loads_without_reexecuting_tools(tmp_path: Path) -> 
         )
     )
 
+    original = path.read_bytes()
     loaded = store.load(session_id)
 
     assert loaded.meta.format_version == 2
@@ -152,16 +155,110 @@ def test_fixed_v2_tool_jsonl_loads_without_reexecuting_tools(tmp_path: Path) -> 
     assert loaded.turns[0].intermediate_messages[0].tool_calls[0].arguments[
         "token"
     ] == ("[REDACTED]")
+    assert path.read_bytes() == original
+    assert any(item.meta.session_id == session_id for item in store.scan().sessions)
+    upgraded = store.append_turn(session_id, make_turn(2, NOW + timedelta(seconds=1)))
+    assert upgraded.meta.format_version == 4
+    assert {
+        json.loads(line)["format_version"] for line in path.read_bytes().splitlines()
+    } == {4}
+
+
+def write_v3_fixture(
+    store: JsonlSessionStore, identity: object, session_id: str
+) -> bytes:
+    records = [
+        {
+            "record_type": "session_meta",
+            "format_version": 3,
+            "session_id": session_id,
+            "workspace_id": identity.workspace_id,
+            "workspace_path": str(identity.workspace_path),
+            "title": "legacy-v3",
+            "created_at": "2026-08-21T03:04:05.000000+00:00",
+            "updated_at": "2026-08-21T03:04:05.000000+00:00",
+        },
+        {
+            "record_type": "turn",
+            "format_version": 3,
+            "turn_id": "v3-turn",
+            "run_id": "v3-run",
+            "messages": [
+                {"role": "user", "content": "inspect"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "call_id": "v3-call",
+                            "name": "read",
+                            "arguments": {"path": "notes.txt"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "content": '{"status":"success"}',
+                    "tool_call_id": "v3-call",
+                },
+                {"role": "assistant", "content": "done"},
+            ],
+            "tool_presentations": [
+                {
+                    "call_id": "v3-call",
+                    "tool_name": "read",
+                    "kind": "read",
+                    "status": "success",
+                    "payload": {"path": "notes.txt"},
+                    "message": None,
+                }
+            ],
+            "completed_at": "2026-08-21T03:04:05.000000+00:00",
+        },
+    ]
+    payload = b"".join(
+        json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode() + b"\n"
+        for record in records
+    )
+    path = store.path_for_session(session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    return payload
+
+
+def test_fixed_v3_fixture_loads_without_upgrade_until_business_write(
+    tmp_path: Path,
+) -> None:
+    store, identity = make_store(tmp_path)
+    original = write_v3_fixture(store, identity, "legacy-v3")
+    loaded = store.load("legacy-v3")
+    assert loaded.meta.format_version == 3
+    assert loaded.turns[0].tool_presentations
+    assert store.path_for_session("legacy-v3").read_bytes() == original
+    upgraded = store.append_checkpoint(
+        "legacy-v3", make_checkpoint(3, NOW + timedelta(seconds=1))
+    )
+    assert upgraded.meta.format_version == 4
+    assert {
+        json.loads(line)["format_version"]
+        for line in store.path_for_session("legacy-v3").read_bytes().splitlines()
+    } == {4}
 
 
 def test_fixed_v1_jsonl_loads_through_public_store(tmp_path: Path) -> None:
     store, identity = make_store(tmp_path)
     write_v1_fixture(store, identity, "legacy-session")
 
+    path = store.path_for_session("legacy-session")
+    original = path.read_bytes()
     loaded = store.load("legacy-session")
 
-    assert CURRENT_SESSION_FORMAT_VERSION == 3
+    assert CURRENT_SESSION_FORMAT_VERSION == 4
     assert loaded.meta.format_version == 1
+    assert path.read_bytes() == original
+    assert any(
+        item.meta.session_id == "legacy-session" for item in store.scan().sessions
+    )
     assert loaded.turns == (
         TurnEntry(
             "legacy-turn",
@@ -173,7 +270,102 @@ def test_fixed_v1_jsonl_loads_through_public_store(tmp_path: Path) -> None:
     )
 
 
-def test_session_filename_is_hash_only_and_path_safe() -> None:
+def make_checkpoint(number: int, recorded_at: datetime = NOW) -> RunCheckpoint:
+    return RunCheckpoint(
+        f"checkpoint-{number}",
+        f"checkpoint-run-{number}",
+        RunCheckpointKind.CANCELLED,
+        Message(MessageRole.USER, f"unfinished {number}"),
+        recorded_at,
+    )
+
+
+def test_append_checkpoint_preserves_interleaved_timeline_and_rejects_duplicates(
+    tmp_path: Path,
+) -> None:
+    store, identity = make_store(tmp_path)
+    meta = make_meta(identity, session_id="checkpoint-session")
+    store.create(meta)
+    first = make_turn(1, NOW)
+    checkpoint = make_checkpoint(1, NOW + timedelta(seconds=1))
+    store.append_turn(meta.session_id, first)
+    appended = store.append_checkpoint(meta.session_id, checkpoint)
+
+    assert appended.entries == (first, checkpoint)
+    assert appended.turns == (first,)
+    assert appended.checkpoints == (checkpoint,)
+    assert appended.meta.updated_at == checkpoint.recorded_at
+    raw = store.path_for_session(meta.session_id).read_text(encoding="utf-8")
+    assert '"record_type":"run_checkpoint"' in raw
+
+    with pytest.raises(SessionFormatError, match="duplicate checkpoint_id"):
+        store.append_checkpoint(
+            meta.session_id,
+            RunCheckpoint(
+                checkpoint.checkpoint_id,
+                "other-run",
+                RunCheckpointKind.CANCELLED,
+                checkpoint.user_message,
+                NOW + timedelta(seconds=2),
+            ),
+        )
+    with pytest.raises(SessionFormatError, match="duplicate run_id"):
+        store.append_checkpoint(
+            meta.session_id,
+            RunCheckpoint(
+                "other-checkpoint",
+                first.run_id,
+                RunCheckpointKind.CANCELLED,
+                checkpoint.user_message,
+                NOW + timedelta(seconds=2),
+            ),
+        )
+    with pytest.raises(TypeError, match="RunCheckpoint"):
+        store.append_checkpoint(meta.session_id, first)  # type: ignore[arg-type]
+
+
+def test_v3_upgrade_replace_failure_preserves_bytes_and_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, identity = make_store(tmp_path)
+    original = write_v3_fixture(store, identity, "legacy-v3-failure")
+    path = store.path_for_session("legacy-v3-failure")
+
+    def fail_replace(source: Path, target: Path) -> None:
+        raise PermissionError("injected replace failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "replace", fail_replace)
+        with pytest.raises(SessionStorageIOError):
+            store.append_checkpoint(
+                "legacy-v3-failure", make_checkpoint(4, NOW + timedelta(seconds=1))
+            )
+    assert path.read_bytes() == original
+    assert store.load("legacy-v3-failure").meta.format_version == 3
+    retried = store.append_checkpoint(
+        "legacy-v3-failure", make_checkpoint(4, NOW + timedelta(seconds=1))
+    )
+    assert retried.meta.format_version == 4
+
+
+def test_append_checkpoint_upgrades_v1_atomically(tmp_path: Path) -> None:
+    store, identity = make_store(tmp_path)
+    original = write_v1_fixture(store, identity, "legacy-checkpoint")
+    checkpoint = make_checkpoint(1, NOW + timedelta(seconds=1))
+
+    appended = store.append_checkpoint("legacy-checkpoint", checkpoint)
+
+    assert appended.meta.format_version == 4
+    assert appended.entries[-1] == checkpoint
+    records = [
+        json.loads(line)
+        for line in store.path_for_session("legacy-checkpoint")
+        .read_bytes()
+        .splitlines()
+    ]
+    assert {record["format_version"] for record in records} == {4}
+    assert original != store.path_for_session("legacy-checkpoint").read_bytes()
+
     session_id = r"folder/..\secret:会话"
 
     filename = session_filename(session_id)
@@ -199,9 +391,9 @@ def test_append_turn_upgrades_v1_and_business_change_in_one_v3_snapshot(
 
     raw = store.path_for_session("legacy-append").read_bytes()
     records = [json.loads(line) for line in raw.splitlines()]
-    assert upgraded.meta.format_version == 3
+    assert upgraded.meta.format_version == 4
     assert len(upgraded.turns) == 2
-    assert {record["format_version"] for record in records} == {3}
+    assert {record["format_version"] for record in records} == {4}
     assert all("messages" in record for record in records[1:])
     assert all("user_message" not in record for record in records[1:])
 
@@ -230,10 +422,10 @@ def test_v1_upgrade_replace_failure_preserves_bytes_and_allows_retry(
     upgraded = store.append_turn(
         "legacy-failure", make_turn(2, NOW + timedelta(seconds=1))
     )
-    assert upgraded.meta.format_version == 3
+    assert upgraded.meta.format_version == 4
     assert {
         json.loads(line)["format_version"] for line in path.read_bytes().splitlines()
-    } == {3}
+    } == {4}
 
 
 def test_v3_plain_text_turn_has_canonical_messages_wire_bytes(tmp_path: Path) -> None:
@@ -252,7 +444,7 @@ def test_v3_plain_text_turn_has_canonical_messages_wire_bytes(tmp_path: Path) ->
     raw = store.path_for_session("v3-wire").read_bytes()
     expected_meta = (
         '{"created_at":"2026-08-21T03:04:05.000000+00:00",'
-        '"format_version":3,"record_type":"session_meta",'
+        '"format_version":4,"record_type":"session_meta",'
         '"session_id":"v3-wire","title":"title",'
         '"updated_at":"2026-08-21T03:04:05.000000+00:00",'
         f'"workspace_id":{json.dumps(identity.workspace_id)},'
@@ -260,7 +452,7 @@ def test_v3_plain_text_turn_has_canonical_messages_wire_bytes(tmp_path: Path) ->
     ).encode()
     expected_turn = (
         b'{"completed_at":"2026-08-21T03:04:05.000000+00:00",'
-        b'"format_version":3,"messages":['
+        b'"format_version":4,"messages":['
         b'{"content":"question","role":"user"},'
         b'{"content":"answer","role":"assistant"}],'
         b'"record_type":"turn","run_id":"run-v2","tool_presentations":[],'

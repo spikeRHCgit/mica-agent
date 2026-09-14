@@ -16,13 +16,25 @@ from mica_agent.jsonl_store import (
     SessionDeleteStatus,
 )
 from mica_agent.models import Message, MessageRole
-from mica_agent.session_contracts import TurnEntry
+from mica_agent.session_contracts import (
+    RunCheckpoint,
+    RunCheckpointKind,
+    RunCheckpointProgress,
+    RunCheckpointToolProgress,
+    RunCheckpointToolStatus,
+    TurnEntry,
+)
 from mica_agent.session_service import (
     NoHealthySessionError,
     SessionService,
     TurnNotFoundError,
 )
 from mica_agent.tool_contracts import ToolCall
+from mica_agent.tool_presentation import (
+    ToolPresentationKind,
+    ToolPresentationSnapshot,
+    ToolPresentationStatus,
+)
 from mica_agent.workspace import resolve_workspace
 
 NOW = datetime(2026, 8, 22, 3, 4, 5, tzinfo=UTC)
@@ -101,13 +113,13 @@ def test_v1_mutations_upgrade_and_branch_keeps_source_unchanged(tmp_path: Path) 
     for session_id in ("rename-v1", "rewind-v1", "clear-v1", "source-v1"):
         write_v1_session(store, session_id)
 
-    assert service.rename_session("rename-v1", "renamed").meta.format_version == 3
-    assert service.rewind_session("rewind-v1", "turn-1").meta.format_version == 3
-    assert service.clear_session("clear-v1").meta.format_version == 3
+    assert service.rename_session("rename-v1", "renamed").meta.format_version == 4
+    assert service.rewind_session("rewind-v1", "turn-1").meta.format_version == 4
+    assert service.clear_session("clear-v1").meta.format_version == 4
 
     source_bytes = store.path_for_session("source-v1").read_bytes()
     branch = service.branch_session("source-v1")
-    assert branch.meta.format_version == 3
+    assert branch.meta.format_version == 4
     assert branch.turns[0].completed_at == NOW
     assert store.path_for_session("source-v1").read_bytes() == source_bytes
     assert store.load("source-v1").meta.format_version == 1
@@ -526,6 +538,173 @@ def test_cleanup_skips_a_locked_expired_session_without_waiting(
     assert result.skipped_changed_session_ids == ()
     assert not store.path_for_session("deletable").exists()
     assert store.path_for_session("locked").exists()
+
+
+def make_checkpoint(
+    *,
+    checkpoint_id: str = "checkpoint-1",
+    run_id: str = "checkpoint-run-1",
+    kind: RunCheckpointKind = RunCheckpointKind.CANCELLED,
+    recorded_at: datetime = NOW,
+) -> RunCheckpoint:
+    return RunCheckpoint(
+        checkpoint_id,
+        run_id,
+        kind,
+        Message(MessageRole.USER, "unfinished user request"),
+        recorded_at,
+        partial_assistant_message=Message(MessageRole.ASSISTANT, "partial output"),
+    )
+
+
+def test_checkpoint_timeline_context_and_lifecycle_operations(tmp_path: Path) -> None:
+    service, _, clock = make_service(tmp_path, session_ids=["session", "branch"])
+    service.create_session()
+    first = make_turn(1, NOW)
+    service.commit_turn("session", first)
+    checkpoint = make_checkpoint(recorded_at=NOW + timedelta(seconds=1))
+    committed = service.commit_checkpoint("session", checkpoint)
+    last = make_turn(2, NOW + timedelta(seconds=2))
+    committed = service.commit_turn("session", last)
+
+    assert committed.entries == (first, checkpoint, last)
+    assert committed.turns == (first, last)
+    assert committed.checkpoints == (checkpoint,)
+    context = service.context_snapshot("session")
+    assert context[0:2] == first.context_messages
+    assert context[2] == checkpoint.user_message
+    assert context[3].role is MessageRole.SYSTEM
+    assert "verbatim output follows" in context[3].content
+    assert "cancelled" in context[4].content
+    assert context[-2:] == last.context_messages
+    assert service.context_snapshot("session") == context
+
+    branched = service.branch_session("session")
+    assert branched.entries == committed.entries
+    clock.value = NOW + timedelta(seconds=3)
+    rewound = service.rewind_session("session", "turn-2")
+    assert rewound.entries == (first, checkpoint)
+    assert service.clear_session("session").entries == ()
+
+
+def test_tool_batch_context_keeps_a_and_does_not_fabricate_b(tmp_path: Path) -> None:
+    service, _, _ = make_service(tmp_path, session_ids=["session"])
+    service.create_session()
+    call_a = ToolCall("call-a", "read", {"path": "a.txt"})
+    call_b = ToolCall("call-b", "write", {"path": "b.txt", "content": "x"})
+    result_a = Message(MessageRole.TOOL, '{"status":"success"}', tool_call_id="call-a")
+    presentation_a = ToolPresentationSnapshot(
+        "call-a",
+        "read",
+        ToolPresentationKind.READ,
+        ToolPresentationStatus.SUCCESS,
+        {"path": "a.txt"},
+    )
+    checkpoint = RunCheckpoint(
+        "checkpoint-tools",
+        "run-tools-checkpoint",
+        RunCheckpointKind.RECOVERABLE_FAILURE,
+        Message(MessageRole.USER, "run both tools"),
+        NOW,
+        progress=(
+            RunCheckpointProgress(
+                assistant_message=Message(MessageRole.ASSISTANT, "working"),
+                tools=(
+                    RunCheckpointToolProgress(
+                        call_a,
+                        RunCheckpointToolStatus.SUCCESS,
+                        result_a,
+                        presentation_a,
+                    ),
+                    RunCheckpointToolProgress(
+                        call_b, RunCheckpointToolStatus.NOT_STARTED
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    service.commit_checkpoint("session", checkpoint)
+    context = service.context_snapshot("session")
+
+    assert context[1].role is MessageRole.ASSISTANT
+    assert context[1].tool_calls == (call_a,)
+    assert context[2] == result_a
+    assert all(message.tool_call_id != "call-b" for message in context)
+    assert "write" in context[3].content and "was not started" in context[3].content
+    assert "recoverable failure" in context[-1].content
+
+
+def test_only_checkpoint_session_is_healthy_and_activity_uses_checkpoint(
+    tmp_path: Path,
+) -> None:
+    service, _, _ = make_service(tmp_path, session_ids=["session"])
+    service.create_session()
+    checkpoint = make_checkpoint(recorded_at=NOW + timedelta(seconds=3))
+
+    committed = service.commit_checkpoint("session", checkpoint)
+
+    assert committed.turns == ()
+    assert committed.checkpoints == (checkpoint,)
+    assert committed.meta.updated_at == checkpoint.recorded_at
+    assert service.last_active_session().entries == (checkpoint,)
+
+
+def test_context_snapshot_redacts_checkpoint_absolute_paths(tmp_path: Path) -> None:
+    service, store, _ = make_service(tmp_path, session_ids=["session"])
+    service.create_session()
+    absolute = r"C:\Users\private\note.txt"
+    url = "https://example.test/api/v1?name=value"
+    call = ToolCall("path-call", "read", {"path": absolute, "url": url})
+    result = Message(
+        MessageRole.TOOL,
+        json.dumps({"path": absolute, "url": url}),
+        tool_call_id="path-call",
+    )
+    presentation = ToolPresentationSnapshot(
+        "path-call",
+        "read",
+        ToolPresentationKind.READ,
+        ToolPresentationStatus.SUCCESS,
+        {"path": "note.txt"},
+    )
+    checkpoint = RunCheckpoint(
+        "path-checkpoint",
+        "path-run",
+        RunCheckpointKind.CANCELLED,
+        Message(MessageRole.USER, "preserve user text"),
+        NOW,
+        progress=(
+            RunCheckpointProgress(
+                tools=(
+                    RunCheckpointToolProgress(
+                        call,
+                        RunCheckpointToolStatus.SUCCESS,
+                        result,
+                        presentation,
+                    ),
+                )
+            ),
+        ),
+        partial_assistant_message=Message(MessageRole.ASSISTANT, "partial output"),
+    )
+    service.commit_checkpoint("session", checkpoint)
+    raw = store.path_for_session("session").read_text(encoding="utf-8")
+    context = service.context_snapshot("session")
+    assert absolute not in raw
+    assert url in raw
+    assert all(absolute not in repr(message) for message in context)
+    assert context[0].content == "preserve user text"
+    assert context[1].tool_calls[0].arguments == {
+        "path": "[REDACTED_PATH]",
+        "url": url,
+    }
+    assert json.loads(context[2].content) == {
+        "path": "[REDACTED_PATH]",
+        "url": url,
+    }
+    assert context[3].content.endswith("partial output")
+    assert "partial output" in context[3].content
 
 
 def test_store_nonblocking_delete_distinguishes_statuses(tmp_path: Path) -> None:

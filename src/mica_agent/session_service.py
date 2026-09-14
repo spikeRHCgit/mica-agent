@@ -7,6 +7,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+from .checkpoint_contracts import (
+    RunCheckpoint,
+    RunCheckpointKind,
+    RunCheckpointToolStatus,
+)
 from .jsonl_store import (
     JsonlSessionStore,
     ScanProblem,
@@ -14,7 +19,7 @@ from .jsonl_store import (
     SessionStorageError,
     StoredSession,
 )
-from .models import Message
+from .models import Message, MessageRole
 from .session_contracts import (
     CURRENT_SESSION_FORMAT_VERSION,
     SessionError,
@@ -118,13 +123,18 @@ class SessionService:
     def _activity_updated_at(
         self,
         meta: SessionMeta,
-        turns: Iterable[TurnEntry] = (),
+        entries: Iterable[TurnEntry | RunCheckpoint] = (),
     ) -> datetime:
-        latest_turn_at = max(
-            (turn.completed_at for turn in turns),
+        latest_entry_at = max(
+            (
+                entry.completed_at
+                if isinstance(entry, TurnEntry)
+                else entry.recorded_at
+                for entry in entries
+            ),
             default=meta.created_at,
         )
-        return max(meta.updated_at, self._current_time(), latest_turn_at)
+        return max(meta.updated_at, self._current_time(), latest_entry_at)
 
     def create_session(self, title: str = "") -> StoredSession:
         """创建并持久化一个当前工作区的空会话。"""
@@ -160,6 +170,12 @@ class SessionService:
         """只提交已经完整构造并通过契约校验的一轮。"""
         return self.store.append_turn(session_id, turn)
 
+    def commit_checkpoint(
+        self, session_id: str, checkpoint: RunCheckpoint
+    ) -> StoredSession:
+        """提交一个独立于成功轮次的中断检查点。"""
+        return self.store.append_checkpoint(session_id, checkpoint)
+
     def rename_session(self, session_id: str, title: str) -> StoredSession:
         def rename(current: StoredSession) -> StoredSession:
             meta = SessionMeta(
@@ -169,9 +185,9 @@ class SessionService:
                 workspace_path=current.meta.workspace_path,
                 title=title,
                 created_at=current.meta.created_at,
-                updated_at=self._activity_updated_at(current.meta, current.turns),
+                updated_at=self._activity_updated_at(current.meta, current.entries),
             )
-            return StoredSession(meta, current.turns)
+            return StoredSession(meta, current.entries)
 
         return self.store.update(session_id, rename)
 
@@ -182,7 +198,7 @@ class SessionService:
         session_id = self._new_session_id()
         if session_id == source.meta.session_id:
             raise SessionServiceError("branch session id must differ from source")
-        updated_at = self._activity_updated_at(source.meta, source.turns)
+        updated_at = self._activity_updated_at(source.meta, source.entries)
         meta = SessionMeta(
             session_id=session_id,
             format_version=CURRENT_SESSION_FORMAT_VERSION,
@@ -192,15 +208,15 @@ class SessionService:
             created_at=source.meta.created_at,
             updated_at=updated_at,
         )
-        return self.store.create(meta, source.turns)
+        return self.store.create(meta, source.entries)
 
     copy_session = branch_session
 
     def rewind_session(self, session_id: str, from_turn_id: str) -> StoredSession:
         def rewind(current: StoredSession) -> StoredSession:
-            for index, turn in enumerate(current.turns):
-                if turn.turn_id == from_turn_id:
-                    turns = current.turns[:index]
+            for index, entry in enumerate(current.entries):
+                if isinstance(entry, TurnEntry) and entry.turn_id == from_turn_id:
+                    entries = current.entries[:index]
                     meta = SessionMeta(
                         session_id=current.meta.session_id,
                         format_version=CURRENT_SESSION_FORMAT_VERSION,
@@ -208,9 +224,9 @@ class SessionService:
                         workspace_path=current.meta.workspace_path,
                         title=current.meta.title,
                         created_at=current.meta.created_at,
-                        updated_at=self._activity_updated_at(current.meta, turns),
+                        updated_at=self._activity_updated_at(current.meta, entries),
                     )
-                    return StoredSession(meta, turns)
+                    return StoredSession(meta, entries)
             raise TurnNotFoundError(from_turn_id)
 
         return self.store.update(session_id, rewind)
@@ -233,11 +249,98 @@ class SessionService:
     def delete_session(self, session_id: str) -> None:
         self.store.delete(session_id)
 
+    @staticmethod
+    def _recorded_output_message(label: str, content: str) -> Message:
+        return Message(
+            MessageRole.SYSTEM,
+            f"[Mica checkpoint {label}; verbatim output follows]\n{content}",
+        )
+
+    @staticmethod
+    def _tool_batch_status(step: object) -> Message:
+        labels = {
+            RunCheckpointToolStatus.SUCCESS: "completed successfully",
+            RunCheckpointToolStatus.FAILED: "completed with a real failure result",
+            RunCheckpointToolStatus.IN_PROGRESS: "started but did not complete",
+            RunCheckpointToolStatus.NOT_STARTED: "was not started",
+        }
+        facts = "; ".join(
+            f"tool {index} ({item.call.name}) {labels[item.status]}"
+            for index, item in enumerate(step.tools, start=1)
+        )
+        return Message(
+            MessageRole.SYSTEM,
+            f"[Mica checkpoint tool batch: {facts}. Missing TOOL messages were not fabricated.]",
+        )
+
+    @staticmethod
+    def _checkpoint_context(checkpoint: RunCheckpoint) -> tuple[Message, ...]:
+        messages: list[Message] = [checkpoint.user_message]
+        for step in checkpoint.progress:
+            complete_calls = []
+            for item in step.tools:
+                if item.status in {
+                    RunCheckpointToolStatus.SUCCESS,
+                    RunCheckpointToolStatus.FAILED,
+                }:
+                    complete_calls.append(item)
+                else:
+                    break
+            if step.tools:
+                if complete_calls:
+                    messages.append(
+                        Message(
+                            MessageRole.ASSISTANT,
+                            ""
+                            if step.assistant_message is None
+                            else step.assistant_message.content,
+                            tuple(item.call for item in complete_calls),
+                        )
+                    )
+                    messages.extend(
+                        item.result
+                        for item in complete_calls
+                        if item.result is not None
+                    )
+                elif step.assistant_message is not None:
+                    messages.append(
+                        SessionService._recorded_output_message(
+                            "recorded assistant output before an incomplete tool batch",
+                            step.assistant_message.content,
+                        )
+                    )
+                if len(complete_calls) != len(step.tools):
+                    messages.append(SessionService._tool_batch_status(step))
+            elif step.assistant_message is not None:
+                messages.append(step.assistant_message)
+        if checkpoint.partial_assistant_message is not None:
+            messages.append(
+                SessionService._recorded_output_message(
+                    "partial assistant output from an incomplete model stream",
+                    checkpoint.partial_assistant_message.content,
+                )
+            )
+        reason = {
+            RunCheckpointKind.CANCELLED: "cancelled",
+            RunCheckpointKind.RECOVERABLE_FAILURE: "stopped by a recoverable failure",
+        }[checkpoint.kind]
+        messages.append(
+            Message(
+                MessageRole.SYSTEM,
+                f"[Mica checkpoint: the previous run was {reason} and is incomplete. Continue from the recorded progress.]",
+            )
+        )
+        return tuple(messages)
+
     def context_snapshot(self, session_id: str) -> tuple[Message, ...]:
         session = self.store.load(session_id)
-        return tuple(
-            message for turn in session.turns for message in turn.context_messages
-        )
+        messages: list[Message] = []
+        for entry in session.entries:
+            if isinstance(entry, TurnEntry):
+                messages.extend(entry.context_messages)
+            else:
+                messages.extend(self._checkpoint_context(entry))
+        return tuple(messages)
 
     def cleanup_expired(
         self,

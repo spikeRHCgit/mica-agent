@@ -23,16 +23,17 @@
 | `src/mica_agent/events.py` | Engine 对前端公开的有序事件契约，包括 Run、思考与文本增量、工具准备/开始/完成、工具展示快照、动态输出、权限、用户输入和终态事件。 |
 | `src/mica_agent/file_tools.py` | 当前文件工具实现与注册入口；提供 `read`、`write`、`edit`，并执行大小限制、UTF-8、原子写入和安全结果转换。 |
 | `src/mica_agent/interactions.py` | Engine 与前端之间的交互 Broker；分配不复用的交互 ID，等待权限/ask 回答，并清理取消、迟到或失效响应。 |
-| `src/mica_agent/jsonl_store.py` | 一个会话一个 JSONL 文件的存储层；负责严格解析、锁内创建/读取/重写/删除、原子替换、扫描损坏和 v1/v2 到 v3 升级。 |
-| `src/mica_agent/message_sanitizer.py` | 工具消息和工具展示进入 Provider、会话或诊断前的集中凭据清洗；隐藏敏感键、常见 Key 和 Bearer 凭据。 |
+| `src/mica_agent/jsonl_store.py` | 一个会话一个 JSONL 文件的存储层；负责严格解析、锁内创建/读取/重写/删除、原子替换、扫描损坏，以及 v1/v2/v3 到 v4 的首次业务写升级；`StoredSession.entries` 是成功轮与检查点的唯一有序事实源。 |
+| `src/mica_agent/message_sanitizer.py` | 工具消息和工具展示进入 Provider、会话或诊断前的集中清洗；隐藏敏感键、常见 Key、Bearer 凭据和本地绝对路径，同时保持 HTTP/HTTPS URL 与普通相对路径。 |
 | `src/mica_agent/models.py` | 供应商无关的标准 `Message` 与角色定义，包含普通文本、工具调用和工具结果关联字段。 |
 | `src/mica_agent/permissions.py` | 权限模式和策略决定的基础枚举：`default`、`solo` 以及 `ALLOW`、`ASK`、`DENY`。 |
 | `src/mica_agent/policy.py` | 两模式内存权限决策：default 使用受保护资源/命令风险事实、一次授权与规则；solo 跳过权限策略。 |
+| `src/mica_agent/checkpoint_contracts.py` | 中断 Run 的不可变公共进度契约；区分取消/可恢复失败，按模型步骤保存部分输出，并用明确状态区分工具成功、真实失败、执行中和未开始。 |
 | `src/mica_agent/command_risk.py` | 纯词法命令风险分类；分析组合命令、包装、危险命令和受保护路径，不执行命令或读取脚本，不提供安全证明。 |
 | `src/mica_agent/runtime_tools.py` | 运行时工具实现与注册入口；提供 Windows 优先的受限 `bash`，以及自由文本或结构化选择的 `ask`，管理环境清理、输出上限、超时、进程树与等待取消。 |
 | `src/mica_agent/schema_validation.py` | 使用固定 JSON Schema Draft 2020-12 校验 ToolSpec Schema 和实际工具参数，拒绝远程引用并返回安全错误。 |
-| `src/mica_agent/session_contracts.py` | 会话公共数据和 JSON wire 契约；定义 SessionMeta、带工具展示的 v3 TurnEntry、v1/v2 严格兼容读取、消息角色顺序和格式错误边界。 |
-| `src/mica_agent/session_service.py` | 会话业务层；在 Store 之上提供创建、加载、列表、重命名、分支、回退、清空、提交、最后活跃选择和过期清理。 |
+| `src/mica_agent/session_contracts.py` | 会话公共数据和 JSON wire 契约；定义 SessionMeta、成功 TurnEntry、独立 RunCheckpoint 与 v4 显式记录，并严格兼容读取 v1/v2/v3 成功轮。 |
+| `src/mica_agent/session_service.py` | 会话业务层；在 Store 之上提供创建、加载、列表、重命名、分支、回退、清空、成功轮/中断检查点提交、最后活跃选择、过期清理，以及按唯一时间线生成协议合法的恢复上下文。 |
 | `src/mica_agent/system_prompt.py` | 通过包资源加载内置提示词，取得一次性环境快照并组装冻结的会话系统提示词；不负责读取 `AGENTS.md`。 |
 | `src/mica_agent/tool_contracts.py` | 供应商无关的工具数据契约；定义 ToolSpec、ToolCall、ToolRequest、ToolResult、状态枚举和深层不可变 JSON 快照。 |
 | `src/mica_agent/tool_executor.py` | 工具统一执行入口；依次完成注册查询、参数校验、权限判定、交互等待、handler 调用、取消和安全 ToolResult 转换。 |

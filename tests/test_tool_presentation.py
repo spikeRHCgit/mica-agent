@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from mica_agent.message_sanitizer import sanitize_presentation_text
 from mica_agent.tool_contracts import ToolRequest, ToolResult, ToolResultStatus
 from mica_agent.tool_presentation import (
     ToolPresentationKind,
@@ -17,7 +18,10 @@ from mica_agent.tool_presentation import (
 from mica_agent.workspace import resolve_workspace
 
 
-def test_snapshot_is_frozen_and_deeply_copies_json_payload() -> None:
+def test_presentation_text_keeps_http_url_intact() -> None:
+    value = "curl https://example.test/file"
+    assert sanitize_presentation_text(value) == value
+
     source = {
         "path": "notes.md",
         "matched": True,

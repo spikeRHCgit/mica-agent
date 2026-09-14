@@ -8,9 +8,19 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
+from mica_agent.message_sanitizer import (
+    sanitize_presentation_text,
+    sanitize_tool_message,
+)
 from mica_agent.models import Message, MessageRole
 from mica_agent.session_contracts import (
     CURRENT_SESSION_FORMAT_VERSION,
+    RunCheckpoint,
+    RunCheckpointKind,
+    RunCheckpointProgress,
+    RunCheckpointToolProgress,
+    RunCheckpointToolStatus,
+    SessionEntry,
     SessionError,
     SessionFormatError,
     SessionMeta,
@@ -55,7 +65,7 @@ def test_session_meta_carries_validated_session_identity() -> None:
     )
 
     assert meta.session_id == "session-1"
-    assert meta.format_version == 3
+    assert meta.format_version == 4
     assert meta.workspace_id == "workspace-1"
     assert meta.workspace_path == r"C:\work\mica"
     assert meta.title == "Mica session"
@@ -79,7 +89,7 @@ def test_session_meta_rejects_non_integer_format_versions(version: object) -> No
         make_session_meta(format_version=version)
 
 
-@pytest.mark.parametrize("version", [0, 4, -1])
+@pytest.mark.parametrize("version", [0, 5, -1])
 def test_session_meta_rejects_unsupported_format_versions(version: int) -> None:
     with pytest.raises(ValueError, match="format_version"):
         make_session_meta(format_version=version)
@@ -159,7 +169,7 @@ def fixed_v1_turn_record() -> dict[str, object]:
     }
 
 
-def test_v3_tool_turn_keeps_presentations_separate_from_context_messages() -> None:
+def test_v4_tool_turn_keeps_presentations_separate_from_context_messages() -> None:
     call = ToolCall(
         "call-1", "edit", {"path": "notes.md", "old_text": "old", "new_text": "new"}
     )
@@ -188,7 +198,7 @@ def test_v3_tool_turn_keeps_presentations_separate_from_context_messages() -> No
     wire = serialize_session_record(turn)
     restored = deserialize_session_record(wire)
 
-    assert wire["format_version"] == 3
+    assert wire["format_version"] == 4
     assert wire["tool_presentations"] == [
         {
             "call_id": "call-1",
@@ -212,26 +222,46 @@ def test_v3_tool_turn_keeps_presentations_separate_from_context_messages() -> No
 
 
 def _v3_tool_record() -> dict[str, object]:
-    call = ToolCall("call-1", "read", {"path": "notes.md"})
-    turn = make_turn_entry(
-        intermediate_messages=(
-            Message(MessageRole.ASSISTANT, "", (call,)),
-            Message(MessageRole.TOOL, '{"status":"success"}', tool_call_id="call-1"),
-        ),
-        tool_presentations=(
-            ToolPresentationSnapshot(
-                "call-1",
-                "read",
-                ToolPresentationKind.READ,
-                ToolPresentationStatus.SUCCESS,
-                {"path": "notes.md"},
-            ),
-        ),
-    )
-    return serialize_session_record(turn)
+    return {
+        "record_type": "turn",
+        "format_version": 3,
+        "turn_id": "turn-1",
+        "run_id": "run-1",
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "call_id": "call-1",
+                        "name": "read",
+                        "arguments": {"path": "notes.md"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "content": '{"status":"success"}',
+                "tool_call_id": "call-1",
+            },
+            {"role": "assistant", "content": "done"},
+        ],
+        "tool_presentations": [
+            {
+                "call_id": "call-1",
+                "tool_name": "read",
+                "kind": "read",
+                "status": "success",
+                "payload": {"path": "notes.md"},
+                "message": None,
+            }
+        ],
+        "completed_at": "2026-08-21T03:04:05.123456+00:00",
+    }
 
 
-def test_v3_reader_strictly_validates_snapshot_shape_and_terminal_status() -> None:
+def test_v4_reader_strictly_validates_snapshot_shape_and_terminal_status() -> None:
     missing = _v3_tool_record()
     del missing["tool_presentations"]
     with pytest.raises(SessionFormatError):
@@ -259,7 +289,7 @@ def test_v3_reader_strictly_validates_snapshot_shape_and_terminal_status() -> No
         deserialize_session_record(bad_path)
 
 
-def test_v3_reader_round_trips_failed_edit_without_fabricated_line_numbers() -> None:
+def test_v4_reader_round_trips_failed_edit_without_fabricated_line_numbers() -> None:
     call = ToolCall("call-edit", "edit", {"path": "notes.md"})
     presentation = ToolPresentationSnapshot(
         "call-edit",
@@ -288,7 +318,7 @@ def test_v3_reader_round_trips_failed_edit_without_fabricated_line_numbers() -> 
     assert restored == turn
 
 
-def test_v3_reader_rejects_invalid_edit_line_numbers_and_kinds() -> None:
+def test_v4_reader_rejects_invalid_edit_line_numbers_and_kinds() -> None:
     record = _v3_tool_record()
     assert isinstance(record["tool_presentations"], list)
     presentation = record["tool_presentations"][0]
@@ -457,7 +487,7 @@ def test_session_meta_serializes_to_an_explicit_canonical_record() -> None:
 
     assert record == {
         "record_type": "session_meta",
-        "format_version": 3,
+        "format_version": 4,
         "session_id": "session-1",
         "workspace_id": "workspace-1",
         "workspace_path": r"C:\work\mica",
@@ -474,7 +504,7 @@ def test_turn_entry_serializes_to_an_explicit_canonical_record() -> None:
 
     assert record == {
         "record_type": "turn",
-        "format_version": 3,
+        "format_version": 4,
         "turn_id": "turn-1",
         "run_id": "run-1",
         "messages": [
@@ -512,7 +542,7 @@ def test_turn_record_round_trips_to_a_strong_type() -> None:
         serialize_session_record(make_turn_entry()),
     ],
 )
-@pytest.mark.parametrize("version", [0, 4, -1])
+@pytest.mark.parametrize("version", [0, 5, -1])
 def test_deserializer_rejects_unknown_versions(
     record: dict[str, object], version: int
 ) -> None:
@@ -734,7 +764,302 @@ def test_deserializer_rejects_meta_with_updated_time_before_creation() -> None:
         deserialize_session_record(record)
 
 
-def test_format_errors_do_not_echo_untrusted_record_content() -> None:
+def test_sanitizer_preserves_urls_while_redacting_nested_local_paths() -> None:
+    url = "https://example.test/api/v1?name=value"
+    text = f"curl {url} notes.md /home/alice/secret.txt"
+    assert sanitize_presentation_text(text) == (f"curl {url} notes.md [REDACTED_PATH]")
+
+    call = ToolCall(
+        "call-url",
+        "read",
+        {
+            "url": url,
+            "files": {
+                "windows": r"C:\\Users\\alice\\secret.txt",
+                "unc": r"\\\\server\\share\\secret.txt",
+                "posix": "/etc/private/config",
+            },
+        },
+    )
+    safe_call = sanitize_tool_message(
+        Message(MessageRole.ASSISTANT, "", (call,))
+    ).tool_calls[0]
+    assert safe_call.arguments == {
+        "url": url,
+        "files": {
+            "windows": "[REDACTED_PATH]",
+            "unc": "[REDACTED_PATH]",
+            "posix": "[REDACTED_PATH]",
+        },
+    }
+
+
+def test_tool_result_sanitizer_preserves_url_and_redacts_file_path() -> None:
+    url = "http://127.0.0.1:8000/v1"
+    message = Message(
+        MessageRole.TOOL,
+        json.dumps({"url": url, "path": r"D:/workspace/private.json"}),
+        tool_call_id="call-url",
+    )
+    safe = sanitize_tool_message(message)
+    assert json.loads(safe.content) == {
+        "url": url,
+        "path": "[REDACTED_PATH]",
+    }
+
+    secret = "sk-THIS_IS_A_TEST_SECRET"
+    first_call = ToolCall("call-a", "read", {"path": "a.txt", "token": secret})
+    result = Message(
+        MessageRole.TOOL,
+        '{"status":"success","authorization":"Bearer TEST_ONLY_TOKEN"}',
+        tool_call_id="call-a",
+    )
+    presentation = ToolPresentationSnapshot(
+        "call-a",
+        "read",
+        ToolPresentationKind.READ,
+        ToolPresentationStatus.SUCCESS,
+        {"path": "a.txt"},
+    )
+    checkpoint = RunCheckpoint(
+        checkpoint_id="checkpoint-1",
+        run_id="run-checkpoint",
+        kind=RunCheckpointKind.CANCELLED,
+        user_message=Message(MessageRole.USER, "continue the task verbatim"),
+        recorded_at=UTC_NOW,
+        progress=(
+            RunCheckpointProgress(
+                assistant_message=Message(MessageRole.ASSISTANT, "checking"),
+                tools=(
+                    RunCheckpointToolProgress(
+                        first_call,
+                        RunCheckpointToolStatus.SUCCESS,
+                        result,
+                        presentation,
+                    ),
+                ),
+            ),
+        ),
+        partial_assistant_message=Message(MessageRole.ASSISTANT, "partial output"),
+    )
+
+    wire = serialize_session_record(checkpoint)
+    restored = deserialize_session_record(wire)
+
+    assert CURRENT_SESSION_FORMAT_VERSION == 4
+    assert SessionRecordType.RUN_CHECKPOINT.value == "run_checkpoint"
+    assert wire == {
+        "record_type": "run_checkpoint",
+        "format_version": 4,
+        "checkpoint_id": "checkpoint-1",
+        "run_id": "run-checkpoint",
+        "kind": "cancelled",
+        "user_message": {"role": "user", "content": "continue the task verbatim"},
+        "progress": [
+            {
+                "assistant_message": {"role": "assistant", "content": "checking"},
+                "tools": [
+                    {
+                        "call": {
+                            "call_id": "call-a",
+                            "name": "read",
+                            "arguments": {"path": "a.txt", "token": "[REDACTED]"},
+                        },
+                        "status": "success",
+                        "result": {
+                            "role": "tool",
+                            "content": '{"status":"success","authorization":"[REDACTED]"}',
+                            "tool_call_id": "call-a",
+                        },
+                        "presentation": {
+                            "call_id": "call-a",
+                            "tool_name": "read",
+                            "kind": "read",
+                            "status": "success",
+                            "payload": {"path": "a.txt"},
+                            "message": None,
+                        },
+                    },
+                ],
+            }
+        ],
+        "partial_assistant_message": {
+            "role": "assistant",
+            "content": "partial output",
+        },
+        "recorded_at": "2026-08-21T03:04:05.123456+00:00",
+    }
+    assert restored == checkpoint
+    assert json.loads(json.dumps(wire)) == wire
+    assert secret not in repr(checkpoint)
+    assert "continue the task verbatim" not in repr(checkpoint)
+
+
+def test_checkpoint_contract_rejects_fabricated_results_and_invalid_order() -> None:
+    call_a = ToolCall("a", "read", {"path": "a.txt"})
+    call_b = ToolCall("b", "read", {"path": "b.txt"})
+    fake_result = Message(MessageRole.TOOL, "ok", tool_call_id="a")
+
+    with pytest.raises(ValueError, match="cannot contain a result"):
+        RunCheckpointToolProgress(
+            call_a, RunCheckpointToolStatus.NOT_STARTED, fake_result
+        )
+    with pytest.raises(ValueError, match="after an incomplete"):
+        RunCheckpointProgress(
+            tools=(
+                RunCheckpointToolProgress(call_a, RunCheckpointToolStatus.IN_PROGRESS),
+                RunCheckpointToolProgress(call_b, RunCheckpointToolStatus.NOT_STARTED),
+                RunCheckpointToolProgress(
+                    ToolCall("c", "read", {"path": "c.txt"}),
+                    RunCheckpointToolStatus.IN_PROGRESS,
+                ),
+            )
+        )
+    with pytest.raises(ValueError, match="tool_calls"):
+        RunCheckpoint(
+            "checkpoint",
+            "run",
+            RunCheckpointKind.CANCELLED,
+            Message(MessageRole.USER, "u"),
+            UTC_NOW,
+            partial_assistant_message=Message(
+                MessageRole.ASSISTANT, "partial", (call_a,)
+            ),
+        )
+
+
+def test_checkpoint_rejects_cross_step_incomplete_tail_and_partial() -> None:
+    call_a = ToolCall("a", "read", {"path": "a.txt"})
+    complete = RunCheckpointProgress(
+        tools=(RunCheckpointToolProgress(call_a, RunCheckpointToolStatus.IN_PROGRESS),)
+    )
+    with pytest.raises(ValueError, match="final step"):
+        RunCheckpoint(
+            "checkpoint-cross-step",
+            "run-cross-step",
+            RunCheckpointKind.CANCELLED,
+            Message(MessageRole.USER, "u"),
+            UTC_NOW,
+            progress=(complete, RunCheckpointProgress()),
+        )
+    with pytest.raises(ValueError, match="partial assistant"):
+        RunCheckpoint(
+            "checkpoint-tail-partial",
+            "run-tail-partial",
+            RunCheckpointKind.CANCELLED,
+            Message(MessageRole.USER, "u"),
+            UTC_NOW,
+            progress=(complete,),
+            partial_assistant_message=Message(MessageRole.ASSISTANT, "partial"),
+        )
+
+
+def test_checkpoint_paths_are_redacted_in_type_wire_and_tool_result() -> None:
+    paths = [
+        r"C:\Users\private\note.txt",
+        r"\\server\share\note.txt",
+        "/etc/private/note.txt",
+    ]
+    call = ToolCall(
+        "path-call", "read", {"path": paths[0], "nested": {"path": paths[1]}}
+    )
+    result = Message(
+        MessageRole.TOOL,
+        json.dumps({"path": paths[2], "nested": [paths[0]]}),
+        tool_call_id="path-call",
+    )
+    checkpoint = RunCheckpoint(
+        "checkpoint-paths",
+        "run-paths",
+        RunCheckpointKind.CANCELLED,
+        Message(MessageRole.USER, "keep this user instruction"),
+        UTC_NOW,
+        progress=(
+            RunCheckpointProgress(
+                tools=(
+                    RunCheckpointToolProgress(
+                        call,
+                        RunCheckpointToolStatus.SUCCESS,
+                        result,
+                        ToolPresentationSnapshot(
+                            "path-call",
+                            "read",
+                            ToolPresentationKind.READ,
+                            ToolPresentationStatus.SUCCESS,
+                            {"path": "note.txt"},
+                        ),
+                    ),
+                )
+            ),
+        ),
+    )
+    wire = serialize_session_record(checkpoint)
+    dumped = json.dumps(wire, ensure_ascii=False)
+    assert all(path not in dumped for path in paths)
+    assert all(path not in repr(checkpoint) for path in paths)
+    assert wire["user_message"] == {
+        "role": "user",
+        "content": "keep this user instruction",
+    }
+
+    checkpoint = RunCheckpoint(
+        "checkpoint",
+        "run",
+        RunCheckpointKind.RECOVERABLE_FAILURE,
+        Message(MessageRole.USER, "sk-THIS_IS_A_TEST_SECRET"),
+        UTC_NOW,
+    )
+    record = serialize_session_record(checkpoint)
+
+    bad_kind = dict(record)
+    bad_kind["kind"] = "Bearer TEST_ONLY_TOKEN"
+    with pytest.raises(SessionFormatError, match="kind") as caught:
+        deserialize_session_record(bad_kind)
+    assert "TEST_ONLY_TOKEN" not in str(caught.value)
+
+    extra = dict(record)
+    extra["unexpected"] = r"C:\Users\example\secret"
+    with pytest.raises(SessionFormatError, match="unexpected") as caught:
+        deserialize_session_record(extra)
+    assert "example" not in str(caught.value)
+
+    assert isinstance(checkpoint, SessionEntry)
+
+
+def test_v4_wire_rejects_incomplete_step_followed_by_progress_without_echo() -> None:
+    record = {
+        "record_type": "run_checkpoint",
+        "format_version": 4,
+        "checkpoint_id": "wire-checkpoint",
+        "run_id": "wire-run",
+        "kind": "cancelled",
+        "user_message": {"role": "user", "content": "wire secret"},
+        "progress": [
+            {
+                "assistant_message": None,
+                "tools": [
+                    {
+                        "call": {
+                            "call_id": "a",
+                            "name": "read",
+                            "arguments": {"path": "C:/private.txt"},
+                        },
+                        "status": "in_progress",
+                        "result": None,
+                        "presentation": None,
+                    }
+                ],
+            },
+            {"assistant_message": None, "tools": []},
+        ],
+        "partial_assistant_message": None,
+        "recorded_at": "2026-08-21T03:04:05.123456+00:00",
+    }
+    with pytest.raises(SessionFormatError, match="run checkpoint is invalid") as caught:
+        deserialize_session_record(record)
+    assert "wire secret" not in str(caught.value)
+    assert "C:/private.txt" not in str(caught.value)
+
     sensitive_marker = "credential-like-secret-marker"
     record = serialize_session_record(
         make_turn_entry(

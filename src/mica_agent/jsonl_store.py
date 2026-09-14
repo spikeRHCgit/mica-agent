@@ -14,6 +14,7 @@ from enum import Enum
 from pathlib import Path
 
 from ._file_lock import locked_file
+from .checkpoint_contracts import RunCheckpoint
 from .session_contracts import (
     CURRENT_SESSION_FORMAT_VERSION,
     SessionError,
@@ -69,35 +70,58 @@ class SessionDeleteStatus(Enum):
 
 @dataclass(frozen=True, slots=True)
 class StoredSession:
-    """完整、不可变且已通过跨记录校验的会话快照。"""
+    """完整、不可变且已通过跨记录校验的有序会话快照。"""
 
     meta: SessionMeta
-    turns: tuple[TurnEntry, ...]
+    entries: tuple[TurnEntry | RunCheckpoint, ...]
 
     def __post_init__(self) -> None:
         if not isinstance(self.meta, SessionMeta):
             raise TypeError("meta must be a SessionMeta")
-        if not isinstance(self.turns, tuple):
-            raise TypeError("turns must be a tuple")
+        if not isinstance(self.entries, tuple):
+            raise TypeError("entries must be a tuple")
         turn_ids: set[str] = set()
+        checkpoint_ids: set[str] = set()
         run_ids: set[str] = set()
         previous_time = self.meta.created_at
-        for turn in self.turns:
-            if not isinstance(turn, TurnEntry):
-                raise TypeError("turns must contain only TurnEntry values")
-            if turn.turn_id in turn_ids:
-                raise ValueError("duplicate turn_id")
-            if turn.run_id in run_ids:
+        for entry in self.entries:
+            if not isinstance(entry, (TurnEntry, RunCheckpoint)):
+                raise TypeError("entries must contain only session entries")
+            entry_time = (
+                entry.completed_at
+                if isinstance(entry, TurnEntry)
+                else entry.recorded_at
+            )
+            if isinstance(entry, TurnEntry):
+                if entry.turn_id in turn_ids:
+                    raise ValueError("duplicate turn_id")
+                turn_ids.add(entry.turn_id)
+            else:
+                if entry.checkpoint_id in checkpoint_ids:
+                    raise ValueError("duplicate checkpoint_id")
+                checkpoint_ids.add(entry.checkpoint_id)
+            if entry.run_id in run_ids:
                 raise ValueError("duplicate run_id")
-            if turn.completed_at < self.meta.created_at:
-                raise ValueError("turn completed_at is earlier than session created_at")
-            if turn.completed_at < previous_time:
-                raise ValueError("turn times must be nondecreasing")
-            turn_ids.add(turn.turn_id)
-            run_ids.add(turn.run_id)
-            previous_time = turn.completed_at
-        if self.turns and self.meta.updated_at < self.turns[-1].completed_at:
-            raise ValueError("updated_at is earlier than the last turn")
+            if entry_time < self.meta.created_at:
+                raise ValueError(
+                    f"{type(entry).__name__} time is earlier than session created_at"
+                )
+            if entry_time < previous_time:
+                raise ValueError("entry times must be nondecreasing")
+            run_ids.add(entry.run_id)
+            previous_time = entry_time
+        if self.entries and self.meta.updated_at < previous_time:
+            raise ValueError("updated_at is earlier than the last entry")
+
+    @property
+    def turns(self) -> tuple[TurnEntry, ...]:
+        return tuple(entry for entry in self.entries if isinstance(entry, TurnEntry))
+
+    @property
+    def checkpoints(self) -> tuple[RunCheckpoint, ...]:
+        return tuple(
+            entry for entry in self.entries if isinstance(entry, RunCheckpoint)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,7 +175,7 @@ def _snapshot_from_records(records: list[object]) -> StoredSession:
         versions = [record.get("format_version") for record in records]
         if any(version != versions[0] for version in versions[1:]):
             raise SessionFormatError("session file contains mixed format versions")
-    parsed: list[SessionMeta | TurnEntry] = []
+    parsed: list[SessionMeta | TurnEntry | RunCheckpoint] = []
     for record in records:
         parsed.append(deserialize_session_record(record))
     if not isinstance(parsed[0], SessionMeta):
@@ -213,11 +237,11 @@ class JsonlSessionStore:
             raise SessionFormatError("workspace_path does not match current workspace")
 
     def _make_snapshot(
-        self, meta: SessionMeta, turns: Iterable[TurnEntry] = ()
+        self, meta: SessionMeta, entries: Iterable[TurnEntry | RunCheckpoint] = ()
     ) -> StoredSession:
         self._validate_meta(meta)
         try:
-            snapshot = StoredSession(meta, tuple(turns))
+            snapshot = StoredSession(meta, tuple(entries))
         except (TypeError, ValueError) as exc:
             raise SessionFormatError(str(exc)) from None
         return snapshot
@@ -237,7 +261,7 @@ class JsonlSessionStore:
                 created_at=meta.created_at,
                 updated_at=meta.updated_at,
             ),
-            snapshot.turns,
+            snapshot.entries,
         )
 
     def _read_bytes(self, path: Path) -> bytes:
@@ -301,7 +325,7 @@ class JsonlSessionStore:
         self, path: Path, snapshot: StoredSession, *, replace: bool
     ) -> None:
         snapshot = self._as_current_snapshot(snapshot)
-        records = (snapshot.meta, *snapshot.turns)
+        records = (snapshot.meta, *snapshot.entries)
         try:
             payload = b"".join(
                 (
@@ -347,9 +371,11 @@ class JsonlSessionStore:
                     pass
 
     def create(
-        self, meta: SessionMeta, turns: Iterable[TurnEntry] = ()
+        self,
+        meta: SessionMeta,
+        entries: Iterable[TurnEntry | RunCheckpoint] = (),
     ) -> StoredSession:
-        snapshot = self._as_current_snapshot(self._make_snapshot(meta, turns))
+        snapshot = self._as_current_snapshot(self._make_snapshot(meta, entries))
         path = self.path_for_session(meta.session_id)
         with self._session_lock(meta.session_id):
             if path.exists():
@@ -384,7 +410,32 @@ class JsonlSessionStore:
                     created_at=current.meta.created_at,
                     updated_at=max(current.meta.updated_at, turn.completed_at),
                 ),
-                (*current.turns, turn),
+                (*current.entries, turn),
+            )
+            self._write_snapshot(path, snapshot, replace=True)
+            return snapshot
+
+    def append_checkpoint(
+        self, session_id: str, checkpoint: RunCheckpoint
+    ) -> StoredSession:
+        if not isinstance(checkpoint, RunCheckpoint):
+            raise TypeError("checkpoint must be a RunCheckpoint")
+        with self._session_lock(session_id):
+            path = self.path_for_session(session_id)
+            if not path.is_file():
+                raise SessionNotFoundError()
+            current = self._load_path(path, requested_session_id=session_id)
+            snapshot = self._make_snapshot(
+                SessionMeta(
+                    session_id=current.meta.session_id,
+                    format_version=CURRENT_SESSION_FORMAT_VERSION,
+                    workspace_id=current.meta.workspace_id,
+                    workspace_path=current.meta.workspace_path,
+                    title=current.meta.title,
+                    created_at=current.meta.created_at,
+                    updated_at=max(current.meta.updated_at, checkpoint.recorded_at),
+                ),
+                (*current.entries, checkpoint),
             )
             self._write_snapshot(path, snapshot, replace=True)
             return snapshot

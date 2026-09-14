@@ -145,7 +145,7 @@ def test_real_write_tool_emits_safe_snapshots_and_persists_v3(tmp_path: Path) ->
     )
 
     stored = service.load_session(session_id)
-    assert stored.meta.format_version == 3
+    assert stored.meta.format_version == 4
     assert stored.turns[0].tool_presentations == (finished.presentation,)
     raw = service.store.path_for_session(session_id).read_text(encoding="utf-8")
     assert "sk-p5-12-secret" not in raw

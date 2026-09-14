@@ -36,10 +36,15 @@ from mica_agent import (
     ReasoningDelta,
     ReasoningEffort,
     RegisteredTool,
+    RunCheckpoint,
+    RunCheckpointKind,
+    RunCheckpointProgress,
+    RunCheckpointToolProgress,
+    RunCheckpointToolStatus,
     RunStatus,
+    SessionEntry,
     SessionError,
     SessionFormatError,
-    SessionMeta,
     SessionRecord,
     SessionRecordType,
     ToolArgumentsValidationError,
@@ -98,6 +103,12 @@ from mica_agent.providers import (
 )
 from mica_agent.session_contracts import (
     CURRENT_SESSION_FORMAT_VERSION as ContractsFormatVersion,
+)
+from mica_agent.session_contracts import (
+    RunCheckpoint as ContractsRunCheckpoint,
+)
+from mica_agent.session_contracts import (
+    SessionEntry as ContractsSessionEntry,
 )
 from mica_agent.session_contracts import (
     SessionError as ContractsSessionError,
@@ -467,8 +478,14 @@ def test_p5_01_contract_modules_import_without_runtime_cycles() -> None:
 
 
 def test_top_level_exports_session_contracts() -> None:
-    assert CURRENT_SESSION_FORMAT_VERSION == ContractsFormatVersion == 3
-    assert SessionMeta is ContractsSessionMeta
+    assert CURRENT_SESSION_FORMAT_VERSION == ContractsFormatVersion == 4
+    assert mica_agent.SessionMeta is ContractsSessionMeta
+    assert mica_agent.RunCheckpoint is RunCheckpoint is ContractsRunCheckpoint
+    assert mica_agent.RunCheckpointKind is RunCheckpointKind
+    assert mica_agent.RunCheckpointProgress is RunCheckpointProgress
+    assert mica_agent.RunCheckpointToolProgress is RunCheckpointToolProgress
+    assert mica_agent.RunCheckpointToolStatus is RunCheckpointToolStatus
+    assert mica_agent.SessionEntry is SessionEntry is ContractsSessionEntry
     assert TurnEntry is ContractsTurnEntry
     assert SessionRecord is ContractsSessionRecord
     assert SessionRecordType is ContractsSessionRecordType

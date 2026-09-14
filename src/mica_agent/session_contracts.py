@@ -8,6 +8,13 @@ from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import TypeAlias
 
+from .checkpoint_contracts import (
+    RunCheckpoint,
+    RunCheckpointKind,
+    RunCheckpointProgress,
+    RunCheckpointToolProgress,
+    RunCheckpointToolStatus,
+)
 from .message_sanitizer import sanitize_presentation_text, sanitize_tool_message
 from .models import Message, MessageRole
 from .tool_contracts import ToolCall, to_mutable_json
@@ -18,10 +25,12 @@ from .tool_presentation import (
     _safe_relative_path,
 )
 
-CURRENT_SESSION_FORMAT_VERSION = 3
+CURRENT_SESSION_FORMAT_VERSION = 4
 """当前会话 JSONL 写入格式版本。"""
 
-_SUPPORTED_SESSION_FORMAT_VERSIONS = frozenset({1, 2, CURRENT_SESSION_FORMAT_VERSION})
+_SUPPORTED_SESSION_FORMAT_VERSIONS = frozenset(
+    {1, 2, 3, CURRENT_SESSION_FORMAT_VERSION}
+)
 
 
 class SessionError(Exception):
@@ -37,6 +46,7 @@ class SessionRecordType(Enum):
 
     SESSION_META = "session_meta"
     TURN = "turn"
+    RUN_CHECKPOINT = "run_checkpoint"
 
 
 def _validate_non_blank_text(value: object, field_name: str) -> None:
@@ -209,8 +219,11 @@ class TurnEntry:
         )
 
 
-SessionRecord: TypeAlias = SessionMeta | TurnEntry
-"""Store 可读写的当前强类型记录联合。"""
+SessionEntry: TypeAlias = TurnEntry | RunCheckpoint
+"""会话时间线中的业务记录联合。"""
+
+SessionRecord: TypeAlias = SessionMeta | SessionEntry
+"""Store 可读写的强类型记录联合。"""
 
 
 def _format_utc_datetime(value: datetime) -> str:
@@ -534,12 +547,174 @@ def _parse_tool_presentation(value: object) -> ToolPresentationSnapshot:
         raise SessionFormatError("tool presentation is invalid") from None
 
 
+def _serialize_checkpoint_tool(
+    item: RunCheckpointToolProgress,
+) -> dict[str, object]:
+    return {
+        "call": _serialize_v2_message(Message(MessageRole.ASSISTANT, "", (item.call,)))[
+            "tool_calls"
+        ][0],
+        "status": item.status.value,
+        "result": None if item.result is None else _serialize_v2_message(item.result),
+        "presentation": (
+            None
+            if item.presentation is None
+            else _serialize_tool_presentation(item.presentation)
+        ),
+    }
+
+
+def _serialize_checkpoint_progress(
+    step: RunCheckpointProgress,
+) -> dict[str, object]:
+    return {
+        "assistant_message": (
+            None
+            if step.assistant_message is None
+            else _serialize_v2_message(step.assistant_message)
+        ),
+        "tools": [_serialize_checkpoint_tool(item) for item in step.tools],
+    }
+
+
+def _parse_checkpoint_tool(value: object) -> RunCheckpointToolProgress:
+    if not isinstance(value, Mapping):
+        raise SessionFormatError("checkpoint tool progress must be a JSON object")
+    _require_exact_fields(
+        value,
+        frozenset({"call", "status", "result", "presentation"}),
+        "checkpoint tool progress",
+    )
+    call_value = value["call"]
+    if not isinstance(call_value, Mapping):
+        raise SessionFormatError("checkpoint tool call must be a JSON object")
+    _require_exact_fields(
+        call_value, frozenset({"call_id", "name", "arguments"}), "checkpoint tool call"
+    )
+    arguments = call_value["arguments"]
+    if not isinstance(arguments, Mapping):
+        raise SessionFormatError("checkpoint tool arguments must be an object")
+    try:
+        call = ToolCall(
+            _require_non_blank_record_text(call_value, "call_id"),
+            _require_non_blank_record_text(call_value, "name"),
+            arguments,
+        )
+    except (TypeError, ValueError):
+        raise SessionFormatError("checkpoint tool call is invalid") from None
+    status_value = _require_record_text(value, "status")
+    try:
+        status = RunCheckpointToolStatus(status_value)
+    except ValueError:
+        raise SessionFormatError("checkpoint tool status is invalid") from None
+    result_value = value["result"]
+    result = None
+    if result_value is not None:
+        result = _parse_v2_message(result_value)
+    presentation_value = value["presentation"]
+    presentation = (
+        None
+        if presentation_value is None
+        else _parse_tool_presentation(presentation_value)
+    )
+    try:
+        return RunCheckpointToolProgress(call, status, result, presentation)
+    except (TypeError, ValueError):
+        raise SessionFormatError("checkpoint tool progress is invalid") from None
+
+
+def _parse_checkpoint_progress(value: object) -> RunCheckpointProgress:
+    if not isinstance(value, Mapping):
+        raise SessionFormatError("checkpoint progress must be a JSON object")
+    _require_exact_fields(
+        value, frozenset({"assistant_message", "tools"}), "checkpoint progress"
+    )
+    assistant_value = value["assistant_message"]
+    assistant = None
+    if assistant_value is not None:
+        if not isinstance(assistant_value, Mapping):
+            raise SessionFormatError("checkpoint assistant message must be an object")
+        _require_exact_fields(
+            assistant_value,
+            frozenset({"role", "content"}),
+            "checkpoint assistant message",
+        )
+        if _require_record_text(assistant_value, "role") != MessageRole.ASSISTANT.value:
+            raise SessionFormatError("checkpoint assistant message role is invalid")
+        assistant = Message(
+            MessageRole.ASSISTANT, _require_record_text(assistant_value, "content")
+        )
+    tools_value = value["tools"]
+    if not isinstance(tools_value, list):
+        raise SessionFormatError("checkpoint tools must be an array")
+    try:
+        return RunCheckpointProgress(
+            assistant_message=assistant,
+            tools=tuple(_parse_checkpoint_tool(item) for item in tools_value),
+        )
+    except (TypeError, ValueError):
+        raise SessionFormatError("checkpoint progress is invalid") from None
+
+
+def _parse_checkpoint(record: Mapping[object, object]) -> RunCheckpoint:
+    expected = frozenset(
+        {
+            "record_type",
+            "format_version",
+            "checkpoint_id",
+            "run_id",
+            "kind",
+            "user_message",
+            "progress",
+            "partial_assistant_message",
+            "recorded_at",
+        }
+    )
+    _require_exact_fields(record, expected, "run_checkpoint")
+    if _require_supported_version(record) != CURRENT_SESSION_FORMAT_VERSION:
+        raise SessionFormatError("run_checkpoint requires current format_version")
+    try:
+        kind = RunCheckpointKind(_require_record_text(record, "kind"))
+    except ValueError:
+        raise SessionFormatError("checkpoint kind is invalid") from None
+    progress_value = record["progress"]
+    if not isinstance(progress_value, list):
+        raise SessionFormatError("checkpoint progress must be an array")
+    partial_value = record["partial_assistant_message"]
+    partial = None
+    if partial_value is not None:
+        if not isinstance(partial_value, Mapping):
+            raise SessionFormatError("partial assistant message must be an object")
+        _require_exact_fields(
+            partial_value, frozenset({"role", "content"}), "partial assistant message"
+        )
+        if _require_record_text(partial_value, "role") != MessageRole.ASSISTANT.value:
+            raise SessionFormatError("partial assistant message role is invalid")
+        partial = Message(
+            MessageRole.ASSISTANT, _require_record_text(partial_value, "content")
+        )
+    try:
+        return RunCheckpoint(
+            checkpoint_id=_require_non_blank_record_text(record, "checkpoint_id"),
+            run_id=_require_non_blank_record_text(record, "run_id"),
+            kind=kind,
+            user_message=_parse_message(record, "user_message", MessageRole.USER),
+            progress=tuple(_parse_checkpoint_progress(item) for item in progress_value),
+            partial_assistant_message=partial,
+            recorded_at=_parse_utc_datetime(record, "recorded_at"),
+        )
+    except SessionFormatError:
+        raise
+    except (TypeError, ValueError):
+        raise SessionFormatError("run checkpoint is invalid") from None
+
+
 def serialize_session_record(record: SessionRecord) -> dict[str, object]:
     """把一个强类型会话对象转换为标准 JSON 可表示的单条记录。"""
     if isinstance(record, SessionMeta):
         return {
             "record_type": SessionRecordType.SESSION_META.value,
-            "format_version": record.format_version,
+            "format_version": CURRENT_SESSION_FORMAT_VERSION,
             "session_id": record.session_id,
             "workspace_id": record.workspace_id,
             "workspace_path": record.workspace_path,
@@ -562,7 +737,25 @@ def serialize_session_record(record: SessionRecord) -> dict[str, object]:
             ],
             "completed_at": _format_utc_datetime(record.completed_at),
         }
-    raise TypeError("record must be a SessionMeta or TurnEntry")
+    if isinstance(record, RunCheckpoint):
+        return {
+            "record_type": SessionRecordType.RUN_CHECKPOINT.value,
+            "format_version": CURRENT_SESSION_FORMAT_VERSION,
+            "checkpoint_id": record.checkpoint_id,
+            "run_id": record.run_id,
+            "kind": record.kind.value,
+            "user_message": _serialize_v2_message(record.user_message),
+            "progress": [
+                _serialize_checkpoint_progress(step) for step in record.progress
+            ],
+            "partial_assistant_message": (
+                None
+                if record.partial_assistant_message is None
+                else _serialize_v2_message(record.partial_assistant_message)
+            ),
+            "recorded_at": _format_utc_datetime(record.recorded_at),
+        }
+    raise TypeError("record must be a SessionMeta, TurnEntry, or RunCheckpoint")
 
 
 def deserialize_session_record(record: object) -> SessionRecord:
@@ -716,4 +909,6 @@ def deserialize_session_record(record: object) -> SessionRecord:
             raise SessionFormatError(
                 "turn messages or tool presentations are invalid"
             ) from None
+    if record_type == SessionRecordType.RUN_CHECKPOINT.value:
+        return _parse_checkpoint(record)
     raise SessionFormatError("unknown session record type")

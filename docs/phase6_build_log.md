@@ -653,3 +653,13 @@ Phase 6 完成，不启动 P6-10G，不做 Git 收口。
 - 使用者已在真实 Windows Terminal 中完成 Ask 固定选项、自定义回答、Permission、Esc、
   失焦恢复与窄窗口等冒烟测试，确认功能运行正常。
 - P6-11C 正式验收通过并完成 Git 收口；P6-10G1～G2 仍未开始，Phase 6 仍保持构建中。
+
+## P6-10G1：中断轮次公共契约与会话升级
+
+本切片新增独立 `RunCheckpoint` 记录，以 `cancelled` 与 `recoverable_failure` 区分未完成运行，成功仍只由完整 `TurnEntry` 表示。检查点按模型步骤保存真实部分输出和工具调用进度；工具状态明确区分成功、真实失败、执行中与未开始，只有真实终态写入 TOOL 结果和展示快照。
+
+JSONL 升级到 v4，使用显式 `run_checkpoint` record type 和固定字段集合。v1/v2/v3 继续严格只读解析；首次成功轮、检查点或其他 SessionService 重写在锁内通过临时文件原子替换为全量 v4 快照，失败保留旧字节。
+
+`StoredSession.entries` 是 Turn/checkpoint 的唯一有序时间线，`turns`/`checkpoints` 仅为过滤视图。恢复上下文保留完整成功轮消息；检查点只投影合法的已完成 assistant/tool 前缀，并把部分输出、未完成状态和未开始工具作为固定 Mica-owned 状态表达，不伪造最终回复或工具结果。工具参数、真实工具结果与展示副本复用集中清洗，用户原始指令保持不改写。
+
+master 复审确认跨步骤中断不变量、真实 v1/v2/v3 兼容 fixture、原子升级失败恢复、恢复上下文和非回显诊断边界成立；本地绝对路径与 HTTP/HTTPS URL 的分类返工也已通过公开清洗、wire、JSONL 与 Provider 上下文验证。最终聚焦组 237 项通过、1 项跳过；全量测试 1750 项通过、2 项跳过。Ruff、格式检查、lock 检查、离线 sdist/wheel 构建和暂存/未暂存 diff 检查均通过。P6-10G1 正式验收完成；P6-10G2 未开始。
