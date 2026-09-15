@@ -1,6 +1,6 @@
 # Mica 第六阶段：终端交互前端
 
-> 状态：构建中，P6-01A～P6-10A 已完成；P6-10B 已建立检查点；P6-10C 已通过自动验收；P6-10F 真实 Windows Terminal 复验再次失败，停止继续修补旧全屏滚动与焦点；P6-11 主缓冲区迁移方案已批准，P6-11A～P6-11C 已完成；P6-10G1～G2 已完成；Phase 6 待用户最终真实使用验收
+> 状态：已完成；P6-01A～P6-11C、P6-10G1～G2 与 P6-11C-MR3 均已通过自动化、构建、master 复审和用户真实 Windows Terminal 验收
 > 上位约束：`PROJECT_PLAN.md`
 > 视觉与交互事实源：`docs/tui_design.md`
 > 前置阶段：`docs/phase5_plan.md`
@@ -168,8 +168,9 @@ CLI 装配与会话选择
 | P6-11A：主缓冲区核心纵向闭环 | 已完成 | 已建立不进入 alternate screen 的轻量保留式渲染器与统一原始输入控制器；临时 `--main-buffer-preview` 已通过启动、composer、单轮模型流、Ask、Permission、工作状态、终端原生滚动及用户真实 Windows Terminal 冒烟。 |
 | P6-11B：历史与工具呈现迁移 | 已完成 | 已迁移会话历史、思考、时间线及 read/write/edit/bash/generic 动态色块，完成按工具类型折叠和全局 `Ctrl+O` 历史展开，并通过使用者真实 Windows Terminal 冒烟验收。 |
 | P6-11C：默认切换与旧前端退役 | 已完成 | 默认 `mica cli` 已切换到主缓冲区前端，临时 `--main-buffer-preview` 已删除，旧全屏实现、专属测试和 Textual 依赖已移除；`--plain` 保留基础文字降级。使用者真实 Windows Terminal 复验暴露出的零字符导航记录、单独 `Esc` flush、自定义回答、响应拒绝反馈和超高面板锚点问题均已返工并通过自动化、安装态、master 复审与使用者真实终端验收。本切片自身不关闭 Phase 6，中断恢复由 P6-10G1～G2 继续收口。 |
+| P6-11C-MR3：composer 物理光标即时刷新 | 已完成 | 最终真实冒烟发现方向键已改变逻辑编辑位置，但屏幕光标要等到 Backspace 或新字符改变文本后才显示新位置。根因是 `MainBufferRenderer.repaint()` 在物理行文本不变时提前返回，从不写出光标定位序列。已按 cursor-only 差分帧最小修复（只发相对定位、不写正文、不擦除、不重排；文本与光标都不变时保持真正 no-op），覆盖 Left/Right/Home/End/Up/Down、多逻辑行、软换行跨显示行、resize 与 composer 内部窗口滚动，并通过使用者真实 Windows Terminal 复验。 |
 | P6-10G1：中断轮次公共契约与会话升级 | 已完成 | 已建立独立 RunCheckpoint、有序 SessionEntry 时间线、v4 严格 wire、v1/v2/v3 原子升级与协议合法的恢复上下文投影；工具数据清洗能区分本地绝对路径与 HTTP/HTTPS URL。 |
-| P6-10G2：运行进度捕获与恢复闭环 | 已完成 | Engine 维护真实进度快照，MicaApp 在取消/可恢复失败时提交一次 `RunCheckpoint`，TUI 按 `entries` 恢复 Turn/checkpoint/Turn；成功仍只提交完整 `TurnEntry`。master 已完成代码、生命周期、全量 `-W error`、静态检查和离线构建验收；Phase 6 整体仍待用户最终真实使用验收。 |
+| P6-10G2：运行进度捕获与恢复闭环 | 已完成 | Engine 维护真实进度快照，MicaApp 在取消/可恢复失败时提交一次 `RunCheckpoint`，TUI 按 `entries` 恢复 Turn/checkpoint/Turn；成功仍只提交完整 `TurnEntry`。代码、生命周期、全量 `-W error`、静态检查、离线构建与最终真实使用验收均已通过。 |
 
 每张任务验收并完成 GitHub 同步后才进入下一张。紧密耦合、需要共同验证的同一组件行为应放在
 一个中等体量任务中，不为方便审查而拆成只有单个方法或单个视觉细节的碎片；跨越多层高风险
@@ -377,6 +378,7 @@ P6-10G 的测试必须区分完整成功轮次与中断检查点，覆盖取消�
 
 ## 9. 用户审查结论
 
+- Phase 6 的默认主缓冲区前端、历史与工具呈现、Ask/Permission、输入编辑、终端恢复、取消及中断进度恢复已经通过最终真实 Windows Terminal 冒烟；阶段正式完成。
 - `mica cli` 默认进入主缓冲区终端前端，`--plain` 保留基础文字降级入口；旧全屏前端已退役。
 - Phase 6 的底部事实区显示工作区与 Git 分支、当前模型、`sessions:` 加会话标题或短 ID；
   模型切换、会话重命名和会话切换后同步刷新。当前不显示权限、运行耗时、工具数和快捷键栏。

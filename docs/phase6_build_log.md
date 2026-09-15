@@ -673,3 +673,60 @@ MicaApp 在完整成功时提交 `TurnEntry`；`RunCancelled` 与可恢复 `RunF
 TUI 历史按 `StoredSession.entries` 投影 Turn/checkpoint/Turn：完成工具复用合法展示快照，未完成工具只显示名称和状态，部分助手用稳定 Markdown 加 Mica-owned `incomplete` 标记，不保留流式光标。检查点 ID 由独立 `checkpoint_id_factory` 生成。后续 Run 通过 `context_snapshot()` 看到原始用户指令和合法已完成前缀，不伪造最终 assistant 或未执行工具结果。
 
 master 复审确认进度快照、独立 checkpoint ID、终态前持久化、Ask/Permission/Bash/多工具批次状态、跨模型恢复、历史 `incomplete` 标记与取消/关闭幂等边界成立。聚焦复验中 App/TUI/集成组合 94 项通过、Engine 70 项通过；全量 `-W error` 1771 项通过、2 项跳过。Ruff、格式检查、lock 检查、离线 sdist/wheel 构建及两项 diff 检查均通过，P6-10G2 正式验收完成。Phase 6 仍等待用户最终真实使用验收，不在此处宣布完成。
+
+## P6-11C-MR3：composer 物理光标即时刷新
+
+P6-10G2 后的最终真实 Windows Terminal 冒烟发现一个主缓冲区输入回归：方向键会改变 composer 的逻辑编辑位置，但在没有文本变化时，屏幕光标仍停留在旧位置；只有随后执行 Backspace 或输入新字符，物理光标才显示到此前已移动的位置。文本编辑位置本身没有丢失，因此问题边界集中在 cursor-only 帧的终端刷新，而不是编辑器移动语义。
+
+当前首要诊断方向是 `MainBufferRenderer.repaint()`：当新旧物理行文本完全相同时，差分路径会在写出光标定位序列之前提前返回。P6-11C-MR3 必须先用公共按键队列和累计虚拟终端回放建立旧实现可失败的回归，再做最小渲染修复；方向键不得触发无意义的整块擦除重写，不得清空 scrollback、进入 alternate screen 或改变 composer 文本、粘贴片段、Ask/Permission、Ctrl+O 与运行中输入所有权。Phase 6 在真实终端确认左右/上下/Home/End 可即时移动可见光标前保持构建中。
+
+### 最终根因（已确证，首要假设成立）
+
+`MainBufferRenderer.repaint()` 用「本帧是否需要写出物理行」当作「本帧是否需要发送任何字节」：
+
+```
+start, pending_rows = self._diff(rows)
+if not pending_rows and self._drawn:
+    return
+```
+
+方向键/Home/End 只改变编辑器逻辑光标，chrome 文本逐字不变，于是 `pending_rows` 为空、`_drawn` 为真，函数在写出任何光标定位序列之前直接返回。渲染器保存的目标光标 `_cursor` 已经更新，但终端物理光标仍停留在旧单元格；直到下一次文本变化（Backspace/Delete/输入字符）触发普通差分分支，才在写出正文之后顺带把光标放到那个早已移动过的逻辑位置。
+
+只读探针（仓库外临时目录）在修复前给出的最小可重复证据：首帧把光标放在 composer 单元格 `(6, 3)`；把 `set_chrome` 的光标列改成 8 后，该帧新增字节为 `''`（0 字节）、`VirtualTerminal` 光标仍是 `(6, 3)`、`all_lines()` 与移动前完全一致；随后的文本变化帧写出 `\r\r\x1b[J…\r\x1b[1A\x1b[9C`，物理光标才跳到 `(6, 9)`。即「逻辑光标已改变、chrome 文本未改变、本轮没有光标定位输出、下一次文本变化后才追上」四件事同时成立。
+
+### cursor-only 帧设计
+
+`repaint()` 现在显式区分三种帧，而不是把所有「没有新行」都当作 no-op：
+
+1. **内容帧**（正文变化）：保持原有差分重绘（回到第一个真正变化的行 → 擦除下方 → 写出新行 → 把光标放回 composer 单元格）。
+2. **cursor-only 帧**（正文逐字不变、只有 chrome 目标光标移动）：只发送 `\r` + 必要的相对上下移动（`\x1b[nA`/`\x1b[nB`）+ 必要的横向移动（`\x1b[nC`）。没有正文、没有 erase-to-end、不重排任何行；上下移动使用相对定位而不是 `\r\n`，因此在屏幕底部也不会滚动终端或污染 scrollback。
+3. **真正的 no-op**（正文与光标都没变）：不产生任何字节（延续原有契约）。
+
+配套状态：新增 `_cursor_column` 记录**已写出**的物理光标列（`None` 表示未定位/未知），与已有的 `_cursor_view`（已写出的物理光标行）一起构成「上一帧把光标留在哪里」。目标行沿用与 `_adopt()` 相同的坐标推导（`start + target - row_index`），因此 cursor-only 帧之后保存的物理位置与真实终端一致，后续内容帧的回程计算不会被污染。`clear_chrome()`、`_write_stream()` 与非交互路径同步维护这两个字段（非交互输出仍不发送任何光标寻址序列）。修复只落在 `renderer.py`，`screen.py`、`editor.py`、`terminal.py` 与编辑器移动语义未改。
+
+### 红灯证据
+
+用仓库外的一次性 pytest 插件把 `_repaint_cursor_only()` 换回 no-op（等价于返工前的提前返回），五个新增回归全部失败：
+
+- `test_cursor_only_frame_moves_the_physical_cursor_without_rewriting_rows`：`assert (6, 3) == (6, 8)`，且行移动用例停在 `(7, 3)`。
+- `test_cursor_only_frames_keep_the_next_content_frame_in_sync`：连续 cursor-only 帧后物理光标没有跟随，`assert (7, 3) == (6, 3)`。
+- `test_cursor_only_frame_survives_resize_and_a_scrolled_window`：内部窗口滚动后的 cursor-only 帧无效。
+- `test_composer_navigation_moves_the_physical_cursor_immediately`：真实输入队列按下 Left 后物理光标仍是 `(20, 8)`（期望 `(20, 7)`）。
+- `test_composer_cursor_only_frames_follow_soft_wrapped_rows`：软换行跨显示行移动时物理光标不跟随。
+
+### 代表性测试
+
+- `tests/test_tui_main_buffer_redraw.py`（接缝 B：渲染器公开帧接口 + `VirtualTerminal` 回放）：cursor-only 帧必须移动物理光标，同时断言没有正文、没有 `\x1b[J`、没有 `\r\n`、`all_lines()` 与移动前逐行相同、composer/status/facts 各只出现一次、shell sentinel 与 scrollback 不变；行移动（上/下）与列移动都要生效；`set_width()` 重排与「已滚动的 composer 内部窗口」之后仍然成立；正文与光标都不变时保持 0 字节 no-op。另有连续 cursor-only 帧之后「下一次内容帧仍回到正确行并恢复光标」的回归。
+- `tests/test_tui_main_buffer_screen.py`（接缝 A：真实输入队列 → 模式机 → 渲染器 → 累计物理回放）：先键入 `hello`，再依次 Left/Left/Right/Home/End，每一步都断言同一轮输入里新增了定位序列（`\x1b[J` 与草稿正文不得出现）、逻辑光标与物理光标同步移动、草稿与全部物理行不变；随后覆盖多逻辑行 Up/Down 跨行、以及 40 列软换行草稿在显示行之间来回移动（含恰好落在换行边界上的位置）；等待只用有界 `pump`，绑定逻辑光标并在每步核对新增字节，不使用固定 sleep。
+
+### 验证结果
+
+- 聚焦组（composer/redraw/screen/events/vt）`-W error` **128 通过**；全部 `tests/test_tui_main_buffer_*.py` **463 通过**；CLI/分发兼容组（`test_tui_main_buffer_cli`/`test_distribution`/`test_p6_09_integration`）**50 通过**；全量 `pytest -q -W error` **1776 通过、2 跳过**。
+- `ruff check src/mica_agent tests` 全绿；`ruff format --check`（104 文件）通过；`uv lock --check` 通过；`uv build --offline` 成功（wheel 仍只收录 `tui/__init__.py`、`tui/models.py` 与 `tui/main_buffer/**`）；两项 `git diff --check` 干净。
+- 使用者已在真实 Windows Terminal 确认左右/上下/Home/End 可立即移动可见光标，功能修复通过；移动过程中不再需要等待下一次输入或删除才更新物理光标。
+
+## Phase 6 最终验收
+
+- P6-11C-MR3 经 master 复审后，渲染器与主缓冲区聚焦组分别通过 53、128 和 463 项 `-W error` 测试；worker 全量门槛为 1776 项通过、2 项跳过，Ruff、格式、lock、离线构建及两项 diff 检查通过。
+- 使用者在真实 Windows Terminal 完成最终冒烟，确认 composer 物理光标即时刷新恢复正常；此前主缓冲区、终端原生 scrollback、历史与工具呈现、Ask/Permission、取消、恢复和中断检查点也已逐项复验。
+- Phase 6 正式完成。后续不直接启动 Phase 7；先暂停阶段推进，进行代码框架梳理、协作方式与产品方向重新对齐，并共同制定文档治理和代码风格 spec。

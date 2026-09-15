@@ -289,13 +289,13 @@ Mica 核心交付 ExtensionAPI、扩展发现与加载、稳定注册契约、�
 | Phase 3：会话持久化 | 已完成 | 建立工作区身份、JSONL Store、SessionService、上下文加载和退出后恢复。 | `docs/phase3_plan.md` |
 | Phase 4：仓库收口 | 已完成 | 删除历史实现，统一 Mica 仓库、包名、入口和本地工作目录。 | `docs/phase4_plan.md` |
 | Phase 5：工具与权限 | 已完成 | 建立工具契约、文件/Bash/结构化 ask、权限策略、多步工具循环、思考事件、工具展示与会话 v3、动态输出和系统提示词快照。 | `docs/phase5_plan.md`、`docs/system_prompt_design.md` |
-| Phase 6：终端交互前端 | 构建中 | 交付主缓冲区渲染、启动界面、历史回放、输入编辑、工作状态、思考展示、工具卡片、权限/ask 交互和可靠取消。 | `docs/tui_design.md`、`docs/phase6_plan.md` |
+| Phase 6：终端交互前端 | 已完成 | 交付主缓冲区渲染、启动界面、历史回放、输入编辑、工作状态、思考展示、工具卡片、权限/ask 交互、可靠取消和中断进度恢复。 | `docs/tui_design.md`、`docs/phase6_plan.md` |
 | Phase 7：配置与模型 | 未开始 | 建立 JSON 配置、首次向导、模型发现与切换、思考/工作/权限模式和界面偏好。 | 阶段开始前创建 |
 | Phase 8：会话命令与上下文 | 未开始 | 交付会话选择和 `/new`、`/rename`、`/branch`、`/rewind`、`/clear`、`/btw`、`/compact`，以及上下文用量和压缩。 | 阶段开始前创建 |
 | Phase 9：扩展契约 | 未开始 | 建立 ExtensionAPI、显式发现和工具、Provider、命令、事件的稳定扩展入口及最小示例。 | 阶段开始前创建 |
 | Phase 10：分发与 MVP 收口 | 未开始 | 完成 npm 启动器、Python wheel 配套分发、安装态系统验收、公开文档、许可证和 `0.1.0` 发布准备。 | 阶段开始前创建 |
 
-按主阶段数量计算，Phase 1～5 已完成，Phase 6 计划已批准，后续还有 Phase 6～10 五个主阶段。
+按主阶段数量计算，Phase 1～6 已完成，后续还有 Phase 7～10 四个主阶段。
 该数字只表示里程碑数量，不表示工作量已经完成一半；各阶段规模并不相同。
 
 ### 13.1 Phase 6 开工前补充任务

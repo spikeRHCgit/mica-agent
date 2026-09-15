@@ -476,3 +476,116 @@ def test_global_expansion_reflows_earlier_rows_in_the_main_buffer() -> None:
     assert harness.vt.all_lines().count("line 9") == 1
     harness.assert_cursor_at("› hello", 3)
     harness.assert_safe()
+
+
+# -- cursor-only 帧（P6-11C-MR3）----------------------------------------------
+
+
+def _cursor_only_chunk(
+    harness: Harness, lines: list[str], cursor: tuple[int, int]
+) -> str:
+    """只改 chrome 光标（文本逐字不变）并返回这一帧新写出的字节。"""
+    before = len(harness.terminal.emitted)
+    harness.renderer.set_chrome(lines, cursor=cursor)
+    harness.frame()
+    return "".join(harness.terminal.emitted[before:])
+
+
+def test_cursor_only_frame_moves_the_physical_cursor_without_rewriting_rows() -> None:
+    """文本完全相同的第二帧只移动光标：不写正文、不擦除、不重复物理行。"""
+    harness = Harness().shell(*SHELL_LINES)
+    sentinel = harness.vt.screen()[:3]
+    harness.renderer.add_block("assistant", "document")
+    chrome = ["status", "› hello", "facts"]
+    harness.chrome(chrome, (1, 3))
+    lines_before = harness.vt.all_lines()
+    harness.assert_cursor_at("› hello", 3)
+
+    # 只改光标列：新帧的物理行文本与上一帧逐字相同。
+    chunk = _cursor_only_chunk(harness, chrome, (1, 8))
+    assert "› hello" not in chunk, repr(chunk)
+    assert "status" not in chunk and "facts" not in chunk, repr(chunk)
+    assert "\x1b[J" not in chunk, repr(chunk)  # 不擦除
+    assert "\r\n" not in chunk, repr(chunk)  # 不写行、不向下滚动
+    harness.assert_cursor_at("› hello", 8)
+    assert harness.vt.all_lines() == lines_before
+    assert harness.vt.all_lines().count("› hello") == 1
+    assert harness.vt.all_lines().count("status") == 1
+    assert harness.vt.all_lines().count("facts") == 1
+    assert harness.vt.screen()[:3] == sentinel
+    assert harness.vt.scrollback == []
+
+    # 只改光标行：向上、向下都必须立即生效。
+    chunk = _cursor_only_chunk(harness, chrome, (0, 3))
+    assert "\x1b[J" not in chunk and "\r\n" not in chunk, repr(chunk)
+    harness.assert_cursor_at("status", 3)
+    assert harness.vt.all_lines() == lines_before
+
+    chunk = _cursor_only_chunk(harness, chrome, (2, 4))
+    assert "\x1b[J" not in chunk and "\r\n" not in chunk, repr(chunk)
+    harness.assert_cursor_at("facts", 4)
+    assert harness.vt.all_lines() == lines_before
+    assert harness.vt.screen()[:3] == sentinel
+
+    # 文本与光标都没有变化时仍然是真正的 no-op。
+    before = len(harness.terminal.emitted)
+    harness.frame()
+    assert harness.terminal.emitted[before:] == []
+    harness.assert_cursor_at("facts", 4)
+    harness.assert_safe()
+
+
+def test_cursor_only_frames_keep_the_next_content_frame_in_sync() -> None:
+    """连续 cursor-only 帧之后，内容帧仍回到正确的行并恢复光标。"""
+    harness = Harness(cols=40).shell(*SHELL_LINES)
+    chrome = ["status", "› hello", "facts"]
+    harness.renderer.set_chrome(chrome, cursor=(2, 3))
+    harness.renderer.update_pending("assistant", "one")
+    harness.frame()
+    physical_before = harness.renderer.physical_frame()
+    cursor_row = harness.renderer.frame_cursor_row
+
+    for row, column in ((1, 3), (0, 5), (2, 0), (1, 6)):
+        chunk = _cursor_only_chunk(harness, chrome, (row, column))
+        assert "\x1b[J" not in chunk and "\r\n" not in chunk, repr(chunk)
+        harness.assert_cursor_at(chrome[row], column)
+        # 只有光标移动：屏幕映射与物理行都没有被重排。
+        assert harness.renderer.physical_frame() == physical_before
+        assert harness.renderer.frame_cursor_row == cursor_row + (row - 2)
+
+    # 下一次真正的文本变化仍然回到正确的行，并把光标放回最后一次的位置。
+    harness.renderer.update_pending("assistant", "changed")
+    harness.frame()
+
+    assert harness.row_of("changed") == harness.row_of("status") - 1
+    harness.assert_cursor_at("› hello", 6)
+    harness.assert_safe()
+
+
+def test_cursor_only_frame_survives_resize_and_a_scrolled_window() -> None:
+    """composer 内部窗口已滚动、以及宽度变化重排之后，cursor-only 帧仍然成立。"""
+    harness = Harness(rows=14, cols=40).shell(*SHELL_LINES)
+    # 模拟已经滚动的 composer 内部窗口：第 5 行在最上面。
+    window = ["status", "› line 5", "  line 6", "  line 7", "facts"]
+    harness.chrome(window, (1, 3))
+    harness.assert_cursor_at("› line 5", 3)
+
+    chunk = _cursor_only_chunk(harness, window, (3, 4))
+    assert "\x1b[J" not in chunk and "\r\n" not in chunk, repr(chunk)
+    harness.assert_cursor_at("  line 7", 4)
+
+    # 宽度变化让渲染器重排：这一帧是内容帧，之后的 cursor-only 帧仍必须有效。
+    harness.renderer.set_width(24)
+    harness.chrome(window, (1, 3))
+    harness.assert_cursor_at("› line 5", 3)
+
+    chunk = _cursor_only_chunk(harness, window, (2, 5))
+    assert "\x1b[J" not in chunk and "\r\n" not in chunk, repr(chunk)
+    harness.assert_cursor_at("  line 6", 5)
+    harness.assert_safe()
+
+    slot = harness.renderer.physical_frame()
+    before = len(harness.terminal.emitted)
+    harness.frame()
+    assert harness.terminal.emitted[before:] == []
+    assert harness.renderer.physical_frame() == slot

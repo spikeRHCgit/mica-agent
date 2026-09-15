@@ -13,6 +13,8 @@
 
 * 普通增量只重绘变化尾部；
 * 较早块高度变化（全局工具展开、宽度变化）时从该块起点受控重排；
+* 文本不变而只有目标光标移动（方向键/Home/End）时只发送相对光标定位，
+  不写正文、不擦除，也不重排任何行；
 * 首帧只从当前光标位置向下写出，不向上移动、不擦除启动前内容；
 * 屏幕映射保存的行数不超过终端高度，因此映射中的每一行都仍在屏幕上，
   回到其中任意一行所需的上移量都不会越过屏幕顶部。
@@ -444,6 +446,9 @@ class MainBufferRenderer:
         self._expanded = False
         self._view: list[_Row] = []
         self._cursor_view = 0
+        # 已写出的物理光标列；``None`` 表示「未定位/未知」，此时不能宣称
+        # 光标已经在目标单元格上，只能重新发送一次定位。
+        self._cursor_column: int | None = None
         self._drawn = False
 
     # -- 只读视图 -----------------------------------------------------------
@@ -722,10 +727,15 @@ class MainBufferRenderer:
     # -- 绘制 ---------------------------------------------------------------
 
     def repaint(self) -> None:
-        """发送一次差分帧。
+        """发送一次差分帧，显式区分三种情况。
 
-        物理顺序固定：先回到「第一个真正变化的行」（首帧则只向下开始），
-        擦除其下方旧内容，再写出新行，最后把光标放回 composer 单元格。
+        1. 内容变化：回到「第一个真正变化的行」（首帧则只向下开始），擦除其
+           下方旧内容，写出新行，最后把光标放回 composer 单元格。
+        2. 内容不变但目标光标移动（方向键 / Home / End / 上下移动）：走
+           cursor-only 帧，只发送把物理光标移到目标单元格所需的相对定位序列，
+           不写正文、不擦除、不重排，因此可见光标立即跟随逻辑编辑位置。
+        3. 内容与光标都没变：真正的 no-op，不产生任何字节。
+
         返回起点永远发生在写出任何正文之前。
         """
         self._trim_pending()
@@ -736,10 +746,12 @@ class MainBufferRenderer:
         if not rows:
             return
         start, pending_rows = self._diff(rows)
-        if not pending_rows and self._drawn:
-            return
         row_index = len(rows) - len(pending_rows)
         target = self._cursor_target(rows)
+        if not pending_rows and self._drawn:
+            self._repaint_cursor_only(start, row_index, target)
+            return
+        column = max(0, self._cursor[1]) if self._cursor is not None else 0
         buffer = self._move_to(start)
         buffer.append("\r")
         buffer.append(_ERASE_TO_END)
@@ -750,12 +762,49 @@ class MainBufferRenderer:
             buffer.append("\r")
             if up:
                 buffer.append(f"\x1b[{up}A")
-            column = max(0, self._cursor[1]) if self._cursor is not None else 0
             if column:
                 buffer.append(f"\x1b[{column}C")
         self._adopt(start, pending_rows, row_index, target)
         self._retire_frame()
+        self._cursor_column = column if target is not None else None
         self._terminal.write("".join(buffer))
+
+    def _repaint_cursor_only(
+        self, start: int, row_index: int, target: int | None
+    ) -> None:
+        """文本未变化时只移动物理光标。
+
+        目标单元格用与 :meth:`_adopt` 相同的坐标推导（``start + target -
+        row_index``），因此 cursor-only 帧之后渲染器保存的物理光标行与真实
+        终端一致，后续内容帧的回程计算不会被污染。
+        """
+        if target is None or self._cursor is None:
+            return
+        target_view = start + (target - row_index)
+        column = max(0, self._cursor[1])
+        if target_view == self._cursor_view and column == self._cursor_column:
+            return
+        # 先按**移动前**的物理光标行算出相对定位，再更新保存的位置。
+        buffer = self._cursor_move(target_view, column)
+        self._cursor_view = target_view
+        self._cursor_column = column
+        self._terminal.write("".join(buffer))
+
+    def _cursor_move(self, target_view: int, column: int) -> list[str]:
+        """把物理光标相对移动到目标单元格的控制序列。
+
+        只包含回车、上下相对移动与横向相对移动：没有正文、没有 erase-to-end、
+        不重写任何行，也不使用 ``\\r\\n``（在屏幕底部会滚动终端）。
+        """
+        delta = target_view - self._cursor_view
+        buffer: list[str] = ["\r"]
+        if delta < 0:
+            buffer.append(f"\x1b[{min(-delta, self._height - 1)}A")
+        elif delta > 0:
+            buffer.append(f"\x1b[{min(delta, self._height - 1)}B")
+        if column:
+            buffer.append(f"\x1b[{column}C")
+        return buffer
 
     def _fresh_rows(self) -> list[_Row]:
         """生成从重绘起点到 chrome 末尾的全部物理行。"""
@@ -850,6 +899,7 @@ class MainBufferRenderer:
     def _reset_frame_state(self) -> None:
         self._view = []
         self._cursor_view = 0
+        self._cursor_column = None
         self._drawn = False
 
     def clear_chrome(self) -> None:
@@ -872,6 +922,7 @@ class MainBufferRenderer:
         buffer.append(_ERASE_TO_END)
         self._view = self._view[:start]
         self._cursor_view = len(self._view)
+        self._cursor_column = 0
         self._chrome = []
         self._cursor = None
         self._terminal.write("".join(buffer))
@@ -882,6 +933,7 @@ class MainBufferRenderer:
             return
         self._terminal.write("\r\n".join(row.text for row in rows) + "\r\n")
         self._adopt(0, list(rows), 0, None)
+        self._cursor_column = None
         self._retire_frame()
 
     def _trim_pending(self) -> None:

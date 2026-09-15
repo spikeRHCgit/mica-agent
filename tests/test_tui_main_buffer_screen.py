@@ -49,6 +49,7 @@ from mica_agent.tui.main_buffer.terminal import (
     KEY_EVENT_TYPE,
     NAVIGATION_VIRTUAL_KEYS,
     WindowsVtKeyReader,
+    find_forbidden_sequences,
     install_windows_navigation_fallback,
     windows_key_event,
     windows_navigation_reader,
@@ -523,6 +524,185 @@ def test_escape_cancels_active_run_without_committing_turn(tmp_path: Path) -> No
 
             fake.feed(CTRL_C)
             fake.feed(CTRL_C)
+            await asyncio.wait_for(harness.task, timeout=TIMEOUT)
+
+    asyncio.run(scenario())
+
+
+# -- P6-11C-MR3：composer 物理光标即时刷新 ------------------------------------
+
+LEFT = KeyPress(Keys.Left, "\x1b[D")
+RIGHT = KeyPress(Keys.Right, "\x1b[C")
+UP = KeyPress(Keys.Up, "\x1b[A")
+HOME = KeyPress(Keys.Home, "\x1b[H")
+END = KeyPress(Keys.End, "\x1b[F")
+DELETE = KeyPress(Keys.Delete, "\x1b[3~")
+NEWLINE = KeyPress(Keys.ControlJ, "\n")
+
+
+def test_composer_navigation_moves_the_physical_cursor_immediately(
+    tmp_path: Path,
+) -> None:
+    """方向键/Home/End 改变逻辑光标后，物理光标必须在同一轮输入里就移动。
+
+    只走真实输入队列（``FakeInput`` → Screen 模式机 → 渲染器 → ``Terminal``），
+    物理结果由累计字节流回放到虚拟终端后断言；只移动光标时不得重写任何物理行。
+    """
+
+    async def scenario() -> None:
+        from test_tui_main_buffer_vt import VirtualTerminal
+
+        provider = ScriptedProvider([[ProviderTextDelta("x"), Finish()]])
+        app = make_app(tmp_path, provider)
+        fake = FakeInput()
+        screen, _ = make_screen(app, fake)
+        terminal = screen._terminal
+
+        def physical() -> VirtualTerminal:
+            view = VirtualTerminal(rows=24, cols=80)
+            view.feed(terminal.emitted_text())
+            return view
+
+        async with ScreenHarness(screen, fake) as harness:
+            fake.feed(*typed("hello"))
+            await pump(lambda: screen.composer_text == "hello", message="draft")
+            view = physical()
+            composer_row = view.row_index("› hello")
+            assert composer_row >= 0, view.screen()
+            # 边框 1 列 + 提示符 2 列 + 5 个字符。
+            assert view.cursor_cell() == (composer_row, 8)
+            stable_lines = view.all_lines()
+
+            for key, expected in (
+                (LEFT, 4),
+                (LEFT, 3),
+                (RIGHT, 4),
+                (HOME, 0),
+                (END, 5),
+            ):
+                before = len(terminal.emitted_text())
+                fake.feed(key)
+                await pump(
+                    lambda expected=expected: screen.editor.cursor == expected,
+                    message=f"logical cursor {expected}",
+                )
+                delta = terminal.emitted_text()[before:]
+                # 同一轮输入里就写出了定位序列：不写正文、不擦除、不清屏。
+                assert delta, "cursor-only 帧必须立即写出"
+                assert "\x1b[J" not in delta and "hello" not in delta, repr(delta)
+                view = physical()
+                assert view.cursor_cell() == (composer_row, 3 + expected), view.screen()
+                # 只有光标移动：草稿与全部物理行完全不变。
+                assert screen.composer_text == "hello"
+                assert view.all_lines() == stable_lines
+
+            # 多逻辑行：Up/Down 让物理光标跨行即时移动。
+            fake.feed(HOME, DELETE, DELETE, DELETE, DELETE, DELETE)
+            await pump(lambda: screen.composer_text == "", message="cleared draft")
+            fake.feed(*typed("alpha"), NEWLINE, *typed("beta"))
+            await pump(
+                lambda: screen.composer_text == "alpha\nbeta", message="multiline draft"
+            )
+            view = physical()
+            top = view.row_index("› alpha")
+            bottom = view.row_index("  beta")
+            assert top >= 0 and bottom == top + 1, view.screen()
+            assert view.cursor_cell() == (bottom, 7)
+            multiline_lines = view.all_lines()
+
+            fake.feed(UP)
+            await pump(lambda: screen.editor.cursor_row == 0, message="cursor row up")
+            view = physical()
+            assert view.cursor_cell() == (top, 7), view.screen()
+            assert screen.composer_text == "alpha\nbeta"
+            assert view.all_lines() == multiline_lines
+
+            fake.feed(DOWN)
+            await pump(lambda: screen.editor.cursor_row == 1, message="cursor row down")
+            view = physical()
+            assert view.cursor_cell() == (bottom, 7), view.screen()
+            assert view.all_lines() == multiline_lines
+
+            assert find_forbidden_sequences(terminal.emitted_text()) == []
+            assert view.violations == []
+            assert view.autowrap is False
+
+            fake.feed(CTRL_C, CTRL_C)
+            await asyncio.wait_for(harness.task, timeout=TIMEOUT)
+
+    asyncio.run(scenario())
+
+
+def test_composer_cursor_only_frames_follow_soft_wrapped_rows(tmp_path: Path) -> None:
+    """软换行后 Left/Home/End 跨显示行移动时，物理光标仍然即时跟随。"""
+
+    async def scenario() -> None:
+        from test_tui_main_buffer_vt import VirtualTerminal
+
+        provider = ScriptedProvider([[ProviderTextDelta("x"), Finish()]])
+        app = make_app(tmp_path, provider)
+        fake = FakeInput()
+        screen, _ = make_screen(app, fake, size=(40, 24))
+        terminal = screen._terminal
+
+        def physical() -> VirtualTerminal:
+            view = VirtualTerminal(rows=24, cols=40)
+            view.feed(terminal.emitted_text())
+            return view
+
+        draft = "0123456789" * 4  # 40 列落在 36 列的正文宽度上 → 软换行成两行
+        first, second = draft[:36], draft[36:]
+        async with ScreenHarness(screen, fake) as harness:
+            fake.feed(*typed(draft))
+            await pump(lambda: screen.composer_text == draft, message="wrapped draft")
+            view = physical()
+            lines = view.all_lines()
+            first_row = view.row_index("› " + first)
+            second_row = view.row_index("  " + second)
+            assert first_row >= 0 and second_row == first_row + 1, view.screen()
+            assert view.cursor_cell() == (second_row, 3 + 4)
+
+            # End → Home：物理光标跨软换行行即时回到第一行行首。
+            fake.feed(HOME)
+            await pump(lambda: screen.editor.cursor == 0, message="home")
+            view = physical()
+            assert view.cursor_cell() == (first_row, 3)
+            assert view.all_lines() == lines
+            assert screen.composer_text == draft
+
+            fake.feed(END)
+            await pump(lambda: screen.editor.cursor == len(draft), message="end")
+            view = physical()
+            assert view.cursor_cell() == (second_row, 3 + 4)
+            assert view.all_lines() == lines
+
+            # 连续 Left 越过软换行边界：行号与列号同时变化。
+            # 恰好落在换行边界上的位置按产品既有约定显示在上一显示行行尾。
+            crossings = (
+                (39, (second_row, 3 + 3)),
+                (38, (second_row, 3 + 2)),
+                (37, (second_row, 3 + 1)),
+                (36, (first_row, 3 + 36)),
+                (35, (first_row, 3 + 35)),
+            )
+            for expected, cell in crossings:
+                before = len(terminal.emitted_text())
+                fake.feed(LEFT)
+                await pump(
+                    lambda expected=expected: screen.editor.cursor == expected,
+                    message=f"cursor {expected}",
+                )
+                delta = terminal.emitted_text()[before:]
+                assert delta and "\x1b[J" not in delta, repr(delta)
+                view = physical()
+                assert view.cursor_cell() == cell, view.screen()
+                assert view.all_lines() == lines
+                assert screen.composer_text == draft
+
+            assert find_forbidden_sequences(terminal.emitted_text()) == []
+            assert view.violations == []
+
+            fake.feed(CTRL_C, CTRL_C)
             await asyncio.wait_for(harness.task, timeout=TIMEOUT)
 
     asyncio.run(scenario())
