@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from mica_agent.app import MicaApp
+from mica_agent.checkpoint_contracts import RunCheckpointKind
 from mica_agent.cli import run_interactive
 from mica_agent.context_builder import ContextBuilder
 from mica_agent.events import ErrorCategory, RunCompleted, RunFailed, TextDelta
@@ -238,18 +239,19 @@ def test_failed_run_does_not_change_jsonl_and_following_run_can_commit(
         ]
     )
     app = make_app(provider, service, builder, session_id)
-    before = service.store.path_for_session(session_id).read_bytes()
 
     first_events = run_collect(app, "failed question")
-    after_failure = service.store.path_for_session(session_id).read_bytes()
+    after_failure = service.load_session(session_id)
     second_events = run_collect(app, "successful question")
 
     assert isinstance(first_events[-1], RunFailed)
-    assert after_failure == before
+    assert after_failure.turns == ()
+    assert after_failure.checkpoints[0].kind is RunCheckpointKind.RECOVERABLE_FAILURE
     assert isinstance(second_events[-1], RunCompleted)
     stored = service.load_session(session_id)
     assert len(stored.turns) == 1
     assert stored.turns[0].user_message.content == "successful question"
+    assert stored.checkpoints[0].kind is RunCheckpointKind.RECOVERABLE_FAILURE
 
 
 @pytest.mark.parametrize("mode", ["failed", "cancelled", "closed"])
@@ -258,7 +260,6 @@ def test_non_successful_run_modes_do_not_append_turn(
     mode: str,
 ) -> None:
     service, builder, session_id, _, _ = setup_session(tmp_path)
-    before = service.store.path_for_session(session_id).read_bytes()
 
     if mode == "failed":
         provider = ScriptedProvider(
@@ -296,8 +297,15 @@ def test_non_successful_run_modes_do_not_append_turn(
 
         asyncio.run(cancel_run())
 
-    assert service.store.path_for_session(session_id).read_bytes() == before
-    assert service.load_session(session_id).turns == ()
+    stored = service.load_session(session_id)
+    assert stored.turns == ()
+    assert len(stored.checkpoints) == 1
+    expected = (
+        RunCheckpointKind.RECOVERABLE_FAILURE
+        if mode == "failed"
+        else RunCheckpointKind.CANCELLED
+    )
+    assert stored.checkpoints[0].kind is expected
 
 
 def test_persistence_failure_becomes_safe_storage_failure_without_half_turn(

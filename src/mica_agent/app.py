@@ -9,9 +9,16 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from .cancellation import CancellationToken
+from .checkpoint_contracts import RunCheckpoint, RunCheckpointKind
 from .context_builder import ContextBuilder, ContextBuildResult
-from .engine import AgentEngine, RunIdFactory
-from .events import EngineEvent, ErrorCategory, RunCompleted, RunFailed
+from .engine import AgentEngine, RunIdFactory, RunProgressSnapshot
+from .events import (
+    EngineEvent,
+    ErrorCategory,
+    RunCancelled,
+    RunCompleted,
+    RunFailed,
+)
 from .interactions import PermissionResponse, UserInputResponse
 from .models import Message, MessageRole
 from .providers import Provider, ProviderRequest
@@ -23,12 +30,22 @@ from .tool_executor import ToolExecutor
 from .tool_presentation import ToolPresentationSnapshot
 
 TurnIdFactory = Callable[[], str]
+CheckpointIdFactory = Callable[[], str]
 Clock = Callable[[], datetime]
 _STORAGE_FAILURE_MESSAGE = "session persistence failed"
 _STORAGE_FAILURE_AFTER_TOOL_MESSAGE = (
     "session persistence failed; tool changes may have occurred; check the workspace"
 )
 _SIDE_EFFECT_TOOL_NAMES = frozenset({"write", "edit", "bash"})
+_RECOVERABLE_ERROR_CATEGORIES = frozenset(
+    {
+        ErrorCategory.AUTHENTICATION,
+        ErrorCategory.RATE_LIMIT,
+        ErrorCategory.TIMEOUT,
+        ErrorCategory.TEMPORARY,
+        ErrorCategory.MALFORMED,
+    }
+)
 
 
 class MicaAppError(Exception):
@@ -58,6 +75,7 @@ class MicaApp:
         context_snapshot: ContextBuildResult | None = None,
         run_id_factory: RunIdFactory | None = None,
         turn_id_factory: TurnIdFactory | None = None,
+        checkpoint_id_factory: CheckpointIdFactory | None = None,
         clock: Clock | None = None,
         tool_executor: ToolExecutor | None = None,
     ) -> None:
@@ -105,6 +123,7 @@ class MicaApp:
             *resolved_context.messages,
         )
         self._turn_id_factory = turn_id_factory or (lambda: uuid4().hex)
+        self._checkpoint_id_factory = checkpoint_id_factory or (lambda: uuid4().hex)
         self._clock = clock or (lambda: datetime.now(UTC))
         self._tool_executor = tool_executor
         self._engine = AgentEngine(
@@ -148,7 +167,7 @@ class MicaApp:
         reasoning_effort: ReasoningEffort = ReasoningEffort.OFF,
         cancellation: CancellationToken | None = None,
     ) -> AsyncIterator[EngineEvent]:
-        """启动一次 Run，并仅在 RunCompleted 后提交完整 TurnEntry。"""
+        """启动一次 Run；成功提交 TurnEntry，取消或可恢复失败提交检查点。"""
         if self._closed:
             raise AppClosedError("app is closed; cannot start a new run")
         if not isinstance(prompt, str):
@@ -166,6 +185,8 @@ class MicaApp:
         user_message = Message(role=MessageRole.USER, content=prompt)
         completed_messages: list[tuple[Message, ...]] = []
         completed_tool_presentations: list[tuple[ToolPresentationSnapshot, ...]] = []
+        progress_snapshots: list[RunProgressSnapshot] = []
+        submitted = False
         try:
             session_messages = self._session_service.context_snapshot(self._session_id)
             request = ProviderRequest(
@@ -184,31 +205,69 @@ class MicaApp:
                     cancellation=cancellation,
                     completed_messages_sink=completed_messages.append,
                     completed_tool_presentations_sink=completed_tool_presentations.append,
+                    progress_sink=progress_snapshots.append,
                 )
             ) as events:
                 async for event in events:
-                    if isinstance(
-                        event, RunCompleted
-                    ) and not self._commit_completed_turn(
-                        event,
-                        user_message,
-                        completed_messages,
-                        completed_tool_presentations,
-                    ):
-                        yield RunFailed(
-                            run_id=event.run_id,
-                            seq=event.seq,
-                            category=ErrorCategory.STORAGE,
-                            message=self._storage_failure_message(completed_messages),
-                        )
-                        return
+                    if isinstance(event, RunCompleted):
+                        if not self._commit_completed_turn(
+                            event,
+                            user_message,
+                            completed_messages,
+                            completed_tool_presentations,
+                        ):
+                            yield RunFailed(
+                                run_id=event.run_id,
+                                seq=event.seq,
+                                category=ErrorCategory.STORAGE,
+                                message=self._storage_failure_message(
+                                    completed_messages, progress_snapshots
+                                ),
+                            )
+                            return
+                        submitted = True
+                    elif isinstance(event, (RunCancelled, RunFailed)):
+                        kind = self._checkpoint_kind(event)
+                        if kind is not None:
+                            if not self._commit_checkpoint(
+                                event, user_message, progress_snapshots, kind
+                            ):
+                                yield RunFailed(
+                                    run_id=event.run_id,
+                                    seq=event.seq,
+                                    category=ErrorCategory.STORAGE,
+                                    message=self._storage_failure_message(
+                                        completed_messages, progress_snapshots
+                                    ),
+                                )
+                                return
+                            submitted = True
                     yield event
+        except (asyncio.CancelledError, GeneratorExit):
+            if not submitted and progress_snapshots:
+                snapshot = progress_snapshots[-1]
+                self._commit_checkpoint(
+                    RunCancelled(run_id=snapshot.run_id, seq=0),
+                    user_message,
+                    progress_snapshots,
+                    RunCheckpointKind.CANCELLED,
+                )
+            raise
         finally:
             self._active_run = False
 
     @staticmethod
+    def _checkpoint_kind(event: RunCancelled | RunFailed) -> RunCheckpointKind | None:
+        if isinstance(event, RunCancelled):
+            return RunCheckpointKind.CANCELLED
+        if event.category in _RECOVERABLE_ERROR_CATEGORIES:
+            return RunCheckpointKind.RECOVERABLE_FAILURE
+        return None
+
+    @staticmethod
     def _storage_failure_message(
         completed_messages: list[tuple[Message, ...]],
+        progress_snapshots: list[RunProgressSnapshot] | None = None,
     ) -> str:
         if completed_messages:
             for message in completed_messages[0]:
@@ -216,6 +275,8 @@ class MicaApp:
                     call.name in _SIDE_EFFECT_TOOL_NAMES for call in message.tool_calls
                 ):
                     return _STORAGE_FAILURE_AFTER_TOOL_MESSAGE
+        if progress_snapshots and progress_snapshots[-1].side_effect_tool_started:
+            return _STORAGE_FAILURE_AFTER_TOOL_MESSAGE
         return _STORAGE_FAILURE_MESSAGE
 
     def _commit_completed_turn(
@@ -244,6 +305,33 @@ class MicaApp:
                 tool_presentations=presentations,
             )
             self._session_service.commit_turn(self._session_id, turn)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - persistence boundary is intentionally safe
+            return False
+        return True
+
+    def _commit_checkpoint(
+        self,
+        event: RunCancelled | RunFailed,
+        user_message: Message,
+        progress_snapshots: list[RunProgressSnapshot],
+        kind: RunCheckpointKind,
+    ) -> bool:
+        try:
+            snapshot = progress_snapshots[-1] if progress_snapshots else None
+            if snapshot is None or snapshot.run_id != event.run_id:
+                snapshot = RunProgressSnapshot(event.run_id, ())
+            checkpoint = RunCheckpoint(
+                checkpoint_id=self._checkpoint_id_factory(),
+                run_id=event.run_id,
+                kind=kind,
+                user_message=user_message,
+                recorded_at=self._clock(),
+                progress=snapshot.progress,
+                partial_assistant_message=snapshot.partial_assistant_message,
+            )
+            self._session_service.commit_checkpoint(self._session_id, checkpoint)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - persistence boundary is intentionally safe

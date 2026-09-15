@@ -662,4 +662,14 @@ JSONL 升级到 v4，使用显式 `run_checkpoint` record type 和固定字段�
 
 `StoredSession.entries` 是 Turn/checkpoint 的唯一有序时间线，`turns`/`checkpoints` 仅为过滤视图。恢复上下文保留完整成功轮消息；检查点只投影合法的已完成 assistant/tool 前缀，并把部分输出、未完成状态和未开始工具作为固定 Mica-owned 状态表达，不伪造最终回复或工具结果。工具参数、真实工具结果与展示副本复用集中清洗，用户原始指令保持不改写。
 
-master 复审确认跨步骤中断不变量、真实 v1/v2/v3 兼容 fixture、原子升级失败恢复、恢复上下文和非回显诊断边界成立；本地绝对路径与 HTTP/HTTPS URL 的分类返工也已通过公开清洗、wire、JSONL 与 Provider 上下文验证。最终聚焦组 237 项通过、1 项跳过；全量测试 1750 项通过、2 项跳过。Ruff、格式检查、lock 检查、离线 sdist/wheel 构建和暂存/未暂存 diff 检查均通过。P6-10G1 正式验收完成；P6-10G2 未开始。
+master 复审确认跨步骤中断不变量、真实 v1/v2/v3 兼容 fixture、原子升级失败恢复、恢复上下文和非回显诊断边界成立；本地绝对路径与 HTTP/HTTPS URL 的分类返工也已通过公开清洗、wire、JSONL 与 Provider 上下文验证。最终聚焦组 237 项通过、1 项跳过；全量测试 1750 项通过、2 项跳过。Ruff、格式检查、lock 检查、离线 sdist/wheel 构建和暂存/未暂存 diff 检查均通过。P6-10G1 正式验收完成。
+
+## P6-10G2：运行进度捕获与恢复闭环
+
+本切片在已冻结的 P6-10G1 契约上接通真实运行中断。Engine 用内部 `RunProgressSnapshot` / `progress_sink` 记录已完成模型步骤、真实工具终态、执行中/未开始调用和部分助手文本；成功路径仍只走完成 sink，不发进度快照。工具批次开始时写入 `NOT_STARTED`，只有真正 `ToolStarted` 后才标 `IN_PROGRESS`。权限等待取消因此保持 `NOT_STARTED`；Ask 会先发出 `ToolStarted`，等待取消保持 `IN_PROGRESS`。
+
+MicaApp 在完整成功时提交 `TurnEntry`；`RunCancelled` 与可恢复 `RunFailed`（`AUTHENTICATION`/`RATE_LIMIT`/`TIMEOUT`/`TEMPORARY`/`MALFORMED`）提交一次 `RunCheckpoint`。`LIMIT`/`UNKNOWN`/`STORAGE` 不自动提交可恢复检查点。检查点持久化失败替换为唯一安全 `RunFailed(STORAGE)`，不回显私有路径或凭据。`submitted` 守卫避免 `RunCancelled` 与 `CancelledError`/`aclose` 重复提交。
+
+TUI 历史按 `StoredSession.entries` 投影 Turn/checkpoint/Turn：完成工具复用合法展示快照，未完成工具只显示名称和状态，部分助手用稳定 Markdown 加 Mica-owned `incomplete` 标记，不保留流式光标。检查点 ID 由独立 `checkpoint_id_factory` 生成。后续 Run 通过 `context_snapshot()` 看到原始用户指令和合法已完成前缀，不伪造最终 assistant 或未执行工具结果。
+
+master 复审确认进度快照、独立 checkpoint ID、终态前持久化、Ask/Permission/Bash/多工具批次状态、跨模型恢复、历史 `incomplete` 标记与取消/关闭幂等边界成立。聚焦复验中 App/TUI/集成组合 94 项通过、Engine 70 项通过；全量 `-W error` 1771 项通过、2 项跳过。Ruff、格式检查、lock 检查、离线 sdist/wheel 构建及两项 diff 检查均通过，P6-10G2 正式验收完成。Phase 6 仍等待用户最终真实使用验收，不在此处宣布完成。

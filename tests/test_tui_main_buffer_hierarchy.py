@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,6 +21,13 @@ from test_tui_main_buffer_screen import (
     typed,
 )
 
+from mica_agent.checkpoint_contracts import (
+    RunCheckpoint,
+    RunCheckpointKind,
+    RunCheckpointProgress,
+    RunCheckpointToolProgress,
+    RunCheckpointToolStatus,
+)
 from mica_agent.events import (
     ReasoningDelta,
     RunStarted,
@@ -29,7 +37,9 @@ from mica_agent.events import (
     ToolPrepared,
     ToolStarted,
 )
-from mica_agent.tool_contracts import ToolResultStatus
+from mica_agent.models import Message, MessageRole
+from mica_agent.session_contracts import TurnEntry
+from mica_agent.tool_contracts import ToolCall, ToolResultStatus
 from mica_agent.tool_presentation import (
     ToolPresentationKind,
     ToolPresentationSnapshot,
@@ -41,13 +51,18 @@ from mica_agent.tui.main_buffer.components import (
     ReasoningBlock,
     UserBlock,
 )
-from mica_agent.tui.main_buffer.markdown import MarkdownBlock, StreamingMarkdownBlock
+from mica_agent.tui.main_buffer.markdown import (
+    STREAM_CURSOR,
+    MarkdownBlock,
+    StreamingMarkdownBlock,
+)
 from mica_agent.tui.main_buffer.renderer import (
     MainBufferRenderer,
     Palette,
     cell_len,
     strip_ansi,
 )
+from mica_agent.tui.main_buffer.screen import CHECKPOINT_INCOMPLETE_MARKER
 from mica_agent.tui.main_buffer.terminal import Terminal
 from mica_agent.tui.main_buffer.tool_views import ToolViewFactory
 from mica_agent.tui.models import ReasoningDisplayMode, StartupResourceSnapshot
@@ -389,6 +404,109 @@ def test_history_without_snapshot_uses_recorded_records(tmp_path: Path) -> None:
     assert "tool write · recorded" in rows
     assert "tool custom_tool · recorded" in rows
     assert not any("line 0" in row for row in rows)
+
+
+def test_history_restores_turn_checkpoint_turn_from_entries(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 22, 3, 4, 5, tzinfo=UTC)
+    first = TurnEntry(
+        "turn-1",
+        "run-1",
+        Message(MessageRole.USER, "first prompt"),
+        Message(MessageRole.ASSISTANT, "first answer"),
+        now,
+    )
+    call_ok = ToolCall("call-ok", "read", {"path": "notes.md"})
+    call_open = ToolCall("call-open", "write", {"path": "notes.md"})
+    presentation = ToolPresentationSnapshot(
+        "call-ok",
+        "read",
+        ToolPresentationKind.READ,
+        ToolPresentationStatus.SUCCESS,
+        {"path": "notes.md"},
+    )
+    checkpoint = RunCheckpoint(
+        "checkpoint-1",
+        "run-2",
+        RunCheckpointKind.CANCELLED,
+        Message(MessageRole.USER, "interrupted prompt"),
+        now,
+        progress=(
+            RunCheckpointProgress(
+                assistant_message=Message(MessageRole.ASSISTANT, "working"),
+                tools=(
+                    RunCheckpointToolProgress(
+                        call_ok,
+                        RunCheckpointToolStatus.SUCCESS,
+                        Message(
+                            MessageRole.TOOL,
+                            '{"status":"success"}',
+                            tool_call_id="call-ok",
+                        ),
+                        presentation,
+                    ),
+                    RunCheckpointToolProgress(
+                        call_open, RunCheckpointToolStatus.IN_PROGRESS
+                    ),
+                ),
+            ),
+        ),
+    )
+    unfinished_text = RunCheckpoint(
+        "checkpoint-2",
+        "run-2b",
+        RunCheckpointKind.CANCELLED,
+        Message(MessageRole.USER, "streaming prompt"),
+        now,
+        partial_assistant_message=Message(MessageRole.ASSISTANT, "partial reply"),
+    )
+    empty_checkpoint = RunCheckpoint(
+        "checkpoint-3",
+        "run-2c",
+        RunCheckpointKind.CANCELLED,
+        Message(MessageRole.USER, "empty interrupt"),
+        now,
+    )
+    last = TurnEntry(
+        "turn-3",
+        "run-3",
+        Message(MessageRole.USER, "later prompt"),
+        Message(MessageRole.ASSISTANT, "later answer"),
+        now,
+    )
+    stored = SimpleNamespace(
+        entries=(first, checkpoint, unfinished_text, empty_checkpoint, last),
+        turns=(first, last),
+    )
+    fake = FakeInput()
+    screen = make_screen_with(tmp_path, fake, stored=stored)
+    asyncio.run(_render_once(screen, fake))
+    rows = document(screen)
+    first_user = rows.index("▌ first prompt")
+    interrupted = rows.index("▌ interrupted prompt")
+    streaming = rows.index("▌ streaming prompt")
+    empty = rows.index("▌ empty interrupt")
+    later = rows.index("▌ later prompt")
+    assert first_user < interrupted < streaming < empty < later
+    assert "first answer" in rows
+    assert "later answer" in rows
+    assert any("working" in row for row in rows)
+    assert any("read" in row for row in rows)
+    write_rows = [row for row in rows if "write" in row]
+    assert write_rows
+    assert all("notes.md" not in row for row in write_rows)
+    assert all(
+        "ok" not in row.lower() and "success" not in row.lower() for row in write_rows
+    )
+    assert any("partial reply" in row for row in rows)
+    assert not any("partial reply" in row and STREAM_CURSOR in row for row in rows)
+    incomplete_rows = [
+        index for index, row in enumerate(rows) if CHECKPOINT_INCOMPLETE_MARKER in row
+    ]
+    assert len(incomplete_rows) == 3
+    assert any(interrupted < index < streaming for index in incomplete_rows)
+    assert any(streaming < index < empty for index in incomplete_rows)
+    assert any(empty < index < later for index in incomplete_rows)
+    assert not any("later answer" in row and STREAM_CURSOR in row for row in rows)
 
 
 async def _render_once(screen: MainBufferScreen, fake: FakeInput) -> None:

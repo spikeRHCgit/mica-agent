@@ -19,6 +19,11 @@ from typing import TYPE_CHECKING, Any, Literal
 if TYPE_CHECKING:
     from mica_agent.app import MicaApp
 
+from mica_agent.checkpoint_contracts import (
+    RunCheckpoint,
+    RunCheckpointToolProgress,
+    RunCheckpointToolStatus,
+)
 from mica_agent.events import (
     ErrorCategory,
     PermissionRequested,
@@ -34,6 +39,7 @@ from mica_agent.events import (
     ToolStarted,
     UserInputRequested,
 )
+from mica_agent.session_contracts import TurnEntry
 from mica_agent.tool_contracts import ToolResultStatus
 from mica_agent.tool_presentation import (
     ToolPresentationKind,
@@ -82,6 +88,7 @@ ESCAPE_FLUSH_DELAY = 0.1
 # 内部终止类别到工作状态的映射；真实公共终态事件优先。
 _STOP_REASONS = frozenset({"cancelled"})
 _RECORDED = "recorded"
+CHECKPOINT_INCOMPLETE_MARKER = "incomplete"
 
 # RunFailed 的固定安全文案：只按公共 ErrorCategory 映射，绝不拼接原始 message。
 _FAILURE_MESSAGES: dict[ErrorCategory, str] = {
@@ -325,24 +332,64 @@ class MainBufferScreen:
         stored = self._stored_session
         if stored is None:
             return
-        for turn in getattr(stored, "turns", ()):
-            renderer.append(user_block(turn.user_message.content))
-            presentations = {
-                presentation.call_id: presentation
-                for presentation in turn.tool_presentations
-            }
-            for message in turn.intermediate_messages:
-                for call in message.tool_calls:
-                    renderer.append(
-                        self._history_tool_block(call, presentations.get(call.call_id))
-                    )
-            if turn.assistant_message.content:
-                renderer.append(MarkdownBlock(turn.assistant_message.content))
+        entries = getattr(stored, "entries", None)
+        if entries is None:
+            entries = getattr(stored, "turns", ())
+        for entry in entries:
+            if isinstance(entry, RunCheckpoint):
+                self._append_checkpoint_history(entry)
+                continue
+            if isinstance(entry, TurnEntry) or hasattr(entry, "assistant_message"):
+                self._append_turn_history(entry)
+
+    def _append_turn_history(self, turn: object) -> None:
+        renderer = self._renderer
+        assert renderer is not None
+        renderer.append(user_block(turn.user_message.content))
+        presentations = {
+            presentation.call_id: presentation
+            for presentation in getattr(turn, "tool_presentations", ())
+        }
+        for message in getattr(turn, "intermediate_messages", ()):
+            for call in getattr(message, "tool_calls", ()):
+                renderer.append(
+                    self._history_tool_block(call, presentations.get(call.call_id))
+                )
+        assistant = getattr(turn, "assistant_message", None)
+        content = getattr(assistant, "content", "")
+        if content:
+            renderer.append(MarkdownBlock(content))
+
+    def _append_checkpoint_history(self, checkpoint: RunCheckpoint) -> None:
+        renderer = self._renderer
+        assert renderer is not None
+        renderer.append(user_block(checkpoint.user_message.content))
+        for step in checkpoint.progress:
+            if step.assistant_message is not None and step.assistant_message.content:
+                renderer.append(MarkdownBlock(step.assistant_message.content))
+            for item in step.tools:
+                renderer.append(self._checkpoint_tool_block(item))
+        if checkpoint.partial_assistant_message is not None:
+            renderer.append(MarkdownBlock(checkpoint.partial_assistant_message.content))
+        renderer.append(Block("muted", CHECKPOINT_INCOMPLETE_MARKER))
+
+    def _checkpoint_tool_block(self, item: RunCheckpointToolProgress) -> BlockLike:
+        if item.status in {
+            RunCheckpointToolStatus.SUCCESS,
+            RunCheckpointToolStatus.FAILED,
+        }:
+            return self._history_tool_block(item.call, item.presentation)
+        state = {
+            RunCheckpointToolStatus.IN_PROGRESS: "running",
+            RunCheckpointToolStatus.NOT_STARTED: "pending",
+        }[item.status]
+        name = sanitize_scalar(item.call.name, fallback="tool")
+        return Block("muted", f"tool {name} · {state}")
 
     def _history_tool_block(
         self, call: object, presentation: ToolPresentationSnapshot | None
     ) -> BlockLike:
-        """历史工具记录：v3 专用视图，缺少快照时退化为中性记录。"""
+        """历史工具记录：有合法快照时复用专用视图，否则退化为中性记录。"""
         name = getattr(call, "name", None)
         if isinstance(
             presentation, ToolPresentationSnapshot
@@ -954,4 +1001,9 @@ class MainBufferScreen:
         return self._elapsed
 
 
-__all__ = ["MainBufferScreen", "Mode", "Status"]
+__all__ = [
+    "CHECKPOINT_INCOMPLETE_MARKER",
+    "MainBufferScreen",
+    "Mode",
+    "Status",
+]

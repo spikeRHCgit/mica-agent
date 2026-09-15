@@ -18,6 +18,7 @@ from prompt_toolkit.keys import Keys
 
 from mica_agent.app import MicaApp
 from mica_agent.cancellation import CancellationToken
+from mica_agent.checkpoint_contracts import RunCheckpointKind
 from mica_agent.context_builder import ContextBuilder
 from mica_agent.interactions import (
     AskOption,
@@ -26,6 +27,7 @@ from mica_agent.interactions import (
     UserInputResponse,
 )
 from mica_agent.jsonl_store import JsonlSessionStore
+from mica_agent.models import MessageRole
 from mica_agent.permissions import PermissionMode
 from mica_agent.policy import PolicyEngine, PolicyInput, PolicyOperation
 from mica_agent.providers import Finish, ProviderEvent, ProviderRequest
@@ -507,7 +509,14 @@ def test_escape_cancels_active_run_without_committing_turn(tmp_path: Path) -> No
                 lambda: screen.status == "stop" and screen.mode == "idle",
                 message="stop",
             )
-            assert app.history == ()
+            history = app.history
+            assert history[0].role is MessageRole.USER
+            assert history[0].content == "cancel me"
+            assert history[-1].role is MessageRole.SYSTEM
+            assert "cancelled" in history[-1].content
+            stored = app._session_service.load_session(app.session_id)
+            assert stored.turns == ()
+            assert stored.checkpoints[0].kind is RunCheckpointKind.CANCELLED
             assert screen.composer_text == ""
             frame = screen.renderer.frame()
             assert any("stop" in line for line in frame)
@@ -717,7 +726,12 @@ def test_escape_during_permission_cancels_run(tmp_path: Path) -> None:
                 message="stop",
             )
             assert calls == []
-            assert app.history == ()
+            history = app.history
+            assert history[0].content == "write it"
+            assert "cancelled" in history[-1].content
+            stored = app._session_service.load_session(app.session_id)
+            assert stored.turns == ()
+            assert stored.checkpoints[0].kind is RunCheckpointKind.CANCELLED
 
             fake.feed(CTRL_C)
             fake.feed(CTRL_C)
@@ -1174,7 +1188,12 @@ def test_lone_escape_after_flush_cancels_the_real_run(tmp_path: Path) -> None:
             # Esc 只取消 Run：不伪造拒绝回答，也不产生 ask 工具结果。
             assert broker.responses == []
             assert calls == []
-            assert app.history == ()
+            history = app.history
+            assert history[0].content == "run ask"
+            assert "cancelled" in history[-1].content
+            stored = app._session_service.load_session(app.session_id)
+            assert stored.turns == ()
+            assert stored.checkpoints[0].kind is RunCheckpointKind.CANCELLED
 
             fake.feed(CTRL_C, CTRL_C)
             await asyncio.wait_for(harness.task, timeout=TIMEOUT)

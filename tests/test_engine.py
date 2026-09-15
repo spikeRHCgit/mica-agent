@@ -13,7 +13,11 @@ from pathlib import Path
 import pytest
 
 from mica_agent.cancellation import CancellationToken
-from mica_agent.engine import AgentEngine
+from mica_agent.checkpoint_contracts import (
+    RunCheckpointProgress,
+    RunCheckpointToolStatus,
+)
+from mica_agent.engine import AgentEngine, RunProgressSnapshot
 from mica_agent.events import (
     EngineEvent,
     ErrorCategory,
@@ -1394,6 +1398,166 @@ def test_cancellation_token_stops_provider_and_emits_one_run_cancelled() -> None
     assert completed == []
 
 
+def test_progress_sink_captures_partial_text_before_cancel() -> None:
+    class CancellableProvider:
+        async def stream(
+            self, request: ProviderRequest
+        ) -> AsyncIterator[ProviderEvent]:
+            yield ProviderTextDelta("hello ")
+            yield ProviderTextDelta("world")
+            await asyncio.sleep(30)
+            yield Finish()
+
+    token = CancellationToken()
+    engine = AgentEngine(CancellableProvider(), run_id_factory=lambda: "run-progress")
+    snapshots: list[RunProgressSnapshot] = []
+
+    async def consume() -> list[EngineEvent]:
+        events: list[EngineEvent] = []
+        async for event in engine.run(
+            _request(),
+            cancellation=token,
+            progress_sink=snapshots.append,
+        ):
+            events.append(event)
+            if isinstance(event, TextDelta) and event.text == "world":
+                token.cancel()
+        return events
+
+    events = asyncio.run(asyncio.wait_for(consume(), timeout=1.0))
+    assert isinstance(events[-1], RunCancelled)
+    assert len(snapshots) == 1
+    snapshot = snapshots[0]
+    assert snapshot.run_id == "run-progress"
+    assert snapshot.progress == ()
+    assert snapshot.partial_assistant_message == Message(
+        MessageRole.ASSISTANT, "hello world"
+    )
+    assert snapshot.side_effect_tool_started is False
+
+
+def test_progress_sink_records_complete_prefix_and_unstarted_tool() -> None:
+    first = ToolCall("call-a", "lookup", {"query": "one"})
+    second = ToolCall("call-b", "lookup", {"query": "two"})
+    token = CancellationToken()
+    provider = _ScriptedProvider(
+        [
+            [
+                ProviderTextDelta("working"),
+                Finish(tool_calls=(first, second)),
+            ]
+        ]
+    )
+    executor, _ = _lookup_executor()
+    engine = AgentEngine(
+        provider, tool_executor=executor, run_id_factory=lambda: "run-tools-progress"
+    )
+    snapshots: list[RunProgressSnapshot] = []
+
+    async def consume() -> list[EngineEvent]:
+        events: list[EngineEvent] = []
+        async for event in engine.run(
+            ProviderRequest(
+                "test-model",
+                (Message(MessageRole.USER, "inspect"),),
+                (_tool_spec(),),
+            ),
+            cancellation=token,
+            progress_sink=snapshots.append,
+        ):
+            events.append(event)
+            if isinstance(event, ToolFinished) and event.call_id == "call-a":
+                token.cancel()
+        return events
+
+    events = asyncio.run(consume())
+    assert isinstance(events[-1], RunCancelled)
+    assert len(snapshots) == 1
+    snapshot = snapshots[0]
+    assert len(snapshot.progress) == 1
+    step = snapshot.progress[0]
+    assert isinstance(step, RunCheckpointProgress)
+    assert step.assistant_message == Message(MessageRole.ASSISTANT, "working")
+    assert [item.call for item in step.tools] == [first, second]
+    assert step.tools[0].status is RunCheckpointToolStatus.SUCCESS
+    assert step.tools[0].result is not None
+    assert step.tools[0].presentation is not None
+    assert step.tools[1].status is RunCheckpointToolStatus.NOT_STARTED
+    assert step.tools[1].result is None
+    assert snapshot.partial_assistant_message is None
+
+
+def test_progress_sink_failure_is_one_safe_failed_terminal() -> None:
+    class CancellableProvider:
+        async def stream(
+            self, request: ProviderRequest
+        ) -> AsyncIterator[ProviderEvent]:
+            yield ProviderTextDelta("partial")
+            await asyncio.sleep(30)
+            yield Finish()
+
+    def fail_sink(snapshot: RunProgressSnapshot) -> None:
+        raise RuntimeError("sk-private progress traceback")
+
+    token = CancellationToken()
+    engine = AgentEngine(
+        CancellableProvider(), run_id_factory=lambda: "run-progress-fail"
+    )
+
+    async def consume() -> list[EngineEvent]:
+        events: list[EngineEvent] = []
+        async for event in engine.run(
+            _request(), cancellation=token, progress_sink=fail_sink
+        ):
+            events.append(event)
+            if isinstance(event, TextDelta):
+                token.cancel()
+        return events
+
+    events = asyncio.run(asyncio.wait_for(consume(), timeout=1.0))
+    assert isinstance(events[-1], RunFailed)
+    assert events[-1].message == "progress snapshot handling failed"
+    assert "private" not in events[-1].message
+    assert not any(isinstance(event, RunCompleted) for event in events)
+    assert (
+        len([event for event in events if isinstance(event, (RunFailed, RunCancelled))])
+        == 1
+    )
+
+
+def test_completed_run_does_not_emit_progress_snapshot() -> None:
+    engine = _engine([ProviderTextDelta("final answer"), Finish()])
+    snapshots: list[RunProgressSnapshot] = []
+    completed: list[tuple[Message, ...]] = []
+
+    events = asyncio.run(
+        _collect_with_sinks(
+            engine,
+            completed_messages_sink=completed.append,
+            progress_sink=snapshots.append,
+        )
+    )
+    assert isinstance(events[-1], RunCompleted)
+    assert completed == [(Message(MessageRole.ASSISTANT, "final answer"),)]
+    assert snapshots == []
+
+
+async def _collect_with_sinks(
+    engine: AgentEngine,
+    *,
+    completed_messages_sink=None,
+    progress_sink=None,
+) -> list[EngineEvent]:
+    return [
+        event
+        async for event in engine.run(
+            _request(),
+            completed_messages_sink=completed_messages_sink,
+            progress_sink=progress_sink,
+        )
+    ]
+
+
 def test_permission_wait_cancellation_does_not_start_handler() -> None:
     spec = ToolSpec("write", "Write", {"type": "object"})
     registry = ToolRegistry()
@@ -1414,6 +1578,7 @@ def test_permission_wait_cancellation_does_not_start_handler() -> None:
     provider = _ScriptedProvider(
         [[Finish(tool_calls=(ToolCall("call-1", "write", {}),))]]
     )
+    snapshots: list[RunProgressSnapshot] = []
     engine = AgentEngine(
         provider,
         tool_executor=ToolExecutor(
@@ -1432,7 +1597,9 @@ def test_permission_wait_cancellation_does_not_start_handler() -> None:
 
     async def scenario() -> list[EngineEvent]:
         events: list[EngineEvent] = []
-        async for event in engine.run(request, cancellation=token):
+        async for event in engine.run(
+            request, cancellation=token, progress_sink=snapshots.append
+        ):
             events.append(event)
             if isinstance(event, PermissionRequested):
                 token.cancel()
@@ -1443,6 +1610,146 @@ def test_permission_wait_cancellation_does_not_start_handler() -> None:
     assert calls == 0
     assert isinstance(events[-1], RunCancelled)
     assert broker.pending_count == 0
+    assert len(snapshots) == 1
+    assert (
+        snapshots[0].progress[0].tools[0].status is RunCheckpointToolStatus.NOT_STARTED
+    )
+    assert snapshots[0].progress[0].tools[0].result is None
+    assert snapshots[0].side_effect_tool_started is False
+
+
+def test_progress_sink_keeps_ask_wait_in_progress() -> None:
+    spec = ToolSpec("ask", "Ask", {"type": "object", "required": ["question"]})
+    registry = ToolRegistry()
+    broker = InteractionBroker()
+
+    async def handler(
+        request: ToolRequest, cancellation: CancellationToken
+    ) -> ToolResult:
+        response = await broker(
+            request.call_id,
+            AskPrompt(
+                request.arguments["question"],
+                options=(AskOption("Yes"), AskOption("No")),
+            ),
+            cancellation,
+        )
+        return ToolResult(
+            request.call_id,
+            request.name,
+            ToolResultStatus.SUCCESS,
+            "answer received",
+            response.answer,
+        )
+
+    registry.register(spec, handler)
+    token = CancellationToken()
+    snapshots: list[RunProgressSnapshot] = []
+    engine = AgentEngine(
+        _ScriptedProvider(
+            [
+                [
+                    Finish(
+                        tool_calls=(
+                            ToolCall("call-ask", "ask", {"question": "Continue?"}),
+                        )
+                    )
+                ]
+            ]
+        ),
+        tool_executor=ToolExecutor(
+            registry,
+            PolicyEngine(PermissionMode.DEFAULT),
+            interaction_broker=broker,
+        ),
+        run_id_factory=lambda: "run-ask-progress",
+    )
+    request = ProviderRequest(
+        "test-model", (Message(MessageRole.USER, "ask"),), (spec,)
+    )
+
+    async def scenario() -> list[EngineEvent]:
+        events: list[EngineEvent] = []
+        async for event in engine.run(
+            request, cancellation=token, progress_sink=snapshots.append
+        ):
+            events.append(event)
+            if isinstance(event, UserInputRequested):
+                token.cancel()
+        return events
+
+    events = asyncio.run(scenario())
+    assert isinstance(events[-1], RunCancelled)
+    assert len(snapshots) == 1
+    assert (
+        snapshots[0].progress[0].tools[0].status is RunCheckpointToolStatus.IN_PROGRESS
+    )
+    assert snapshots[0].progress[0].tools[0].result is None
+
+
+def test_progress_sink_records_mixed_three_tool_batch() -> None:
+    first = ToolCall("call-a", "lookup", {"query": "one"})
+    second = ToolCall("call-b", "lookup", {"query": "two"})
+    third = ToolCall("call-c", "lookup", {"query": "three"})
+    token = CancellationToken()
+    registry = ToolRegistry()
+
+    async def handler(
+        request: ToolRequest, cancellation: CancellationToken
+    ) -> ToolResult:
+        if request.call_id == "call-b":
+            await cancellation.wait()
+            cancellation.raise_if_cancelled()
+        cancellation.raise_if_cancelled()
+        return ToolResult(
+            request.call_id,
+            request.name,
+            ToolResultStatus.SUCCESS,
+            "lookup complete",
+        )
+
+    registry.register(_tool_spec(), handler)
+    snapshots: list[RunProgressSnapshot] = []
+    engine = AgentEngine(
+        _ScriptedProvider([[Finish(tool_calls=(first, second, third))]]),
+        tool_executor=ToolExecutor(
+            registry,
+            PolicyEngine(PermissionMode.DEFAULT),
+            policy_input_factory=lambda request, spec: PolicyInput(
+                request.name, PolicyOperation.READ, False, False
+            ),
+        ),
+        run_id_factory=lambda: "run-three-tools",
+    )
+
+    async def scenario() -> list[EngineEvent]:
+        events: list[EngineEvent] = []
+        async for event in engine.run(
+            ProviderRequest(
+                "test-model",
+                (Message(MessageRole.USER, "inspect"),),
+                (_tool_spec(),),
+            ),
+            cancellation=token,
+            progress_sink=snapshots.append,
+        ):
+            events.append(event)
+            if isinstance(event, ToolStarted) and event.call_id == "call-b":
+                token.cancel()
+        return events
+
+    events = asyncio.run(scenario())
+    assert isinstance(events[-1], RunCancelled)
+    assert len(snapshots) == 1
+    tools = snapshots[0].progress[0].tools
+    assert [item.call.call_id for item in tools] == ["call-a", "call-b", "call-c"]
+    assert tools[0].status is RunCheckpointToolStatus.SUCCESS
+    assert tools[0].result is not None
+    assert tools[1].status is RunCheckpointToolStatus.IN_PROGRESS
+    assert tools[1].result is None
+    assert tools[2].status is RunCheckpointToolStatus.NOT_STARTED
+    assert tools[2].result is None
+    assert snapshots[0].partial_assistant_message is None
 
 
 def test_consumer_closing_engine_cleans_provider_stream() -> None:
@@ -1654,8 +1961,12 @@ def test_unexpected_provider_exception_maps_to_safe_unknown() -> None:
 class _HangingProvider:
     """产出首个事件后挂起，等待外部取消。"""
 
+    def __init__(self) -> None:
+        self.emitted = asyncio.Event()
+
     async def stream(self, request: ProviderRequest) -> AsyncIterator[ProviderEvent]:
         yield ProviderTextDelta(text="first")
+        self.emitted.set()
         await asyncio.sleep(30)
         yield Finish()
 
@@ -1703,7 +2014,8 @@ def test_external_task_cancellation_after_reasoning_closes_stream() -> None:
 
 
 def test_cancellation_maps_to_single_runcancelled() -> None:
-    engine = AgentEngine(provider=_HangingProvider(), run_id_factory=lambda: "run-test")
+    provider = _HangingProvider()
+    engine = AgentEngine(provider=provider, run_id_factory=lambda: "run-test")
     collected: list[EngineEvent] = []
 
     async def consume() -> None:
@@ -1712,7 +2024,7 @@ def test_cancellation_maps_to_single_runcancelled() -> None:
 
     async def main() -> None:
         task = asyncio.create_task(consume())
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(provider.emitted.wait(), timeout=1.0)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -2379,6 +2691,50 @@ def test_real_bash_engine_token_cancel_reaps_after_first_delta(
     assert isinstance(events[-2], ToolFinished)
     assert events[-2].status is ToolResultStatus.CANCELLED
     assert [event.seq for event in events] == list(range(6))
+
+
+def test_progress_sink_keeps_bash_in_progress_after_output(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    executor = _runtime_bash_executor(workspace)
+    command = (
+        "printf 'first line\\n'; "
+        "while [ ! -f release.marker ]; do sleep 0.01; done; "
+        "printf 'second line\\n'"
+    )
+    call = ToolCall("call-bash-progress", "bash", {"command": command})
+    token = CancellationToken()
+    snapshots: list[RunProgressSnapshot] = []
+    engine = AgentEngine(
+        _ScriptedProvider([[Finish(tool_calls=(call,))]]),
+        tool_executor=executor,
+        run_id_factory=lambda: "run-bash-progress",
+    )
+    request = ProviderRequest(
+        "test-model",
+        (Message(MessageRole.USER, "run"),),
+        executor.tool_specs,
+    )
+
+    async def scenario() -> list[EngineEvent]:
+        events: list[EngineEvent] = []
+        async for event in engine.run(
+            request, cancellation=token, progress_sink=snapshots.append
+        ):
+            events.append(event)
+            if isinstance(event, ToolOutputDelta):
+                token.cancel()
+        return events
+
+    events = asyncio.run(scenario())
+    assert isinstance(events[-1], RunCancelled)
+    assert len(snapshots) == 1
+    tool = snapshots[0].progress[0].tools[0]
+    assert tool.status is RunCheckpointToolStatus.IN_PROGRESS
+    assert tool.result is None
+    assert snapshots[0].side_effect_tool_started is True
 
 
 def test_real_bash_engine_external_cancel_reaps_after_first_delta(
