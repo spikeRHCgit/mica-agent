@@ -1,7 +1,7 @@
 # Mica 第三阶段：标准会话、JSONL 持久化与上下文管理
 
 > 状态：已完成
-> 上位约束：`PROJECT_PLAN.md`
+> 上位约束：`docs/PROJECT_PLAN.md`
 > 前置阶段：`docs/phase2_plan.md`
 
 ## 1. 阶段目标

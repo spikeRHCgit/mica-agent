@@ -1,7 +1,7 @@
 # Mica 第四阶段：仓库收口与旧实现清理
 
 > 状态：已完成
-> 上位约束：`PROJECT_PLAN.md`
+> 上位约束：`docs/PROJECT_PLAN.md`
 > 前置阶段：`docs/phase3_plan.md`
 
 ## 1. 阶段目标

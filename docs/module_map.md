@@ -3,7 +3,7 @@
 ## 使用方式
 
 本文用于按文件快速定位 Mica 当前源码。每个词条只说明一个实际存在的源码或包资源文件；
-阶段目标和进度以 `PROJECT_PLAN.md`、对应 `docs/phaseN_plan.md` 为准，具体行为仍以代码和测试
+阶段目标和进度以 `docs/PROJECT_PLAN.md`、对应 `docs/phaseN_plan.md` 为准，具体行为仍以代码和测试
 为准。新增、删除、重命名源码文件时，同一任务必须同步更新本文。
 
 `__pycache__/`、wheel、sdist、测试缓存和虚拟环境属于生成物，不进入技术地图。

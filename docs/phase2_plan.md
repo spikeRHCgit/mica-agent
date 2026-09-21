@@ -1,7 +1,7 @@
 # Mica 第二阶段：Provider、Engine 与基础 CLI 对话闭环
 
 > 状态：已完成
-> 上位约束：`PROJECT_PLAN.md`
+> 上位约束：`docs/PROJECT_PLAN.md`
 > 前置阶段：`docs/phase1_plan.md`
 
 ## 1. 阶段目标

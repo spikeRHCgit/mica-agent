@@ -1,7 +1,7 @@
 # Mica 第五阶段：工具执行、权限控制与统一取消
 
 > 状态：已完成，P5-01～P5-14 均已通过 master 验收
-> 上位约束：`PROJECT_PLAN.md`
+> 上位约束：`docs/PROJECT_PLAN.md`
 > 前置阶段：`docs/phase4_plan.md`
 > 实施规则：按第 7 节依赖顺序逐项实施；未经 master 验收，不提前进入后续任务。
 
@@ -345,7 +345,7 @@ git diff --check
 
 ### 10.1 命令工具名称
 
-公开工具名固定为 `bash`，与 `PROJECT_PLAN.md` 保持一致。Windows 端必须显式发现并启动
+公开工具名固定为 `bash`，与 `docs/PROJECT_PLAN.md` 保持一致。Windows 端必须显式发现并启动
 受支持的 Bash 环境；缺少可用 Bash 时返回安全、可操作的错误，不以 PowerShell 冒充
 `bash`，也不使用 Python 隐式 `shell=True`。具体发现顺序和可注入测试边界由 P5-04 确定。
 

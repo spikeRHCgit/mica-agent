@@ -1,7 +1,7 @@
 # Mica 第一阶段：工程地基与独立包边界
 
 > 状态：已完成
-> 上位约束：`PROJECT_PLAN.md`
+> 上位约束：`docs/PROJECT_PLAN.md`
 
 ## 1. 阶段目标
 

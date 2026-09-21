@@ -1,7 +1,7 @@
 # Mica 第六阶段：终端交互前端
 
 > 状态：已完成；P6-01A～P6-11C、P6-10G1～G2 与 P6-11C-MR3 均已通过自动化、构建、master 复审和用户真实 Windows Terminal 验收
-> 上位约束：`PROJECT_PLAN.md`
+> 上位约束：`docs/PROJECT_PLAN.md`
 > 视觉与交互事实源：`docs/tui_design.md`
 > 前置阶段：`docs/phase5_plan.md`
 > 实施原则：任务单默认覆盖一个可独立验收、提交和回退的中等体量完整功能块；只有跨越多层高风险契约、持久化迁移或明显不同的运行链路时才继续拆分。
