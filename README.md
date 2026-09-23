@@ -2,7 +2,7 @@
 
 Mica 是一个面向个人开发者的轻量 Agent 基座。
 
-> 当前状态：Phase 1～6 已完成；主缓冲区终端前端、基础文字降级 CLI、五个内置工具、权限确认、交互式 ask、持久化会话、中断进度恢复和仓库收口均已交付。`mica cli` 默认启动主缓冲区终端界面；`mica cli --plain` 使用基础文字界面。两种入口都按当前工作区创建、恢复和继续会话。
+> 当前状态：Phase 1～5 已完成；主缓冲区终端前端、基础文字降级 CLI、五个内置工具、权限确认、交互式 ask、持久化会话和中断进度恢复均已交付。`mica cli` 默认启动主缓冲区终端界面；`mica cli --plain` 使用基础文字界面。两种入口都按当前工作区创建、恢复和继续会话。
 
 ## 当前可用能力
 
@@ -91,8 +91,8 @@ uv build --offline
 - `docs/PROJECT_PLAN.md`：Mica 的正式项目方向和长期架构边界。
 - `docs/module_map.md`：按单个源码文件说明职责的技术地图，用于快速定位修改入口。
 - `docs/tui_design.md`：已经确认的终端前端交互、视觉和动态呈现规则。
-- `docs/phase1_plan.md`：第一阶段的范围、验收标准和未包含内容。
-- `docs/phase2_plan.md`：第二阶段（Engine、Provider、App、CLI 闭环）的范围与验收标准。
+- `docs/phase1_plan.md`：第一阶段的工程地基、已交付能力与验收结论。
+- `docs/phase2_plan.md`：第二阶段基础对话闭环的已交付能力与验收结论。
 - `docs/phase3_plan.md`：第三阶段（工作区隔离、JSONL 会话、恢复与上下文）的范围与验收标准。
-- `docs/phase4_plan.md`：第四阶段（仓库收口与旧实现清理）的范围与验收标准。
-- `docs/phase5_plan.md`：已完成并通过验收的第五阶段（工具执行、权限控制与统一取消）计划。
+- `docs/phase4_plan.md`：已完成并通过验收的第四阶段（工具执行、权限控制与统一取消）计划。
+- `docs/phase5_plan.md`：已完成并通过验收的第五阶段（主缓冲区终端交互与中断恢复）计划。

@@ -1,4 +1,4 @@
-"""主缓冲区 Markdown 渲染测试（P6-11B §4.4 / §9）。
+"""主缓冲区 Markdown 渲染测试（P5-11B §4.4 / §9）。
 
 覆盖：结构要素、Unicode 与宽度、流式增量与终态稳定渲染、resize 重排、
 NO_COLOR 结构可读性，以及终端注入与超链接防护。
@@ -224,7 +224,7 @@ def test_preview_and_final_rendering_share_the_same_source() -> None:
     assert visible(preview)[0].replace("▌", "") == visible(final)[0]
 
 
-# -- P6-11B 返工：累计源上限（跨多个 delta） --------------------------------
+# -- P5-11B 返工：累计源上限（跨多个 delta） --------------------------------
 
 
 def test_streaming_source_is_capped_across_many_deltas() -> None:
@@ -279,7 +279,7 @@ def test_capped_streaming_block_still_cleans_each_delta() -> None:
     assert block.source.startswith("恶意 ")
 
 
-# -- P6-11B 返工：Rich 异常降级逐物理行 -----------------------------------
+# -- P5-11B 返工：Rich 异常降级逐物理行 -----------------------------------
 
 
 def _boom(*args: object, **kwargs: object) -> object:

@@ -275,7 +275,7 @@ def test_virtual_terminal_keeps_wide_characters_in_one_row() -> None:
     assert terminal.cursor_cell() == (1, 0)
 
 
-# -- P6-11C-MR2：超高交互面板在真实物理帧里的可见性 ---------------------------
+# -- P5-11C-MR2：超高交互面板在真实物理帧里的可见性 ---------------------------
 
 RUN = "synth-run"
 DOWN = KeyPress(Keys.Down, _ESC + "[B")

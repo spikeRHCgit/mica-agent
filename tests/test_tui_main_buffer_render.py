@@ -1,4 +1,4 @@
-"""P6-11A 主缓冲区渲染、编辑与交互模式单元测试。"""
+"""P5-11A 主缓冲区渲染、编辑与交互模式单元测试。"""
 
 from __future__ import annotations
 
@@ -483,7 +483,7 @@ def test_interaction_panels_fit_declared_width(width: int) -> None:
     assert any("Do you want to proceed?" in line for line in permission_lines)
 
 
-# -- P6-11C-MR2：超高交互面板的紧凑降级 --------------------------------------
+# -- P5-11C-MR2：超高交互面板的紧凑降级 --------------------------------------
 
 
 def tall_ask_prompt() -> AskPrompt:
@@ -605,7 +605,7 @@ def test_panel_budget_never_drops_the_question_or_the_hint() -> None:
     assert tight.lines[tight.selected_row].startswith("›")
 
 
-# -- P6-11C-MR2 返工：选中行是窗口选择的硬约束 --------------------------------
+# -- P5-11C-MR2 返工：选中行是窗口选择的硬约束 --------------------------------
 
 
 @pytest.mark.parametrize("limit", [1, 2, 3])

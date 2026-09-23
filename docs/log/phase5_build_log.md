@@ -1,4 +1,4 @@
-# P6-01A 启动资源快照契约
+# P5-01A 启动资源快照契约
 
 ## 任务目标
 
@@ -26,9 +26,9 @@
 
 ## 后续状态
 
-P6-01B 尚未开始。
+P5-01B 尚未开始。
 
-# P6-01B Textual 外壳与主题
+# P5-01B Textual 外壳与主题
 
 ## 任务目标
 
@@ -52,11 +52,11 @@ Textual headless/Pilot 测试覆盖外壳挂载退出、区域唯一性与顺序
 
 ## 后续边界
 
-本切片未接入 CLI、会话、MicaApp、Engine、Provider、工具、权限、ask 或真实输入。P6-01C 尚未开始。
+本切片未接入 CLI、会话、MicaApp、Engine、Provider、工具、权限、ask 或真实输入。P5-01C 尚未开始。
 
-# P6-01C Logo 与启动资源区
+# P5-01C Logo 与启动资源区
 
-## P6-01C1 Logo 组件边界
+## P5-01C1 Logo 组件边界
 
 `MicaLogo` 是只属于 TUI 的静态只读组件，不依赖会话、应用、Engine、Provider、工具执行器、工作区或配置，也不读取文件、创建目录、启动任务、Timer、Worker、动画或子进程。
 
@@ -72,25 +72,25 @@ Logo 使用组件可用宽度选择三个稳定档位：宽度不小于 54 时�
 
 唯一的 `#mica-logo` 是可滚动 `#transcript` 的第一个子节点，不是 Screen 的直接子节点；Logo 过高时由 transcript 的滚动区域容纳，不改变 Screen 直属的 work-status 和底部 composer。wheel 包含 `mica_agent/tui/logo.py`，安装态显式导入 `MicaTuiApp` 的入口保持不变。
 
-## P6-01C2 启动资源快照
+## P5-01C2 启动资源快照
 
 `StartupResourceSnapshot` 是 TUI 专用的 frozen、slots 不可变视图状态，保存系统提示词稳定名称、按 global/workspace 固定顺序排列的 `AgentFileSource`，以及保持注入顺序的工具、Skill 和扩展名称。列表输入在构造时复制为元组；名称只接受安全的单行非空文本。校验错误使用固定字段说明，不回显输入值、路径、内容、对象表示或原始异常。未来装配层直接把 `ContextBuildResult.loaded_sources` 注入 `agent_sources`，TUI 不调用 ContextBuilder，也不重新读取文件。
 
-## P6-01C2 只读资源区
+## P5-01C2 只读资源区
 
 `MicaTuiApp` 新增可选 `startup_resources` 关键字入口，`None` 规范化为空快照，既有无参和 `ansi_color` 构造保持有效。`#startup-resources` 是 `#transcript` 中紧随唯一 Logo 的第二个子节点，稳定显示系统提示词名称、AGENTS 来源、工具、Skill 和扩展；空值明确显示 `none`，名称按纯文本渲染。资源区与 Logo 一起由 transcript 负责滚动，不覆盖唯一 work-status 或底部 composer。
 
-## P6-01C 安全与集成边界
+## P5-01C 安全与集成边界
 
-快照和视图不携带或显示系统提示词正文、AGENTS 正文、绝对路径、诊断对象、traceback 或运行时对象，也不创建任务、Timer、Worker、线程或子进程。P6-01C2 仍未连接 CLI、真实 ContextBuilder 调用、会话、MicaApp、Engine、Provider、工具执行器或 Run；P6-02A 尚未开始。
+快照和视图不携带或显示系统提示词正文、AGENTS 正文、绝对路径、诊断对象、traceback 或运行时对象，也不创建任务、Timer、Worker、线程或子进程。P5-01C2 仍未连接 CLI、真实 ContextBuilder 调用、会话、MicaApp、Engine、Provider、工具执行器或 Run；P5-02A 尚未开始。
 
-# P6-02A1 Composer 输入与提交契约
+# P5-02A1 Composer 输入与提交契约
 
 `MicaComposer` 基于 Textual 的多行编辑组件，保持固定基础高度和显示层软换行；普通 Enter 对非空白原文发出一个只读 `Submitted.text` 快照并清空输入，Shift+Enter 在光标处插入真实换行。有效提交不裁剪空格、不重排文本或规范化 Unicode，空白输入只清空，不产生提交。
 
-Composer 仍是 Screen 的第三个直接子节点并保持底部焦点；本切片只产生 TUI 内部消息，不连接 CLI、MicaApp、会话、Engine、Provider 或 Run，也未实现粘贴摘要、用户消息卡片、自动增长或内部溢出提示。P6-02A2 与 P6-02B 尚未开始。
+Composer 仍是 Screen 的第三个直接子节点并保持底部焦点；本切片只产生 TUI 内部消息，不连接 CLI、MicaApp、会话、Engine、Provider 或 Run，也未实现粘贴摘要、用户消息卡片、自动增长或内部溢出提示。P5-02A2 与 P5-02B 尚未开始。
 
-# P6-02A2a Composer 动态高度与内部滚动
+# P5-02A2a Composer 动态高度与内部滚动
 
 `MicaComposer` 复用 Textual 文本区域自身的显示排版结果：`content_region.height` 等于其公开的显示文档行数，`height: auto` 让组件高度随内容行数增长；组件保留主题既有的一行边界，因此空输入时内容一行、组件三行。真实换行、软换行及中文/Unicode 宽字符都按 Textual 实际显示宽度计入高度，不向原文插入真实换行。
 
@@ -98,7 +98,7 @@ Composer 仍是 Screen 的第三个直接子节点并保持底部焦点；本切
 
 对同一输入状态连续多次刷新后高度保持稳定，不会 1/2 行振荡；终端 resize 时更新布局而不重建组件、不清空文本、不改变焦点或移动父节点。
 
-# P6-02B 完整输入体验与用户消息
+# P5-02B 完整输入体验与用户消息
 
 本节完成输入溢出提示、长粘贴折叠原子片段、原文还原提交与用户消息卡片，闭环了 Composer 的完整输入体验：
 
@@ -107,9 +107,9 @@ Composer 仍是 Screen 的第三个直接子节点并保持底部焦点；本切
 - **原文还原**：在 TUI 提交边界恢复所有片段的完整真实原文，供后续业务运行链路消费；不把摘要文字当成真实消息，同时保留一份紧凑显示快照用于用户消息卡片。
 - **用户消息卡片**：提交后向 transcript 追加只读用户消息卡片，展示紧凑显示快照并继续保留摘要，不主动解释为 Markdown。
 
-本切片只产生 TUI 内部状态与消息，仍不连接 CLI、MicaApp、Engine、Provider、会话、Run 或真实业务运行；未升级任何依赖。P6-03 尚未开始。
+本切片只产生 TUI 内部状态与消息，仍不连接 CLI、MicaApp、Engine、Provider、会话、Run 或真实业务运行；未升级任何依赖。P5-03 尚未开始。
 
-# P6-03A+B 模型回复与思考内容投影
+# P5-03A+B 模型回复与思考内容投影
 
 - **公共事件投影 seam**：`await MicaTuiApp.project_engine_event(event)` 只消费现有 `EngineEvent` 公共对象；返回 `True` 表示该事件已被当前 TUI Run 投影接受，工具、权限和 ask 事件安全返回 `False`。
 - **Run/seq 隔离**：`RunStarted` 建立不可复用的 Run 投影；每个已识别事件按 Run 维护严格递增的 `seq`，重复、倒序、未知 Run、终态后的事件均被拒绝。非本切片事件只消耗有效序号，不创建占位视图。
@@ -117,52 +117,52 @@ Composer 仍是 Screen 的第三个直接子节点并保持底部焦点；本切
 - **思考显示模式**：`ReasoningDelta` 进入独立的 `ReasoningView`，默认 `COLLAPSED`，并支持 `FULL`、`COLLAPSED`、`HIDDEN`。折叠预览按真实显示宽度生成，窄终端仍在最后可见行保留省略提示；隐藏模式保留隔离状态但不挂载正文或空白占位。
 - **焦点规则**：折叠思考视图聚焦后，`Ctrl+O` 只切换当前组件的折叠/完整显示；完整和隐藏模式不被该快捷键改变。
 - **无颜色降级**：思考使用主题 `MUTED` 语义色、细左线和额外缩进；布局分隔与纯文本仍在禁用颜色时保持可读，未依赖颜色作为唯一区分。
-- **范围边界**：本切片不接入 CLI、MicaApp、真实 Engine 流或 Provider，不持久化界面状态，不实现工具卡片或唯一工作状态条；**P6-03C 尚未开始**。
+- **范围边界**：本切片不接入 CLI、MicaApp、真实 Engine 流或 Provider，不持久化界面状态，不实现工具卡片或唯一工作状态条；**P5-03C 尚未开始**。
 
-# P6-03C 唯一工作状态条
+# P5-03C 唯一工作状态条
 
-- **公共事件投影**：`MicaTuiApp.project_engine_event()` 延续 P6-03A+B 的 Run/seq 校验；只将当前活动 Run 的合法事件投影到唯一 `WorkStatusView`，工具和交互事件更新阶段但保留既有 `False` 返回兼容语义。
+- **公共事件投影**：`MicaTuiApp.project_engine_event()` 延续 P5-03A+B 的 Run/seq 校验；只将当前活动 Run 的合法事件投影到唯一 `WorkStatusView`，工具和交互事件更新阶段但保留既有 `False` 返回兼容语义。
 - **稳定状态**：状态条公开 `WorkStatus`（`READY`、`WORKING`、`DONE`、`CANCEL`、`INTERRUPT`）与 `WorkPhase`（`NONE`、`WAITING`、`THINKING`、`RESPONDING`），固定在输入区上方，不进入 transcript。
 - **计时与进展**：使用可注入单调时钟；RunStarted 建立 waiting 起点，独立 ReasoningDelta 进入 thinking，TextDelta 进入 responding，工具/权限/用户输入事件进入 waiting。阶段增量不重置阶段起点，但所有可观察进展重置颜色计时；thought 只累计 thinking，waited 统计首个正式文本前等待，无正式文本时使用总时长。
 - **视觉与资源边界**：点号通过同一 `advance_animation()` 循环推进，生产环境最多一个 Textual Timer；主体颜色从 `BRAND_LIGHT`、`BRAND`、`BRAND_DEEP` 插值，颜色不是状态唯一表达。ready、done、cancel、interrupt 停止动画；取消前无进展显示 cancel，否则显示 interrupt，失败统一 interrupt。
-- **验收结论**：公开行为测试覆盖状态生命周期、阶段与耗时、颜色边界、时钟倒退、Run 隔离、唯一性、窄终端、无颜色、resize 和安全 repr；新增 `status.py` 纳入 wheel 分发。P6-04 尚未开始。
+- **验收结论**：公开行为测试覆盖状态生命周期、阶段与耗时、颜色边界、时钟倒退、Run 隔离、唯一性、窄终端、无颜色、resize 和安全 repr；新增 `status.py` 纳入 wheel 分发。P5-04 尚未开始。
 
-# P6-04 历史恢复与滚动
+# P5-04 历史恢复与滚动
 
 - **历史注入边界**：`MicaTuiApp(stored_session=...)` 只接收由外部加载完成的 `StoredSession`，非法类型在构造期抛固定 `TypeError`；TUI 不读取 Store、不访问会话文件路径、不重放 Run。
 - **只读历史投影**：新增 `tui/history.py`，按 `StoredSession.turns` 原始顺序产出「历史用户卡片 → 该轮工具记录 → 最终回复视图」，多轮保持持久化顺序；工具记录顺序取自 `intermediate_messages` 中真实 `tool_calls` 序列。
-- **历史工具记录**：v3 快照存在时显示 `tool <name> · <终态>`，缺快照的旧版本降级为 `tool <name> · recorded`，只表示存在该调用而不猜测结果；组件持有不可变快照供 P6-05 替换为正式卡片，`repr` 与渲染都不泄漏 `call_id`、参数、命令或结果正文。
+- **历史工具记录**：v3 快照存在时显示 `tool <name> · <终态>`，缺快照的旧版本降级为 `tool <name> · recorded`，只表示存在该调用而不猜测结果；组件持有不可变快照供 P5-05 替换为正式卡片，`repr` 与渲染都不泄漏 `call_id`、参数、命令或结果正文。
 - **历史与实时边界**：历史恢复不建立 Run、不污染 seq 与终态集合，启动后状态条仍是 `Mica · ready`；不恢复或伪造历史思考内容，历史回复以非流式 Markdown 呈现且不挂载流式光标。实时 `ReasoningDelta`/`TextDelta` 与新提交继续追加在历史之后。
 - **滚动与跟随**：`ConversationTranscript` 在底部时自动跟随新增内容，真实 PageUp 等用户滚动离底后停止强制跟随；离底期间新增可见内容显示唯一 `↓ new output` 提示，返回底部后隐藏提示并恢复跟随。提示是 transcript 内的覆盖层，不进入滚动历史，也不改变工作状态条与 composer 的位置和高度。
-- **验收结论**：公开行为测试通过真实 Textual Pilot 覆盖历史顺序、工具记录降级、空会话、底部跟随、离底提示、被拒事件隔离、隐藏思考、resize、无颜色降级与安全 `repr`；新增 `history.py`、`transcript.py` 纳入 wheel 分发校验。P6-05A 尚未开始。
+- **验收结论**：公开行为测试通过真实 Textual Pilot 覆盖历史顺序、工具记录降级、空会话、底部跟随、离底提示、被拒事件隔离、隐藏思考、resize、无颜色降级与安全 `repr`；新增 `history.py`、`transcript.py` 纳入 wheel 分发校验。P5-05A 尚未开始。
 
-# P6-05A 工具卡片骨架与 read
+# P5-05A 工具卡片骨架与 read
 
 - **卡片生命周期**：新增稳定的工具卡片基础组件和单行 `read` 卡片；`ToolPrepared` 创建组件，`ToolStarted` 与 `ToolFinished` 原地更新同一对象，实时身份使用 `(run_id, call_id)` 隔离。
 - **状态收口**：准备与执行使用深蓝背景，成功使用深绿，失败或取消使用深红；Run 失败或取消只收口该 Run 中尚未完成的卡片，不改变已经成功的卡片。
 - **read 展示边界**：只显示工具名和经过展示契约确认的工作区相对路径；失败时可追加固定安全原因，不显示正文、参数、文件大小、耗时、调用标识、绝对路径或原始异常。
 - **历史兼容**：v3 中带 `read` 展示快照的历史调用恢复为最终卡片；v1/v2 或缺少快照时继续使用 `recorded` 简化记录，其他工具仍保持中性历史记录。
-- **集成与验收**：卡片新增和终态更新保持既有底部跟随与离底新输出提示；窄终端、无颜色、会话兼容、App/CLI 公共链路、安装态 wheel、全量测试和离线构建均通过。P6-05B 尚未开始。
+- **集成与验收**：卡片新增和终态更新保持既有底部跟随与离底新输出提示；窄终端、无颜色、会话兼容、App/CLI 公共链路、安装态 wheel、全量测试和离线构建均通过。P5-05B 尚未开始。
 
-# P6-05B write 卡片
+# P5-05B write 卡片
 
 - **展示规则**：新增 `WriteToolCard`，在无外框卡片中展示工具名、工作区相对路径和安全快照中的原始文件内容；内容作为纯文本保留 Markdown 标记、Unicode、缩进与有意义的空白，不显示参数标签、大小、耗时或内部标识。
 - **折叠与展开**：按归一化后的逻辑行计算，CRLF/LF 统一处理且忽略单独的结尾换行；超过十行时默认显示前十行与固定折叠提示，聚焦卡片的 `Ctrl+O` 只切换当前卡片，短内容保持不变。终端软换行不改变逻辑行数，展开后的尺寸变化继续使用既有 transcript 跟随机制。
 - **生命周期和历史恢复**：实时 `ToolPrepared → ToolStarted → ToolFinished` 始终更新同一 `(run_id, call_id)` 卡片；Run 失败或取消只收口对应 Run 的未完成卡片，已完成卡片不被重染。v3 write 快照恢复为最终卡片，旧版本或缺失快照继续使用中性记录，不重放工具、不读取工作区、不建立实时映射。
 - **安全与兼容边界**：卡片只接收 `ToolPresentationSnapshot`，拒绝不匹配的工具/快照类型；失败或取消保留内容并追加固定安全原因，`repr` 不包含路径、内容、Run ID 或 call ID。read 行为、其他工具中性历史记录和既有滚动/颜色降级保持兼容。
-- **最终验收结论**：write 生命周期、状态颜色、纯文本内容、逻辑行折叠、焦点展开、窄终端软换行、历史恢复、安全边界和 wheel 分发测试通过；P6-05C 尚未开始。
+- **最终验收结论**：write 生命周期、状态颜色、纯文本内容、逻辑行折叠、焦点展开、窄终端软换行、历史恢复、安全边界和 wheel 分发测试通过；P5-05C 尚未开始。
 
-# P6-05C edit 卡片
+# P5-05C edit 卡片
 
 - **差异展示**：新增 `EditToolCard`，只消费 EDIT presentation 中已经生成并清洗的 `matched` 与 `lines`，按 snapshot 原始顺序展示 context、removed、added 行，不读取文件、不重新计算 diff、不进行逐字符高亮。工具名加粗，工作区相对路径使用下划线浅青色，正文为纯文本。
 - **行号与颜色**：matched 为 true 时，context 使用 `new_line`，removed 使用 `old_line`，added 使用 `new_line`；当前可见行号列统一宽度。上下文使用灰白色，删除使用浅红色 `-`，新增使用黄绿色 `+`。pending 的 `matched=None` 和 unmatched 不显示伪造行号，空白增删行仍保留标记与行号（若快照提供）。
 - **matched/unmatched**：matched 为 false 时展示快照提供的无行号尝试差异，并固定显示 `file was not changed`；已有相同安全文案不会重复，其他安全原因与其组合显示。没有最终 presentation 的失败或取消仍保留尝试差异并生成固定安全原因。
 - **折叠与展开**：只按 removed/added 变化行计数；不超过 20 条完整显示，超过 20 条保留原始顺序中的前 10 条和后 10 条变化，并允许相邻 context 一并显示，中间使用灰色省略提示。聚焦卡片后 `Ctrl+O` 展开完整快照，再次按下恢复折叠；卡片状态更新不重建组件且保持展开状态，尺寸变化复用 transcript 跟随逻辑。
 - **生命周期与历史边界**：实时 `ToolPrepared → ToolStarted → ToolFinished` 原地更新同一 `(run_id, call_id)` 卡片；实时 `CANCELLED` 显示红色取消状态并保留差异。`RunFailed`/`RunCancelled` 只收口对应 Run 的未完成卡片，已完成卡片不重染。v3 历史只恢复合法的 success/failed edit 快照；取消 Run 不提交 TurnEntry，因此不存在合法 cancelled 历史快照。v1/v2 或缺少 presentation 继续显示 `tool edit · recorded`。
-- **安全与兼容边界**：渲染和 `repr` 不包含 call ID、Run ID、绝对路径、原始参数、凭据或 traceback；read/write 和既有滚动、离底新输出、窄终端及无颜色降级保持兼容。P6-05D 尚未开始。
+- **安全与兼容边界**：渲染和 `repr` 不包含 call ID、Run ID、绝对路径、原始参数、凭据或 traceback；read/write 和既有滚动、离底新输出、窄终端及无颜色降级保持兼容。P5-05D 尚未开始。
 - **最终验收结论**：edit 生命周期、实时取消、Run 隔离、差异行样式与行号、空白行、unmatched 降级、二十条变化折叠、焦点展开、历史 success/failed 恢复和安全边界通过验证。
 
-# P6-05D bash 卡片
+# P5-05D bash 卡片
 
 - **卡片结构**：新增 `BashToolCard`，只接收已清洗的 Bash `ToolPresentationSnapshot` 与 `ToolOutputDelta.text`。命令区以 `$ ` 加安全命令纯文本显示，输出区保存安全动态缓冲；卡片复用基础生命周期、状态颜色和 `(run_id, call_id)` 稳定身份，不保存原始请求、工具结果、进程或管道对象。
 - **动态输出投影**：`ToolPrepared` 创建 pending 卡片，`ToolStarted` 原地切换 running，匹配 running Bash 卡片按 Engine seq 顺序追加 `ToolOutputDelta`。非 Bash、未知卡片、错误 Run、迟到事件和终态卡片均被拒绝；不重新清洗、排序、持久化或创建后台输出任务。`ToolFinished` 用最终安全 output 覆盖动态缓冲，最终快照因此不会重复显示。
@@ -170,19 +170,19 @@ Composer 仍是 Screen 的第三个直接子节点并保持底部焦点；本切
 - **输出跟随与内部浏览**：运行期间卡片自动跟随最新八条输出，但不会改变 transcript 自身的离底状态。卡片获得焦点后，Up/Down/PageUp/PageDown 在已保留逻辑行范围内移动内部视口；离开最新位置后停止卡片跟随，新增内容追加到缓冲并在卡片内唯一显示 `↓ N new lines`。End 返回最新视口、清除未读数量并恢复跟随；不使用 Timer、Worker、线程或后台 Task。
 - **终态显示**：成功使用绿色状态，空输出只显示一次 `(no output)`；非零退出使用红色状态并在输出后显示 `exit N`；取消、启动失败、超时、输出限制或 Run 失败不伪造退出码，保留已接收安全输出并显示固定安全原因。失败、取消和中断同时依靠文字与颜色表达。
 - **Run 与历史边界**：`RunFailed`/`RunCancelled` 只收口对应 Run 中 pending/running 的 Bash 卡片，已完成卡片不重染。v3 合法 success/failed Bash presentation 恢复为默认折叠的最终卡片，不播放动态输出、不重跑命令、不读取工作区；取消 Run 不提交 TurnEntry，不构造 cancelled 历史。v1/v2 或缺少 Bash presentation 的历史继续显示 `tool bash · recorded`，read/write/edit 正式卡片保持不变。
-- **安全与兼容边界**：render 与固定 `repr` 不包含 call ID、Run ID、绝对路径、Shell 可执行文件路径、原始异常、参数或凭据；命令和输出只来自安全 presentation/事件。现有 transcript 跟随、离底提示、唯一工作状态条、模型输出、read/write/edit 卡片、窄终端和无颜色文字识别保持兼容。P6-05E、P6-06 尚未开始。
-- **最终验收结论**：Bash 生命周期、动态输出顺序与最终校准、命令三显示行折叠、八行输出视口、内部浏览与未读提示、CRLF/空白行、成功无输出、非零退出、无退出码失败/取消、Run 收口、v3/旧历史恢复、安全边界及 wheel 导入覆盖通过验证。P6-05E、P6-06 尚未开始。
+- **安全与兼容边界**：render 与固定 `repr` 不包含 call ID、Run ID、绝对路径、Shell 可执行文件路径、原始异常、参数或凭据；命令和输出只来自安全 presentation/事件。现有 transcript 跟随、离底提示、唯一工作状态条、模型输出、read/write/edit 卡片、窄终端和无颜色文字识别保持兼容。P5-05E、P5-06 尚未开始。
+- **最终验收结论**：Bash 生命周期、动态输出顺序与最终校准、命令三显示行折叠、八行输出视口、内部浏览与未读提示、CRLF/空白行、成功无输出、非零退出、无退出码失败/取消、Run 收口、v3/旧历史恢复、安全边界及 wheel 导入覆盖通过验证。P5-05E、P5-06 尚未开始。
 
-# P6-05E 通用工具卡片
+# P5-05E 通用工具卡片
 
 - **目标与结构**：新增 `GenericToolCard` 作为没有专用展示实现的扩展/未知工具安全兜底。卡片继承统一 `ToolCard` 状态、语义背景和稳定组件身份，固定为两行紧凑布局；第一行只显示 snapshot 的工具名，第二行显示生命周期状态，不创建参数区、结果区或空详情面板。
 - **状态与安全文案**：pending 显示 `waiting`，running 显示 `running…`，success 显示 `completed`，失败显示 `tool execution failed`，取消显示 `operation cancelled`。实时失败状态额外映射为 `permission denied` 或 `tool arguments are invalid`；历史 GENERIC failed 无具体结果状态时统一使用 `tool execution failed`。卡片不显示 `tool details are unavailable`、原始 message、参数、结果、异常或 traceback，`repr` 固定为 `<GenericToolCard>`。
-- **统一解析接缝**：`create_tool_card()` 同时服务实时 `ToolPrepared` 和 v3 历史恢复，顺序为内置专用 kind、匹配 GENERIC 工厂、Generic 兜底；ASK 返回 `None` 留给 P6-06。`ToolCardFactory` 仅接收 `ToolPresentationSnapshot`，`MicaTuiApp` 构造时校验并复制 `Mapping[str, ToolCardFactory]`，调用方后续修改不会影响 App。非 Mapping、非法键和非 callable 值使用固定安全诊断。
+- **统一解析接缝**：`create_tool_card()` 同时服务实时 `ToolPrepared` 和 v3 历史恢复，顺序为内置专用 kind、匹配 GENERIC 工厂、Generic 兜底；ASK 返回 `None` 留给 P5-06。`ToolCardFactory` 仅接收 `ToolPresentationSnapshot`，`MicaTuiApp` 构造时校验并复制 `Mapping[str, ToolCardFactory]`，调用方后续修改不会影响 App。非 Mapping、非法键和非 callable 值使用固定安全诊断。
 - **工厂回退**：内置 read/write/edit/bash 路由优先且不可覆盖。自定义工厂异常、返回非 `ToolCard` 或返回 call/tool/kind 身份不一致的卡片时，静默回退 Generic，不捕获 `BaseException`，不向用户或历史写入错误信息；实时与历史使用同一解析规则。
 - **生命周期与兼容**：GENERIC 按 `(run_id, call_id)` 创建并原地处理 `ToolPrepared → ToolStarted → ToolFinished`；RunFailed/RunCancelled 只收口对应 Run 的 pending/running 卡片。Generic 不接收 `ToolOutputDelta`。合法 v3 success/failed 快照恢复为终态卡片，不重放 Run；v1/v2 或缺失快照继续显示 `tool <name> · recorded`。既有 read、write、edit、bash 卡片和滚动、窄终端、无颜色降级保持不变。
-- **验收结论**：新增代表性测试覆盖五种可见状态、原地生命周期、Run 隔离与收口、动态输出拒绝、v3/旧历史、工厂优先级/快照复制/异常回退、ASK 边界和安全不泄漏；P6-06 及后续任务未开始。
+- **验收结论**：新增代表性测试覆盖五种可见状态、原地生命周期、Run 隔离与收口、动态输出拒绝、v3/旧历史、工厂优先级/快照复制/异常回退、ASK 边界和安全不泄漏；P5-06 及后续任务未开始。
 
-# P6-06 结构化 ask 面板
+# P5-06 结构化 ask 面板
 
 ## 稳定设计
 
@@ -198,9 +198,9 @@ Composer 仍是 Screen 的第三个直接子节点并保持底部焦点；本切
 
 ## 验收结论
 
-实现保持既有 Run/seq、工具卡片、工作状态、滚动、composer 和安全边界；聚焦 TUI/工具展示兼容测试通过。未连接真实 CLI、Broker、Provider 或 Engine 私有状态，未实现权限窗口和 P6-07。
+实现保持既有 Run/seq、工具卡片、工作状态、滚动、composer 和安全边界；聚焦 TUI/工具展示兼容测试通过。未连接真实 CLI、Broker、Provider 或 Engine 私有状态，未实现权限窗口和 P5-07。
 
-# P6-07A 两模式权限后端与基础 CLI
+# P5-07A 两模式权限后端与基础 CLI
 
 ## 目标与实现
 
@@ -214,7 +214,7 @@ Composer 仍是 Screen 的第三个直接子节点并保持底部焦点；本切
 - 独立 command_risk 只分析文本，不执行探测或读取脚本。支持引号、转义、组合命令、常见 env/command 包装及危险命令 basename/.exe；任一命中只对原始调用询问一次，不改写命令。
 - 动态扩展、复杂结构、文件描述符语法、不支持的包装选项和 Git 工作目录/配置选项保守询问；普通 Git status/diff/log/show/add/commit、脚本和网络命令未命中规则即可执行。此处未建立完整 Shell 解释器。
 - 没有 OS 文件/网络隔离；脚本、未知程序与间接副作用不作安全证明。`PolicyOperation.SAFE_READ_ONLY_COMMAND` 仅作为历史兼容枚举保留，Bash 默认事实始终使用 `COMMAND`，普通命令是否自动执行由风险事实决定。
-- 事件、会话版本、展示过滤、五工具顺序和 CLI 生命周期未修改；未实施 P6-07B TUI 权限面板。
+- 事件、会话版本、展示过滤、五工具顺序和 CLI 生命周期未修改；未实施 P5-07B TUI 权限面板。
 
 ## 验证与学习入口
 
@@ -223,7 +223,7 @@ Composer 仍是 Screen 的第三个直接子节点并保持底部焦点；本切
 - 学习入口：command_risk → ToolExecutor → InteractionBroker；文件执行能力与授权策略分离；Schema 校验、权限策略和 ask 需求交互的不同职责。
 - 验收状态：返工聚焦组 192 通过；最终全量 1457 通过、2 跳过，Ruff、格式检查、离线构建和两项 diff check 通过。待 master 审查；未提交或推送 Git。
 
-# P6-07B 权限确认面板
+# P5-07B 权限确认面板
 
 ## 目标与实现
 
@@ -236,9 +236,9 @@ Composer 仍是 Screen 的第三个直接子节点并保持底部焦点；本切
 
 - 复用 ask 面板已有的同步回调检测、严格 `True` 判断和 awaitable 清理逻辑，不引入第二套权限策略，也不读取原始工具参数、ToolResult、工作区或 Shell 状态。
 - 权限请求的公共 `message` 仅作为事件语义，不直接渲染；异常、repr、interaction ID、call ID 和 Run ID 不进入面板文本。没有安全展示细节时使用固定说明，并保留有界滚动和纯文本换行能力。
-- 未连接真实 Provider、Broker、Engine 或 CLI，未修改事件、会话和后端权限策略；P6-08 尚未开始。
+- 未连接真实 Provider、Broker、Engine 或 CLI，未修改事件、会话和后端权限策略；P5-08 尚未开始。
 
-# P6-08 运行控制器与取消收口
+# P5-08 运行控制器与取消收口
 
 ## 目标与实现
 
@@ -251,9 +251,9 @@ Composer 仍是 Screen 的第三个直接子节点并保持底部焦点；本切
 
 - 正常完成、真实取消、消费者关闭、重复关闭和 Provider 未暴露内部信息的代表测试使用临时会话目录与假 Provider；不连接外部网络、不使用真实凭据、不执行危险命令。
 - 取消和关闭不伪造 `RunCancelled`、工具结果或完成事件；pending 交互交给既有 Broker/Engine 清理，未完成 Run 不写入会话，Provider 由 MicaApp 保持幂等关闭。
-- P6-09 默认 CLI 路由、安装态完整对话和真实 Provider 接入尚未开始。
+- P5-09 默认 CLI 路由、安装态完整对话和真实 Provider 接入尚未开始。
 
-# P6-09 CLI 路由与安装态闭环
+# P5-09 CLI 路由与安装态闭环
 
 ## 目标
 
@@ -271,9 +271,9 @@ Composer 仍是 Screen 的第三个直接子节点并保持底部焦点；本切
 
 ## 安全与生命周期边界
 
-TUI runner 只接收已装配的 `MicaTuiRuntime`，不接收 Provider、Engine、Broker、Store 或凭据。TUI 正常退出、runner 异常、主任务取消和未挂载 Screen 的构造失败路径均最终调用 runtime/App/Provider 清理；启动失败使用固定安全诊断，不回显凭据、URL、绝对路径、原始异常或 traceback。P6-10 尚未开始。
+TUI runner 只接收已装配的 `MicaTuiRuntime`，不接收 Provider、Engine、Broker、Store 或凭据。TUI 正常退出、runner 异常、主任务取消和未挂载 Screen 的构造失败路径均最终调用 runtime/App/Provider 清理；启动失败使用固定安全诊断，不回显凭据、URL、绝对路径、原始异常或 traceback。P5-10 尚未开始。
 
-# P6-10A 启动首屏视觉校准
+# P5-10A 启动首屏视觉校准
 
 ## 目标与实现
 
@@ -288,24 +288,24 @@ TUI runner 只接收已装配的 `MicaTuiRuntime`，不接收 Provider、Engine�
 
 - 本切片只调整启动首屏和固定底部控件；消息、推理、工具卡片、ask、权限、运行语义以及 Engine/Provider/会话存储均未改变。
 - Textual/Pilot 覆盖顶部初始位置、历史恢复、快照安全、真实注入、完整边框、长 Unicode 事实、固定事实高度、宽屏/约 80 列/40×16/24×8 和 NO_COLOR；真实 Textual 组件树截图已按 110×36、100×30、80×24、40×16、24×8 生成，并与本轮删除目标、负向问题图、Pi 布局参考及正向对照图检查。
-- 使用者已在真实 Windows 终端完成视觉复验；延迟 resize/refresh 回调在流式光标终态移除后安全成为 no-op，终态清理保持幂等。统一自动验证、静态检查和离线构建通过，P6-10A 完成。
+- 使用者已在真实 Windows 终端完成视觉复验；延迟 resize/refresh 回调在流式光标终态移除后安全成为 no-op，终态清理保持幂等。统一自动验证、静态检查和离线构建通过，P5-10A 完成。
 
-# P6-10B 运行界面校准
+# P5-10B 运行界面校准
 
 ## 目标与实现
 
-- 本切片只校准已确认的运行界面视觉差异，不改变 ask/permission/tool/status 的公共回调、一次响应或取消语义，也不开始 Phase 7/8。
+- 本切片只校准已确认的运行界面视觉差异，不改变 ask/permission/tool/status 的公共回调、一次响应或取消语义，也不开始 Phase 6/8。
 - Ask 面板在选项模式下原先只挂载隐藏 Input；`height: auto` 按子节点而不是父级 `render()` 计算，导致 110×36 只剩青色空框。现在由 `_AskContent` 承担选项/提示正文高度，Input 仍只在 free/custom/notes 模式显示。
 - 权限面板在宽终端使用底边距，使 `↑/↓ to navigate` 与唯一 `Mica · working...` 状态条分开；24×8 去掉纵向 padding，使两行 facts 贴在屏幕底部而不溢出。
 - 真实 Textual 组件树截图已按对话、工具、ask、权限、历史滚动、24×8 和 NO_COLOR 重新生成；Ask 选项正文、权限提示空隙和 bash 终态 `48 passed` 均可见。
-- 首轮截图对照曾通过自动 Design QA；使用者随后在真实 Windows 终端复查中确认仍有会影响后续功能的基础问题，因此本轮只建立可回退检查点，不关闭 P6-10B 或 Phase 6。
+- 首轮截图对照曾通过自动 Design QA；使用者随后在真实 Windows 终端复查中确认仍有会影响后续功能的基础问题，因此本轮只建立可回退检查点，不关闭 P5-10B 或 Phase 5。
 
 ## 边界与验证
 
 - 自动化测试覆盖 Ask 挂载后的选项可见高度，权限面板在 40×16 的内部滚动、24×8 的挂载/不重叠/facts 贴底，以及 110×36 的状态条空隙。
-- 当前 Ask 与权限布局修复及其自动验证作为阶段内检查点收口；后续继续依据使用者的真实终端反馈修复基础问题，完成复验后再宣布 P6-10B 和 Phase 6 完成。
+- 当前 Ask 与权限布局修复及其自动验证作为阶段内检查点收口；后续继续依据使用者的真实终端反馈修复基础问题，完成复验后再宣布 P5-10B 和 Phase 5 完成。
 
-# P6-10C 对话时间线与模型步骤分段
+# P5-10C 对话时间线与模型步骤分段
 
 ## 目标与实现
 
@@ -315,11 +315,11 @@ TUI runner 只接收已装配的 `MicaTuiRuntime`，不接收 Provider、Engine�
 
 ## 边界与验证
 
-- 不改 Engine/事件契约、Ask/权限公共回调、一次响应或取消语义，也不开始 P6-10D/E。
+- 不改 Engine/事件契约、Ask/权限公共回调、一次响应或取消语义，也不开始 P5-10D/E。
 - 聚焦测试覆盖两步两工具 DOM 顺序、拒绝边界、多工具无中段空回复、ASK 分段、失败/取消与迟到 Delta、真实 `MicaTuiRuntime` 两轮假 Provider、历史/跨 Run 隔离和离底 `↓ new output`。
 - 临时 110×36 截图已与时间线正负向参考对照：模型步骤、工具卡片、下一模型步骤沿单一时间线交错出现。自动化验收通过后，视觉完成仍由使用者在真实 Windows 终端确认。
 
-# P6-10D 全局 Run 中断与两次 Ctrl+C 退出
+# P5-10D 全局 Run 中断与两次 Ctrl+C 退出
 
 ## 目标与实现
 
@@ -330,11 +330,11 @@ TUI runner 只接收已装配的 `MicaTuiRuntime`，不接收 Provider、Engine�
 
 ## 边界与验证
 
-- 不改 Engine/事件契约、Ask/权限组件、CLI 或 P6-10C 时间线分段。未开始 P6-10E 交互覆盖层与失焦恢复。
+- 不改 Engine/事件契约、Ask/权限组件、CLI 或 P5-10C 时间线分段。未开始 P5-10E 交互覆盖层与失焦恢复。
 - 聚焦测试覆盖任意焦点下的一次 `Esc`、空闲 no-op、Provider 流式取消、Bash 进程回收、Ask/权限不合成回答、两次 `Ctrl+C` 与超时重置。
 - `runtime.py` 与 `cli.py` 未修改；第二次退出仍由 `_RuntimeTuiApp.exit()` 进入 `request_shutdown()`/`aclose()`。
 
-# P6-10E 统一交互覆盖层与焦点恢复
+# P5-10E 统一交互覆盖层与焦点恢复
 
 ## 目标与实现
 
@@ -343,14 +343,14 @@ TUI runner 只接收已装配的 `MicaTuiRuntime`，不接收 Provider、Engine�
 - App 级高优先级绑定路由 Ask/权限的上下、Enter、数字、`n` 和滚动键；`check_action()` 只在存在活动交互且 `owns_key()` 为真时启用。空闲数字/Enter 仍归 composer。Ask 输入/备注模式不抢数字和 `n`。
 - 按键所有权按活动 Ask/权限状态判定，不依赖 overlay 子节点或挂载时 `focus()`。PageUp/PageDown 在权限面板上滚动 overlay 内容，不移动 transcript。
 - `AppFocus` 与交互挂载/收口按 Ask、权限、运行中 transcript、空闲 composer 恢复焦点。chrome 同步默认不抢焦点，避免 Bash 卡片内部滚动被打断。
-- 保留 P6-10C 时间线分段和 P6-10D `Esc`/`Ctrl+C`。不改 Engine/事件、runtime、CLI，也不伪造 Ask 回答或 Permission DENY。
+- 保留 P5-10C 时间线分段和 P5-10D `Esc`/`Ctrl+C`。不改 Engine/事件、runtime、CLI，也不伪造 Ask 回答或 Permission DENY。
 
 ## 边界与验证
 
 - 新测试覆盖 overlay 替换底部控制区、无本地焦点的 Ask/权限按键、Ask 终态记录位置、权限不进 transcript、极端终端仍保留一行 transcript、`AppBlur → AppFocus` 恢复以及空闲数字键仍属 composer。
-- 自动化验收通过后，真实 Windows 终端的键盘与失焦行为仍由使用者确认。未开始 Phase 7/8，不宣布 Phase 6 完成。
+- 自动化验收通过后，真实 Windows 终端的键盘与失焦行为仍由使用者确认。未开始 Phase 6/8，不宣布 Phase 5 完成。
 
-# P6-10F Windows 终端输入与焦点可靠性
+# P5-10F Windows 终端输入与焦点可靠性
 
 ## 目标与实现
 
@@ -365,12 +365,12 @@ TUI runner 只接收已装配的 `MicaTuiRuntime`，不接收 Provider、Engine�
 
 ## 边界与验证
 
-- 不改 Engine/事件契约、会话格式、Provider、权限策略或中断轮次持久化；未开始 P6-10G，未宣布 Phase 6 完成。
+- 不改 Engine/事件契约、会话格式、Provider、权限策略或中断轮次持久化；未开始 P5-10G，未宣布 Phase 5 完成。
 - 聚焦测试覆盖：无 `AppFocus` 时 Ask/权限第一发 Down、transcript PageUp 与鼠标滚轮、resize 自愈、Run 终态 composer 恢复、Screen 卸载安全 no-op、Bash 卡片消费与边界冒泡不回归；composer 中间插入/删除、多行与 Unicode、软换行、点击定位和无未 await 协程；Ctrl+C 真实时间推进下的近同步重复、确认窗口内第二次、超时重置与关闭幂等，以及去重窗口之外事件按平台限制计为第二次的边界。
 - composer 坐标统一：`render_line()`、`cursor_screen_offset` 与重写的 `get_target_document_location()` 共用同一提示符偏移规则（`› ` 只在首个可见行占两格）。聚焦测试覆盖第二/第三逻辑行、软换行后的第二视觉行、内部滚动后的首个与后续可见行、Unicode 与宽字符、点击后插入/Backspace/Delete 的实际位置，以及长粘贴片段点击后仍保持原子。
 - 真实 Windows Terminal 的长时间失焦、两秒双击与 composer 编辑仍由使用者手工复验后关闭；自动化不能替代该确认。持续按住 Ctrl+C 的自动重复边界属于上述平台限制，同样由手工复验确认（作为已知风险，不作为已完全解决）。
 
-## P6-10F 返工：自动跟随竞争与交互所有权
+## P5-10F 返工：自动跟随竞争与交互所有权
 
 ### 根因一：滚动失效不是焦点事件缺失，而是自动跟随竞争
 
@@ -390,11 +390,11 @@ TUI runner 只接收已装配的 `MicaTuiRuntime`，不接收 Provider、Engine�
 - 权限面板的滚动断言随架构一起迁移到 overlay（面板 `max_scroll_y == 0`）；Bash 卡片测试的聚焦改为 `scroll_visible=False`，与产品聚焦约定一致。
 - 真实 Windows Terminal 的滚动抢占、失焦恢复与页键行为仍由使用者手工复验；自动化不能替代该确认。
 
-# P6-11A 主缓冲区核心纵向闭环
+# P5-11A 主缓冲区核心纵向闭环
 
 ## 目标
 
-在现有脏工作树上建立不进入 alternate screen 的主缓冲区终端前端，通过临时 `mica cli --main-buffer-preview` 跑通「启动首屏 → composer 编辑 → 提交 → 真实 `MicaApp.Run` → 流式文本 → Ask/Permission 阻塞 → Esc/Ctrl+C → 工作状态 → 输入区恢复 → 正常关闭并保留主缓冲区历史」的完整纵向闭环。默认 Textual 入口与 `--plain` 语义不变，旧前端不删除，不开始 P6-11B/C 与 P6-10G。
+在现有脏工作树上建立不进入 alternate screen 的主缓冲区终端前端，通过临时 `mica cli --main-buffer-preview` 跑通「启动首屏 → composer 编辑 → 提交 → 真实 `MicaApp.Run` → 流式文本 → Ask/Permission 阻塞 → Esc/Ctrl+C → 工作状态 → 输入区恢复 → 正常关闭并保留主缓冲区历史」的完整纵向闭环。默认 Textual 入口与 `--plain` 语义不变，旧前端不删除，不开始 P5-11B/C 与 P5-10G。
 
 ## 包边界与 IO 所有权
 
@@ -428,31 +428,31 @@ TUI runner 只接收已装配的 `MicaTuiRuntime`，不接收 Provider、Engine�
 ## 验证结果
 
 - 测试：`test_tui_main_buffer_render.py`（组件、编辑器、按键归一与交互模式）、`test_tui_main_buffer_vt.py`（虚拟终端回放器及其自检）、`test_tui_main_buffer_redraw.py`（首帧不覆盖 shell sentinel、连续同帧不上移、pending 增长与收回、短帧后 pending 超高不写入 composer、超高继续增长不重复写出、超高缩短不留残影、chrome 同时变高变矮、clear_chrome 保留正文、宽度重排、超高帧滚入 scrollback、全程无禁用效果）、`test_tui_main_buffer_sanitize.py`（22 类对抗载荷注入文档块/事实/交互面板/启动面板，共 114 例）、`test_tui_main_buffer_composer.py`（软换行、八行窗口、长粘贴片段、ask 自定义项、面板排版顺序）、`test_tui_main_buffer_composer_whitespace.py`（前导/尾随空格、空白行、Tab 展开与光标一致、软换行后的 Tab 光标、提交原文保留 `	`）、`test_tui_main_buffer_screen.py`（端到端纵向闭环、提交被拒绝时保留普通草稿与粘贴片段）、`test_tui_main_buffer_lifecycle.py`（初始化/退出路径的清理计数与幂等性、清理阶段 write 失败、`Ctrl+D` 与输入流 EOF 的最小退出规则）、`test_tui_main_buffer_refresh.py`（resize、工作状态动画、done 到期、事实刷新）、`test_tui_main_buffer_events.py`（Run/seq/call/tool_name 隔离、最终快照身份与状态契约、终态与 stop/error 分类、RunFailed 固定文案不泄漏路径与 Key、交互响应被拒绝时保留面板）、`test_tui_main_buffer_cli.py`（路由、失败兜底关闭且不重复关闭、依赖声明）。
-- 分发断言同步更新：wheel 必须包含 `mica_agent/tui/main_buffer/` 九个模块（含 `sanitize.py`），`importlib.metadata.requires` 必须包含 `prompt-toolkit>=3.0.52`；既有 P6-09 路由测试的 `_main_cli` 替身增加新关键字断言。
+- 分发断言同步更新：wheel 必须包含 `mica_agent/tui/main_buffer/` 九个模块（含 `sanitize.py`），`importlib.metadata.requires` 必须包含 `prompt-toolkit>=3.0.52`；既有 P5-09 路由测试的 `_main_cli` 替身增加新关键字断言。
 - 统一门槛：聚焦组（含分发与既有 CLI/TUI/runtime 套件）`-W error` **347 通过**；全量 **1842 通过、2 跳过**；`ruff check` 全绿；`ruff format --check`（133 文件）通过；`uv build --offline` 成功；两项 `git diff --check` 干净。
 - 视觉证据：110×36 与 40×16 的启动帧（彩色与 NO_COLOR）、resize 前后帧、Ask 与权限面板帧；另用虚拟终端把真实发出的字节流回放，证明 shell sentinel 原样保留、没有清除 scrollback、没有 alternate screen / 鼠标捕获，且退出后物理光标落在干净行。
 
 ## 边界与后续
 
-- 本切片不包含：工具专用折叠/展开卡片（`Ctrl+O` 全局展开）、思考显示模式、粘贴片段折叠、Bash 动态输出视口、Markdown 渲染，均为 P6-11B；默认入口切换与旧 Textual 退役为 P6-11C。
-- Logo 几何在 Textual 与主缓冲区两侧各有一份实现（新前端不得导入 Textual），P6-11C 删除旧前端后收敛为单份。
-- 已知偏差：`Shift+Enter` 换行在当前输入层不可用（prompt-toolkit 3.0.53 没有 `ShiftEnter` 键，Windows 控制台与 Windows Terminal 默认也不交付该修饰符），因此界面不再显示该提示，临时入口保留 `Ctrl+J`；输入协议适配属于 P6-11B/C，本轮不自行发明键序列。
-- 已知边界：`import mica_agent.tui.main_buffer` 仍会经由父包 `mica_agent.tui.__init__` 连带加载旧 Textual 前端（子包源码本身不含 Textual 依赖）；把旧前端包改成惰性导出属于 P6-11C 的退役工作，本轮未改。
+- 本切片不包含：工具专用折叠/展开卡片（`Ctrl+O` 全局展开）、思考显示模式、粘贴片段折叠、Bash 动态输出视口、Markdown 渲染，均为 P5-11B；默认入口切换与旧 Textual 退役为 P5-11C。
+- Logo 几何在 Textual 与主缓冲区两侧各有一份实现（新前端不得导入 Textual），P5-11C 删除旧前端后收敛为单份。
+- 已知偏差：`Shift+Enter` 换行在当前输入层不可用（prompt-toolkit 3.0.53 没有 `ShiftEnter` 键，Windows 控制台与 Windows Terminal 默认也不交付该修饰符），因此界面不再显示该提示，临时入口保留 `Ctrl+J`；输入协议适配属于 P5-11B/C，本轮不自行发明键序列。
+- 已知边界：`import mica_agent.tui.main_buffer` 仍会经由父包 `mica_agent.tui.__init__` 连带加载旧 Textual 前端（子包源码本身不含 Textual 依赖）；把旧前端包改成惰性导出属于 P5-11C 的退役工作，本轮未改。
 - 终端 resize 只重新排版重绘区；已经写入 scrollback 的历史行保留写入时的宽度，由终端自身的重排行为决定。
-- 多行输入：`Enter` 提交，`Ctrl+J`（LF）插入真实换行。prompt-toolkit 3.0.53 没有 `ShiftEnter` 键，Windows 控制台与 Windows Terminal 默认也不把 Shift 修饰符交付到这一层，因此“Shift+Enter 换行”当前不可用；若某个终端开启 modifyOtherKeys / CSI-u，该序列也不会被解析（可能被当普通文本）。输入协议适配属于 P6-11B/C 的输入层工作，本轮不自行发明键序列。
+- 多行输入：`Enter` 提交，`Ctrl+J`（LF）插入真实换行。prompt-toolkit 3.0.53 没有 `ShiftEnter` 键，Windows 控制台与 Windows Terminal 默认也不把 Shift 修饰符交付到这一层，因此“Shift+Enter 换行”当前不可用；若某个终端开启 modifyOtherKeys / CSI-u，该序列也不会被解析（可能被当普通文本）。输入协议适配属于 P5-11B/C 的输入层工作，本轮不自行发明键序列。
 - 真实 Windows Terminal 的滚轮/scrollbar/scrollback、长时间失焦后的第一发按键、持续按住 `Ctrl+C` 的自动重复边界仍由使用者手工复验；自动化不能替代该确认。
 
 ## 用户真实终端验收
 
-- 使用者已在 Windows Terminal 通过临时 `--main-buffer-preview` 完成冒烟：主缓冲区、终端原生滚动与 scrollback、composer 编辑、Ask/Permission 选择、Run 中断及退出恢复等主要功能运行正常，P6-11A 验收通过。
-- 本次验收同时确认了下一切片的视觉基线：当前用户消息、模型思考、工具记录和正式回复层级仍然拥挤，正式回复尚未渲染 Markdown。该差异属于 P6-11B，不回退 P6-11A 的主缓冲区架构结论。
-- 负向现状与正向层级参考分别保存为 `runtime-main-buffer-current-p6-11a.png` 和 `runtime-content-hierarchy-pi-reference.png`；后续任务必须实际打开并成对对照，不照抄参考产品的文案、数据或外围功能。
+- 使用者已在 Windows Terminal 通过临时 `--main-buffer-preview` 完成冒烟：主缓冲区、终端原生滚动与 scrollback、composer 编辑、Ask/Permission 选择、Run 中断及退出恢复等主要功能运行正常，P5-11A 验收通过。
+- 本次验收同时确认了下一切片的视觉基线：当前用户消息、模型思考、工具记录和正式回复层级仍然拥挤，正式回复尚未渲染 Markdown。该差异属于 P5-11B，不回退 P5-11A 的主缓冲区架构结论。
+- 负向现状与正向层级参考分别保存为 `runtime-main-buffer-current-p5-11a.png` 和 `runtime-content-hierarchy-pi-reference.png`；后续任务必须实际打开并成对对照，不照抄参考产品的文案、数据或外围功能。
 
-# P6-11B 历史与工具呈现迁移
+# P5-11B 历史与工具呈现迁移
 
 ## 目标
 
-在 P6-11A 的主缓冲区架构上把近似的纯文本日志升级为有明确语义层级的终端界面：区分用户消息、模型思考、正式回复与工具记录；对正式回复做安全、宽度感知的 Markdown 渲染；恢复 read/write/edit/bash/ask/generic 的专用工具呈现与大面积状态色块；活动工具显示有界实时输出；实现全局 `Ctrl+O`；历史恢复与实时事件复用同一组视图。仍通过临时 `--main-buffer-preview` 验收，不切换默认入口、不删除旧前端、不开始 P6-11C/P6-10G。
+在 P5-11A 的主缓冲区架构上把近似的纯文本日志升级为有明确语义层级的终端界面：区分用户消息、模型思考、正式回复与工具记录；对正式回复做安全、宽度感知的 Markdown 渲染；恢复 read/write/edit/bash/ask/generic 的专用工具呈现与大面积状态色块；活动工具显示有界实时输出；实现全局 `Ctrl+O`；历史恢复与实时事件复用同一组视图。仍通过临时 `--main-buffer-preview` 验收，不切换默认入口、不删除旧前端、不开始 P5-11C/P5-10G。
 
 ## 语义块与模块边界
 
@@ -504,20 +504,20 @@ TUI runner 只接收已装配的 `MicaTuiRuntime`，不接收 Provider、Engine�
 
 - 新增测试：`test_tui_main_buffer_markdown.py`（结构要素与 CJK 宽度、代码块满宽背景、NO_COLOR 结构、resize 重排、流式未闭合增量、冻结前缀切分、链接无 OSC 8、对抗载荷注入、跨多个 delta 的累计源上限与上限幂等、Rich 异常降级的多行/超宽/Unicode/宽度约束、`BaseException` 不被吞掉）、`test_tui_main_buffer_tool_views.py`（六类视图规则、满宽状态色块、NO_COLOR 符号与安全原因、bash 有界输出与终态覆盖、write/edit 折叠、工厂复制与安全回退、宽度上限、完整快照值比较的等值接受与逐字段回退）、`test_tui_main_buffer_hierarchy.py`（用户消息纯文本、层级顺序与留白、思考三模式与注入接缝、Ctrl+O 展开/折叠与活动 bash 有界、历史同视图与 recorded 降级、repr 不泄漏正文）。
 - 既有套件更新：`test_tui_main_buffer_render.py`（read 视图替代旧工具行断言）、`test_tui_main_buffer_sanitize.py`（工具视图与 Markdown 管线加入对抗载荷）、`test_tui_main_buffer_events.py`（名称/kind 不一致拒绝、新工具遵循全局展开、活动 bash 忽略翻页键改为等待输入队列而不固定 sleep、Bash 动态空白行/CRLF/跨事件片段/八行窗口与更早行数/终态快照覆盖）、`test_tui_main_buffer_redraw.py`（变化行起点、完全相同帧零字节、Ctrl+O 受控重排）、`test_tui_main_buffer_screen.py`（用户消息带身份标识的行内断言）、`test_distribution.py`（wheel 收录 `markdown.py`/`tool_views.py`，直接依赖含 `rich>=15.0.0`）。
-- 统一门槛（P6-11B-MR3 视觉层级返工后）：P6-11B/main-buffer 兼容组（`tests/test_tui_main_buffer_*.py` + 分发 + P6-09）`-W error` **410 通过**；全量 `pytest -q -W error` **1955 通过、2 跳过**；`ruff check` 全绿；`ruff format --check`（157 文件）通过；`uv build --offline` 成功；两项 `git diff --check` 干净。
-- 视觉证据：110×36 彩色、80×24 彩色、80×24 NO_COLOR、完整纵向序列（用户消息 → 思考 → Markdown 回复 → read → write → edit → bash → 后续回复）、默认折叠与 Ctrl+O 展开、Bash 活动输出、恢复历史共 8 张截图，与 `runtime-main-buffer-current-p6-11a.png`、`runtime-content-hierarchy-pi-reference.png`、`runtime-tool-blocks-pi-reference.png`、`runtime-write-card-reference.png`、`runtime-edit-card-reference.png` 并排比对；截图带真实样式序列，代码块背景与工具色块均覆盖可用宽度。
+- 统一门槛（P5-11B-MR3 视觉层级返工后）：P5-11B/main-buffer 兼容组（`tests/test_tui_main_buffer_*.py` + 分发 + P5-09）`-W error` **410 通过**；全量 `pytest -q -W error` **1955 通过、2 跳过**；`ruff check` 全绿；`ruff format --check`（157 文件）通过；`uv build --offline` 成功；两项 `git diff --check` 干净。
+- 视觉证据：110×36 彩色、80×24 彩色、80×24 NO_COLOR、完整纵向序列（用户消息 → 思考 → Markdown 回复 → read → write → edit → bash → 后续回复）、默认折叠与 Ctrl+O 展开、Bash 活动输出、恢复历史共 8 张截图，与 `runtime-main-buffer-current-p5-11a.png`、`runtime-content-hierarchy-pi-reference.png`、`runtime-tool-blocks-pi-reference.png`、`runtime-write-card-reference.png`、`runtime-edit-card-reference.png` 并排比对；截图带真实样式序列，代码块背景与工具色块均覆盖可用宽度。
 
 ## 用户真实终端验收
 
-- 使用者已在真实 Windows Terminal 完成 P6-11B 冒烟并确认通过；仍有不影响本切片核心目标的细节问题，后续按独立问题处理，不阻塞 P6-11B 收口。
+- 使用者已在真实 Windows Terminal 完成 P5-11B 冒烟并确认通过；仍有不影响本切片核心目标的细节问题，后续按独立问题处理，不阻塞 P5-11B 收口。
 
 ## 边界与后续
 
-- 本切片不切换默认 `mica cli`、不删除旧 Textual、不开始 P6-11C 与 P6-10G；会话格式、Engine、Provider、权限后端与工具执行未改动。
+- 本切片不切换默认 `mica cli`、不删除旧 Textual、不开始 P5-11C 与 P5-10G；会话格式、Engine、Provider、权限后端与工具执行未改动。
 - 屏幕外历史的高度重排受终端物理限制（见上）；若未来需要改变已滚出屏幕的旧记录高度，只能选择清屏重绘或另起一段重复内容，两者都违反当前主缓冲区原则，因此保持现状并等待产品决策。
-- 思考显示模式的配置入口与持久化仍属 Phase 7；本轮只提供注入接缝与默认折叠。
+- 思考显示模式的配置入口与持久化仍属 Phase 6；本轮只提供注入接缝与默认折叠。
 
-# P6-11C 默认切换与旧前端退役
+# P5-11C 默认切换与旧前端退役
 
 ## 任务目标
 
@@ -537,16 +537,16 @@ TUI runner 只接收已装配的 `MicaTuiRuntime`，不接收 Provider、Engine�
 
 ## 验证结果
 
-- 聚焦组（CLI / 主缓冲区 / 公开导入 / 分发 / P6-09 / 共享模型）`-W error` **477 通过**。
+- 聚焦组（CLI / 主缓冲区 / 公开导入 / 分发 / P5-09 / 共享模型）`-W error` **477 通过**。
 - 全量 `pytest -q -W error` **1665 通过、2 跳过**。
 - `ruff check` 全绿；`ruff format --check`（102 文件）通过；`uv lock --check` 通过；`uv build --offline` 成功。wheel 只收录 `tui/__init__.py`、`tui/models.py` 与 `tui/main_buffer/**`，依赖为 `httpx` / `jsonschema` / `prompt-toolkit` / `rich`。
-- 虚拟终端截图输出到系统临时目录 `mica-p6-11c/`；后续输入可靠性返工完成后，使用者已在真实 Windows Terminal 中复验通过。
+- 虚拟终端截图输出到系统临时目录 `mica-p5-11c/`；后续输入可靠性返工完成后，使用者已在真实 Windows Terminal 中复验通过。
 
 ## 验收口径
 
-自动化、静态检查、离线构建、安装态验证和后续真实 Windows Terminal 复验均已通过，P6-11C 已完成。Phase 6 仍等待 P6-10G1～G2，不因本切片完成而关闭。Engine、Provider、权限后端、会话格式与主缓冲区视觉规则未改。
+自动化、静态检查、离线构建、安装态验证和后续真实 Windows Terminal 复验均已通过，P5-11C 已完成。Phase 5 仍等待 P5-10G1～G2，不因本切片完成而关闭。Engine、Provider、权限后端、会话格式与主缓冲区视觉规则未改。
 
-# P6-11C-MR2 输入可靠性与 Ask/Permission 闭环
+# P5-11C-MR2 输入可靠性与 Ask/Permission 闭环
 
 ## 根因
 
@@ -594,10 +594,10 @@ TUI runner 只接收已装配的 `MicaTuiRuntime`，不接收 Provider、Engine�
 
 自动化、Ruff、lock、离线构建与 diff 检查通过后，本返工仍只报告等待使用者真实 Windows
 Terminal 复验（Ask/Permission 方向键、自定义回答、空答案提示、拒绝重试、Esc 取消、超高
-面板、失焦恢复、退出后终端恢复），不得自行宣布 P6-11C 或 Phase 6 完成。Engine、Provider、
+面板、失焦恢复、退出后终端恢复），不得自行宣布 P5-11C 或 Phase 5 完成。Engine、Provider、
 权限后端、Broker 校验、事件 Schema 与会话格式未改。
 
-# P6-11C-MR2 第二轮极小返工：锚点硬约束与提示清除语义
+# P5-11C-MR2 第二轮极小返工：锚点硬约束与提示清除语义
 
 ## 已确认的两个缺陷
 
@@ -643,8 +643,8 @@ Terminal 复验（Ask/Permission 方向键、自定义回答、空答案提示�
 
 ## 验收口径
 
-只报告自动化结果，等待 master 复审与使用者真实 Windows Terminal 复验；不宣布 P6-11C 或
-Phase 6 完成，不启动 P6-10G，不做 Git 收口。
+只报告自动化结果，等待 master 复审与使用者真实 Windows Terminal 复验；不宣布 P5-11C 或
+Phase 5 完成，不启动 P5-10G，不做 Git 收口。
 
 ## 最终验收
 
@@ -652,9 +652,9 @@ Phase 6 完成，不启动 P6-10G，不做 Git 收口。
   Ruff、格式与两项 diff 检查通过。
 - 使用者已在真实 Windows Terminal 中完成 Ask 固定选项、自定义回答、Permission、Esc、
   失焦恢复与窄窗口等冒烟测试，确认功能运行正常。
-- P6-11C 正式验收通过并完成 Git 收口；P6-10G1～G2 仍未开始，Phase 6 仍保持构建中。
+- P5-11C 正式验收通过并完成 Git 收口；P5-10G1～G2 仍未开始，Phase 5 仍保持构建中。
 
-## P6-10G1：中断轮次公共契约与会话升级
+## P5-10G1：中断轮次公共契约与会话升级
 
 本切片新增独立 `RunCheckpoint` 记录，以 `cancelled` 与 `recoverable_failure` 区分未完成运行，成功仍只由完整 `TurnEntry` 表示。检查点按模型步骤保存真实部分输出和工具调用进度；工具状态明确区分成功、真实失败、执行中与未开始，只有真实终态写入 TOOL 结果和展示快照。
 
@@ -662,23 +662,23 @@ JSONL 升级到 v4，使用显式 `run_checkpoint` record type 和固定字段�
 
 `StoredSession.entries` 是 Turn/checkpoint 的唯一有序时间线，`turns`/`checkpoints` 仅为过滤视图。恢复上下文保留完整成功轮消息；检查点只投影合法的已完成 assistant/tool 前缀，并把部分输出、未完成状态和未开始工具作为固定 Mica-owned 状态表达，不伪造最终回复或工具结果。工具参数、真实工具结果与展示副本复用集中清洗，用户原始指令保持不改写。
 
-master 复审确认跨步骤中断不变量、真实 v1/v2/v3 兼容 fixture、原子升级失败恢复、恢复上下文和非回显诊断边界成立；本地绝对路径与 HTTP/HTTPS URL 的分类返工也已通过公开清洗、wire、JSONL 与 Provider 上下文验证。最终聚焦组 237 项通过、1 项跳过；全量测试 1750 项通过、2 项跳过。Ruff、格式检查、lock 检查、离线 sdist/wheel 构建和暂存/未暂存 diff 检查均通过。P6-10G1 正式验收完成。
+master 复审确认跨步骤中断不变量、真实 v1/v2/v3 兼容 fixture、原子升级失败恢复、恢复上下文和非回显诊断边界成立；本地绝对路径与 HTTP/HTTPS URL 的分类返工也已通过公开清洗、wire、JSONL 与 Provider 上下文验证。最终聚焦组 237 项通过、1 项跳过；全量测试 1750 项通过、2 项跳过。Ruff、格式检查、lock 检查、离线 sdist/wheel 构建和暂存/未暂存 diff 检查均通过。P5-10G1 正式验收完成。
 
-## P6-10G2：运行进度捕获与恢复闭环
+## P5-10G2：运行进度捕获与恢复闭环
 
-本切片在已冻结的 P6-10G1 契约上接通真实运行中断。Engine 用内部 `RunProgressSnapshot` / `progress_sink` 记录已完成模型步骤、真实工具终态、执行中/未开始调用和部分助手文本；成功路径仍只走完成 sink，不发进度快照。工具批次开始时写入 `NOT_STARTED`，只有真正 `ToolStarted` 后才标 `IN_PROGRESS`。权限等待取消因此保持 `NOT_STARTED`；Ask 会先发出 `ToolStarted`，等待取消保持 `IN_PROGRESS`。
+本切片在已冻结的 P5-10G1 契约上接通真实运行中断。Engine 用内部 `RunProgressSnapshot` / `progress_sink` 记录已完成模型步骤、真实工具终态、执行中/未开始调用和部分助手文本；成功路径仍只走完成 sink，不发进度快照。工具批次开始时写入 `NOT_STARTED`，只有真正 `ToolStarted` 后才标 `IN_PROGRESS`。权限等待取消因此保持 `NOT_STARTED`；Ask 会先发出 `ToolStarted`，等待取消保持 `IN_PROGRESS`。
 
 MicaApp 在完整成功时提交 `TurnEntry`；`RunCancelled` 与可恢复 `RunFailed`（`AUTHENTICATION`/`RATE_LIMIT`/`TIMEOUT`/`TEMPORARY`/`MALFORMED`）提交一次 `RunCheckpoint`。`LIMIT`/`UNKNOWN`/`STORAGE` 不自动提交可恢复检查点。检查点持久化失败替换为唯一安全 `RunFailed(STORAGE)`，不回显私有路径或凭据。`submitted` 守卫避免 `RunCancelled` 与 `CancelledError`/`aclose` 重复提交。
 
 TUI 历史按 `StoredSession.entries` 投影 Turn/checkpoint/Turn：完成工具复用合法展示快照，未完成工具只显示名称和状态，部分助手用稳定 Markdown 加 Mica-owned `incomplete` 标记，不保留流式光标。检查点 ID 由独立 `checkpoint_id_factory` 生成。后续 Run 通过 `context_snapshot()` 看到原始用户指令和合法已完成前缀，不伪造最终 assistant 或未执行工具结果。
 
-master 复审确认进度快照、独立 checkpoint ID、终态前持久化、Ask/Permission/Bash/多工具批次状态、跨模型恢复、历史 `incomplete` 标记与取消/关闭幂等边界成立。聚焦复验中 App/TUI/集成组合 94 项通过、Engine 70 项通过；全量 `-W error` 1771 项通过、2 项跳过。Ruff、格式检查、lock 检查、离线 sdist/wheel 构建及两项 diff 检查均通过，P6-10G2 正式验收完成。Phase 6 仍等待用户最终真实使用验收，不在此处宣布完成。
+master 复审确认进度快照、独立 checkpoint ID、终态前持久化、Ask/Permission/Bash/多工具批次状态、跨模型恢复、历史 `incomplete` 标记与取消/关闭幂等边界成立。聚焦复验中 App/TUI/集成组合 94 项通过、Engine 70 项通过；全量 `-W error` 1771 项通过、2 项跳过。Ruff、格式检查、lock 检查、离线 sdist/wheel 构建及两项 diff 检查均通过，P5-10G2 正式验收完成。Phase 5 仍等待用户最终真实使用验收，不在此处宣布完成。
 
-## P6-11C-MR3：composer 物理光标即时刷新
+## P5-11C-MR3：composer 物理光标即时刷新
 
-P6-10G2 后的最终真实 Windows Terminal 冒烟发现一个主缓冲区输入回归：方向键会改变 composer 的逻辑编辑位置，但在没有文本变化时，屏幕光标仍停留在旧位置；只有随后执行 Backspace 或输入新字符，物理光标才显示到此前已移动的位置。文本编辑位置本身没有丢失，因此问题边界集中在 cursor-only 帧的终端刷新，而不是编辑器移动语义。
+P5-10G2 后的最终真实 Windows Terminal 冒烟发现一个主缓冲区输入回归：方向键会改变 composer 的逻辑编辑位置，但在没有文本变化时，屏幕光标仍停留在旧位置；只有随后执行 Backspace 或输入新字符，物理光标才显示到此前已移动的位置。文本编辑位置本身没有丢失，因此问题边界集中在 cursor-only 帧的终端刷新，而不是编辑器移动语义。
 
-当前首要诊断方向是 `MainBufferRenderer.repaint()`：当新旧物理行文本完全相同时，差分路径会在写出光标定位序列之前提前返回。P6-11C-MR3 必须先用公共按键队列和累计虚拟终端回放建立旧实现可失败的回归，再做最小渲染修复；方向键不得触发无意义的整块擦除重写，不得清空 scrollback、进入 alternate screen 或改变 composer 文本、粘贴片段、Ask/Permission、Ctrl+O 与运行中输入所有权。Phase 6 在真实终端确认左右/上下/Home/End 可即时移动可见光标前保持构建中。
+当前首要诊断方向是 `MainBufferRenderer.repaint()`：当新旧物理行文本完全相同时，差分路径会在写出光标定位序列之前提前返回。P5-11C-MR3 必须先用公共按键队列和累计虚拟终端回放建立旧实现可失败的回归，再做最小渲染修复；方向键不得触发无意义的整块擦除重写，不得清空 scrollback、进入 alternate screen 或改变 composer 文本、粘贴片段、Ask/Permission、Ctrl+O 与运行中输入所有权。Phase 5 在真实终端确认左右/上下/Home/End 可即时移动可见光标前保持构建中。
 
 ### 最终根因（已确证，首要假设成立）
 
@@ -721,12 +721,12 @@ if not pending_rows and self._drawn:
 
 ### 验证结果
 
-- 聚焦组（composer/redraw/screen/events/vt）`-W error` **128 通过**；全部 `tests/test_tui_main_buffer_*.py` **463 通过**；CLI/分发兼容组（`test_tui_main_buffer_cli`/`test_distribution`/`test_p6_09_integration`）**50 通过**；全量 `pytest -q -W error` **1776 通过、2 跳过**。
+- 聚焦组（composer/redraw/screen/events/vt）`-W error` **128 通过**；全部 `tests/test_tui_main_buffer_*.py` **463 通过**；CLI/分发兼容组（`test_tui_main_buffer_cli`/`test_distribution`/`test_p5_09_integration`）**50 通过**；全量 `pytest -q -W error` **1776 通过、2 跳过**。
 - `ruff check src/mica_agent tests` 全绿；`ruff format --check`（104 文件）通过；`uv lock --check` 通过；`uv build --offline` 成功（wheel 仍只收录 `tui/__init__.py`、`tui/models.py` 与 `tui/main_buffer/**`）；两项 `git diff --check` 干净。
 - 使用者已在真实 Windows Terminal 确认左右/上下/Home/End 可立即移动可见光标，功能修复通过；移动过程中不再需要等待下一次输入或删除才更新物理光标。
 
-## Phase 6 最终验收
+## Phase 5 最终验收
 
-- P6-11C-MR3 经 master 复审后，渲染器与主缓冲区聚焦组分别通过 53、128 和 463 项 `-W error` 测试；worker 全量门槛为 1776 项通过、2 项跳过，Ruff、格式、lock、离线构建及两项 diff 检查通过。
+- P5-11C-MR3 经 master 复审后，渲染器与主缓冲区聚焦组分别通过 53、128 和 463 项 `-W error` 测试；worker 全量门槛为 1776 项通过、2 项跳过，Ruff、格式、lock、离线构建及两项 diff 检查通过。
 - 使用者在真实 Windows Terminal 完成最终冒烟，确认 composer 物理光标即时刷新恢复正常；此前主缓冲区、终端原生 scrollback、历史与工具呈现、Ask/Permission、取消、恢复和中断检查点也已逐项复验。
-- Phase 6 正式完成。后续不直接启动 Phase 7；先暂停阶段推进，进行代码框架梳理、协作方式与产品方向重新对齐，并共同制定文档治理和代码风格 spec。
+- Phase 5 正式完成。后续不直接启动 Phase 6；先暂停阶段推进，进行代码框架梳理、协作方式与产品方向重新对齐，并共同制定文档治理和代码风格 spec。

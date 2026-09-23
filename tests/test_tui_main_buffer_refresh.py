@@ -1,4 +1,4 @@
-"""P6-11A-MR1 §6：真实 screen 级 resize、工作状态刷新与事实刷新。"""
+"""P5-11A-MR1 §6：真实 screen 级 resize、工作状态刷新与事实刷新。"""
 
 from __future__ import annotations
 

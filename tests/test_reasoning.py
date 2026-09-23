@@ -1,4 +1,4 @@
-"""P5-11 统一思考强度公共契约测试。"""
+"""P4-11 统一思考强度公共契约测试。"""
 
 from __future__ import annotations
 

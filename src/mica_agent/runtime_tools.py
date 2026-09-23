@@ -1,4 +1,4 @@
-"""P5-04 的 bash 与 ask 工具注册和运行时边界。"""
+"""P4-04 的 bash 与 ask 工具注册和运行时边界。"""
 
 from __future__ import annotations
 

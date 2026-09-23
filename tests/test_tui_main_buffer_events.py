@@ -1,4 +1,4 @@
-"""P6-11A-MR1 §8/§9：公共事件身份、顺序、终态与 stop/error 分类。
+"""P5-11A-MR1 §8/§9：公共事件身份、顺序、终态与 stop/error 分类。
 
 事件通过屏幕的公开投影边界 ``handle_event`` 注入，因此这些测试断言的正是
 「公共事件如何改变界面」的契约，而不是内部实现细节。
@@ -651,7 +651,7 @@ def test_rejected_permission_response_keeps_the_panel_and_shows_a_hint(
     asyncio.run(with_screen(tmp_path, body))
 
 
-# -- P6-11B：名称与 kind、全局展开、活动工具预览 ---------------------------
+# -- P5-11B：名称与 kind、全局展开、活动工具预览 ---------------------------
 
 CTRL_O = KeyPress(Keys.ControlO, "\x0f")
 PAGE_UP = KeyPress(Keys.PageUp, chr(27) + chr(91) + "5~")
@@ -856,7 +856,7 @@ def test_active_bash_preview_ignores_page_keys_and_keeps_no_scroll(
     asyncio.run(with_screen(tmp_path, body))
 
 
-# -- P6-11B 返工：Bash 动态输出的逻辑行语义 --------------------------------
+# -- P5-11B 返工：Bash 动态输出的逻辑行语义 --------------------------------
 
 
 def _keys_consumed(env: SimpleNamespace) -> bool:

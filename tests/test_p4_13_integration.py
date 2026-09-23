@@ -1,4 +1,4 @@
-"""P5-13C2 基础 CLI 动态 Bash 输出集成测试。"""
+"""P4-13C2 基础 CLI 动态 Bash 输出集成测试。"""
 
 from __future__ import annotations
 

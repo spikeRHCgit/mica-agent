@@ -1,4 +1,4 @@
-"""P5-11 思考强度与独立思考事件跨层集成测试。"""
+"""P4-11 思考强度与独立思考事件跨层集成测试。"""
 
 from __future__ import annotations
 
@@ -57,8 +57,8 @@ def test_reasoning_crosses_transport_and_engine_but_not_session(tmp_path) -> Non
         session_id=session.meta.session_id,
         context_builder=ContextBuilder(data_root=data_root, workspace=workspace),
         system_prompt="frozen system prompt",
-        run_id_factory=lambda: "run-p5-11",
-        turn_id_factory=lambda: "turn-p5-11",
+        run_id_factory=lambda: "run-p4-11",
+        turn_id_factory=lambda: "turn-p4-11",
     )
 
     async def scenario() -> list[EngineEvent]:
@@ -85,10 +85,10 @@ def test_reasoning_crosses_transport_and_engine_but_not_session(tmp_path) -> Non
         }
     ]
     assert events == [
-        RunStarted("run-p5-11"),
-        ReasoningDelta("run-p5-11", "private analysis", 1),
-        TextDelta("run-p5-11", "formal answer", 2),
-        RunCompleted("run-p5-11", 3),
+        RunStarted("run-p4-11"),
+        ReasoningDelta("run-p4-11", "private analysis", 1),
+        TextDelta("run-p4-11", "formal answer", 2),
+        RunCompleted("run-p4-11", 3),
     ]
     assert app.history == (
         Message(MessageRole.USER, "question"),

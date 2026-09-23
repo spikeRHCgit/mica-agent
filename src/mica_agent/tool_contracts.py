@@ -87,7 +87,7 @@ def _freeze_json_object(value: object, field_name: str) -> JsonObject:
 
 
 def to_mutable_json(value: JsonValue) -> MutableJsonValue:
-    """把 P5 不可变 JSON 快照递归复制为标准可变 JSON 值。"""
+    """把 P4 不可变 JSON 快照递归复制为标准可变 JSON 值。"""
 
     def copy_snapshot(current: object, active: set[int]) -> MutableJsonValue:
         if current is None or isinstance(current, (bool, str)):
@@ -120,7 +120,7 @@ def to_mutable_json(value: JsonValue) -> MutableJsonValue:
                 }
             finally:
                 active.remove(identity)
-        raise TypeError("value must be a P5 JSON snapshot")
+        raise TypeError("value must be a P4 JSON snapshot")
 
     return copy_snapshot(value, set())
 

@@ -1,9 +1,11 @@
-"""P5-09 会话激活头部快照集成测试。"""
+"""P5-09 CLI 路由、主缓冲区装配与生命周期集成测试。"""
 
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from pathlib import Path
 
 import pytest
@@ -11,21 +13,24 @@ import pytest
 from mica_agent import cli
 from mica_agent.context_builder import ContextBuilder
 from mica_agent.jsonl_store import JsonlSessionStore
-from mica_agent.models import Message, MessageRole
+from mica_agent.models import MessageRole
+from mica_agent.permissions import PermissionMode
 from mica_agent.providers import Finish, ProviderEvent, ProviderRequest
+from mica_agent.providers import TextDelta as ProviderTextDelta
 from mica_agent.session_service import SessionService
-from mica_agent.system_prompt import SystemPromptError
-from mica_agent.workspace import WorkspaceIdentity, resolve_workspace
+from mica_agent.workspace import resolve_workspace
 
 
-class ProviderStub:
-    def __init__(self) -> None:
+class ScriptedProvider:
+    def __init__(self, *scripts: list[ProviderEvent]) -> None:
+        self.scripts = list(scripts)
         self.requests: list[ProviderRequest] = []
         self.aclose_calls = 0
 
     async def stream(self, request: ProviderRequest) -> AsyncIterator[ProviderEvent]:
         self.requests.append(request)
-        yield Finish()
+        for event in self.scripts[len(self.requests) - 1]:
+            yield event
 
     async def aclose(self) -> None:
         self.aclose_calls += 1
@@ -53,152 +58,259 @@ class Recorder:
         return "".join(self.calls)
 
 
-def make_dependencies(
-    tmp_path: Path,
-) -> tuple[WorkspaceIdentity, SessionService, ContextBuilder]:
-    workspace_path = tmp_path / "workspace"
-    workspace_path.mkdir()
+def make_dependencies(tmp_path: Path):
+    workspace_path = tmp_path / "工作区 with spaces"
+    workspace_path.mkdir(parents=True)
+    data_root = tmp_path / "isolated home" / ".mica"
+    data_root.mkdir(parents=True)
     workspace = resolve_workspace(workspace_path)
-    data_root = tmp_path / "data"
     service = SessionService(JsonlSessionStore(workspace, data_root))
     builder = ContextBuilder(data_root=data_root, workspace=workspace)
-    data_root.mkdir(exist_ok=True)
-    data_root.joinpath("AGENTS.md").write_text("global snapshot", encoding="utf-8")
-    workspace_path.joinpath("AGENTS.md").write_text(
-        "workspace snapshot", encoding="utf-8"
-    )
     return workspace, service, builder
 
 
-@pytest.mark.parametrize("mode", ["new", "continue", "resume"])
-def test_cli_activation_builds_each_header_once(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    mode: str,
-) -> None:
-    workspace, service, builder = make_dependencies(tmp_path)
-    if mode != "new":
-        service.create_session(title="selected")
-    provider = ProviderStub()
-    original_build = builder.build
-    build_calls = 0
-    prompt_workspaces: list[WorkspaceIdentity] = []
-
-    def counted_build(*args: object, **kwargs: object):
-        nonlocal build_calls
-        build_calls += 1
-        return original_build(*args, **kwargs)
-
-    def fake_prompt(selected_workspace: WorkspaceIdentity) -> str:
-        prompt_workspaces.append(selected_workspace)
-        return "built-in session snapshot"
-
-    monkeypatch.setattr(builder, "build", counted_build)
-    monkeypatch.setattr(cli, "build_system_prompt", fake_prompt, raising=False)
-    inputs = ("1", "question") if mode == "resume" else ("question",)
-
-    code = asyncio.run(
-        cli.run_interactive(
-            "https://api.example.test/v1",
-            "fake-key",
-            "test-model",
-            session_mode=mode,  # type: ignore[arg-type]
-            provider_factory=lambda _url, _key: provider,
-            read_line=InputScript(*inputs),
-            write_out=Recorder(),
-            write_err=Recorder(),
-            workspace=workspace,
-            session_service=service,
-            context_builder=builder,
-        )
-    )
-
-    assert code == 0
-    assert build_calls == 1
-    assert prompt_workspaces == [workspace]
-    assert provider.aclose_calls == 1
-    assert provider.requests[0].messages == (
-        Message(MessageRole.SYSTEM, "built-in session snapshot"),
-        Message(
-            MessageRole.SYSTEM,
-            '<INSTRUCTIONS source="global">\nglobal snapshot\n</INSTRUCTIONS>',
-        ),
-        Message(
-            MessageRole.SYSTEM,
-            '<INSTRUCTIONS source="workspace">\nworkspace snapshot\n</INSTRUCTIONS>',
-        ),
-        Message(MessageRole.USER, "question"),
-    )
-
-
 @pytest.mark.parametrize(
-    ("mode", "inputs", "create_session"),
+    ("argv", "expected_plain", "expected_mode", "expected_permission"),
     [
-        ("continue", (), False),
-        ("resume", ("999",), True),
+        (["mica", "cli"], False, "new", PermissionMode.DEFAULT),
+        (["mica", "cli", "--plain"], True, "new", PermissionMode.DEFAULT),
+        (
+            ["mica", "cli", "--continue", "--plain"],
+            True,
+            "continue",
+            PermissionMode.DEFAULT,
+        ),
+        (["mica", "cli", "--resume"], False, "resume", PermissionMode.DEFAULT),
+        (
+            ["mica", "cli", "--permission-mode", "solo"],
+            False,
+            "new",
+            PermissionMode.SOLO,
+        ),
+        (
+            ["mica", "cli", "--plain", "--permission-mode", "solo"],
+            True,
+            "new",
+            PermissionMode.SOLO,
+        ),
     ],
 )
-def test_failed_session_selection_precedes_header_and_provider_setup(
+def test_cli_main_routes_default_terminal_and_plain_without_startup_work(
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    expected_plain: bool,
+    expected_mode: str,
+    expected_permission: PermissionMode,
+) -> None:
+    monkeypatch.setenv("MICA_API_URL", "http://127.0.0.1:1/v1")
+    monkeypatch.setenv("MICA_API_KEY", "fake-key")
+    monkeypatch.setenv("MICA_MODEL", "fake-model")
+    calls: list[tuple[object, object, object]] = []
+
+    def fake_main_cli(mode, permission, *, plain):
+        calls.append((mode, permission, plain))
+        return 0
+
+    monkeypatch.setattr(cli, "_main_cli", fake_main_cli)
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(SystemExit) as raised:
+        cli.main()
+
+    assert raised.value.code == 0
+    assert calls == [(expected_mode, expected_permission, expected_plain)]
+
+
+def test_cli_help_explains_default_terminal_and_plain(
+    monkeypatch: pytest.MonkeyPatch, capsys
+):
+    monkeypatch.setattr(sys, "argv", ["mica", "cli", "--help"])
+    with pytest.raises(SystemExit) as raised:
+        cli.main()
+    captured = capsys.readouterr()
+    assert raised.value.code == 0
+    assert "--plain" in captured.out
+    assert "basic text interface" in captured.out
+    assert "Textual" not in captured.out
+    assert "--main-buffer-preview" not in captured.out
+
+
+def test_default_route_freezes_context_snapshot_and_uses_selected_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    mode: str,
-    inputs: tuple[str, ...],
-    create_session: bool,
 ) -> None:
-    workspace, service, builder = make_dependencies(tmp_path)
-    if create_session:
-        service.create_session(title="available")
-    calls: list[str] = []
+    async def scenario() -> None:
+        from mica_agent.tui import main_buffer
 
-    def forbidden(*_args: object, **_kwargs: object) -> object:
-        calls.append("startup")
-        raise AssertionError("startup must not run")
+        workspace, service, builder = make_dependencies(tmp_path)
+        (workspace.workspace_path / "AGENTS.md").write_text(
+            "workspace-only rules", encoding="utf-8"
+        )
+        provider = ScriptedProvider([ProviderTextDelta("done"), Finish()])
+        out = Recorder()
+        err = Recorder()
+        build_calls = 0
+        prompt_calls = 0
+        original_build = builder.build
+        original_prompt = cli.build_system_prompt
 
-    monkeypatch.setattr(builder, "build", forbidden)
-    monkeypatch.setattr(cli, "build_system_prompt", forbidden)
-    code = asyncio.run(
-        cli.run_interactive(
-            "https://api.example.test/v1",
+        def counted_build():
+            nonlocal build_calls
+            build_calls += 1
+            return original_build()
+
+        def counted_prompt(selected_workspace):
+            nonlocal prompt_calls
+            prompt_calls += 1
+            return original_prompt(selected_workspace)
+
+        monkeypatch.setattr(builder, "build", counted_build)
+        monkeypatch.setattr(cli, "build_system_prompt", counted_prompt)
+        observed: dict[str, object] = {}
+
+        class DrivingScreen:
+            def __init__(self, app, **kwargs) -> None:
+                self._app = app
+                observed["kwargs"] = kwargs
+                self.closed = False
+
+            async def run(self) -> None:
+                payload = observed["kwargs"]
+                assert isinstance(payload, dict)
+                observed["session"] = payload["stored_session"]
+                observed["snapshot"] = payload["startup_resources"]
+                observed["session_snapshot"] = payload["session_snapshot"]
+                async with aclosing(self._app.run("hello from tui")) as stream:
+                    async for _event in stream:
+                        pass
+                await self._app.aclose()
+                self.closed = True
+
+        monkeypatch.setattr(main_buffer, "MainBufferScreen", DrivingScreen)
+
+        code = await cli.run_interactive(
+            "http://127.0.0.1:1/v1",
             "fake-key",
-            "test-model",
-            session_mode=mode,  # type: ignore[arg-type]
-            provider_factory=forbidden,  # type: ignore[arg-type]
-            read_line=InputScript(*inputs),
+            "fake-model",
+            plain=False,
+            provider_factory=lambda _url, _key: provider,
+            read_line=InputScript(),
+            write_out=out,
+            write_err=err,
+            workspace=workspace,
+            session_service=service,
+            context_builder=builder,
+            permission_mode=PermissionMode.SOLO,
+        )
+
+        selected = observed["session"]
+        snapshot = observed["snapshot"]
+        session_snapshot = observed["session_snapshot"]
+        assert code == 0
+        assert selected is not None
+        assert provider.requests[0].messages[-1].content == "hello from tui"
+        assert snapshot.system_prompt_name == "Mica built-in system prompt"
+        assert tuple(source.value for source in snapshot.agent_sources) == (
+            "workspace",
+        )
+        assert snapshot.global_agent_path is None
+        assert snapshot.workspace_agent_path == "./AGENTS.md"
+        assert snapshot.tool_names == ("ask", "bash", "edit", "read", "write")
+        assert snapshot.skill_names == ()
+        assert snapshot.extension_names == ()
+        assert session_snapshot.workspace.endswith("工作区 with spaces")
+        assert session_snapshot.session_label == selected.meta.session_id
+        assert session_snapshot.model == "fake-model"
+        assert build_calls == 1
+        assert prompt_calls == 1
+        assert (
+            service.list_sessions().sessions[0].meta.session_id
+            == selected.meta.session_id
+        )
+        assert provider.aclose_calls == 1
+        assert out.text == ""
+        assert err.text == ""
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("session_mode", ["continue", "resume"])
+def test_default_route_passes_continue_or_resume_session_to_screen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, session_mode: str
+) -> None:
+    async def scenario() -> None:
+        from mica_agent.tui import main_buffer
+
+        workspace, service, builder = make_dependencies(tmp_path / session_mode)
+        selected = service.create_session(title="selected")
+        provider = ScriptedProvider([ProviderTextDelta("restored"), Finish()])
+        observed: list[object] = []
+        observed_labels: list[str | None] = []
+
+        class DrivingScreen:
+            def __init__(self, app, **kwargs) -> None:
+                self._app = app
+                observed.append(kwargs["stored_session"])
+                observed_labels.append(kwargs["session_snapshot"].session_label)
+                self.closed = False
+
+            async def run(self) -> None:
+                async with aclosing(self._app.run("restored prompt")) as stream:
+                    async for _event in stream:
+                        pass
+                await self._app.aclose()
+                self.closed = True
+
+        monkeypatch.setattr(main_buffer, "MainBufferScreen", DrivingScreen)
+
+        code = await cli.run_interactive(
+            "http://127.0.0.1:1/v1",
+            "fake-key",
+            "fake-model",
+            session_mode=session_mode,  # type: ignore[arg-type]
+            plain=False,
+            provider_factory=lambda _url, _key: provider,
+            read_line=InputScript("1"),
             write_out=Recorder(),
             write_err=Recorder(),
             workspace=workspace,
             session_service=service,
             context_builder=builder,
         )
-    )
 
-    assert code == 2
-    assert calls == []
+        assert code == 0
+        assert observed == [selected]
+        assert observed_labels == ["selected"]
+        assert provider.requests[0].messages[-1].content == "restored prompt"
+        assert provider.aclose_calls == 1
+
+    asyncio.run(scenario())
 
 
-def test_system_prompt_failure_is_safe_and_precedes_provider(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_screen_failure_is_safe_and_closes_provider_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    workspace, service, builder = make_dependencies(tmp_path)
-    provider_created = False
-    err = Recorder()
+    async def scenario() -> None:
+        from mica_agent.tui import main_buffer
 
-    def fail_prompt(_workspace: WorkspaceIdentity) -> str:
-        raise SystemPromptError("private template C:/secret API_KEY=value")
+        workspace, service, builder = make_dependencies(tmp_path)
+        provider = ScriptedProvider()
+        err = Recorder()
 
-    def forbidden_provider(_url: str, _key: str) -> ProviderStub:
-        nonlocal provider_created
-        provider_created = True
-        raise AssertionError("provider must not be created")
+        class FailingScreen:
+            def __init__(self, app, **kwargs) -> None:
+                self.closed = False
 
-    monkeypatch.setattr(cli, "build_system_prompt", fail_prompt, raising=False)
-    code = asyncio.run(
-        cli.run_interactive(
-            "https://api.example.test/v1",
+            async def run(self) -> None:
+                raise RuntimeError("fake-key https://private.example/path")
+
+        monkeypatch.setattr(main_buffer, "MainBufferScreen", FailingScreen)
+
+        code = await cli.run_interactive(
+            "http://127.0.0.1:1/v1",
             "fake-key",
-            "test-model",
-            provider_factory=forbidden_provider,
+            "fake-model",
+            plain=False,
+            provider_factory=lambda _url, _key: provider,
             read_line=InputScript(),
             write_out=Recorder(),
             write_err=err,
@@ -206,10 +318,78 @@ def test_system_prompt_failure_is_safe_and_precedes_provider(
             session_service=service,
             context_builder=builder,
         )
-    )
 
-    assert code == 2
-    assert provider_created is False
-    assert err.text == "mica: unable to prepare system prompt\n"
-    assert "secret" not in err.text
-    assert str(workspace.workspace_path) not in err.text
+        assert code == 2
+        assert err.text == "mica: unable to start terminal interface\n"
+        assert "fake-key" not in err.text
+        assert "private" not in err.text
+        assert provider.aclose_calls == 1
+        assert service.list_sessions().sessions[0].turns == ()
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_screen_closes_provider_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        from mica_agent.tui import main_buffer
+
+        workspace, service, builder = make_dependencies(tmp_path)
+        provider = ScriptedProvider()
+
+        class CancelledScreen:
+            def __init__(self, app, **kwargs) -> None:
+                self.closed = False
+
+            async def run(self) -> None:
+                raise asyncio.CancelledError
+
+        monkeypatch.setattr(main_buffer, "MainBufferScreen", CancelledScreen)
+
+        with pytest.raises(asyncio.CancelledError):
+            await cli.run_interactive(
+                "http://127.0.0.1:1/v1",
+                "fake-key",
+                "fake-model",
+                plain=False,
+                provider_factory=lambda _url, _key: provider,
+                read_line=InputScript(),
+                write_out=Recorder(),
+                write_err=Recorder(),
+                workspace=workspace,
+                session_service=service,
+                context_builder=builder,
+            )
+        assert provider.aclose_calls == 1
+        assert service.list_sessions().sessions[0].turns == ()
+
+    asyncio.run(scenario())
+
+
+def test_direct_run_interactive_remains_plain_compatible(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        workspace, service, builder = make_dependencies(tmp_path)
+        provider = ScriptedProvider([ProviderTextDelta("plain answer"), Finish()])
+        out = Recorder()
+        err = Recorder()
+        code = await cli.run_interactive(
+            "http://127.0.0.1:1/v1",
+            "fake-key",
+            "fake-model",
+            plain=True,
+            provider_factory=lambda _url, _key: provider,
+            read_line=InputScript("plain prompt"),
+            write_out=out,
+            write_err=err,
+            workspace=workspace,
+            session_service=service,
+            context_builder=builder,
+        )
+        assert code == 0
+        assert out.text == "plain answer\n"
+        assert err.text == ""
+        assert provider.aclose_calls == 1
+        assert provider.requests[0].messages[-1].role is MessageRole.USER
+
+    asyncio.run(scenario())

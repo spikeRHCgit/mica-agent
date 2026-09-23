@@ -1,4 +1,4 @@
-"""P5-08 基础 CLI 工具集成公开行为测试。"""
+"""P4-08 基础 CLI 工具集成公开行为测试。"""
 
 from __future__ import annotations
 

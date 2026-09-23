@@ -1,4 +1,4 @@
-"""P5-01 权限基础枚举测试。"""
+"""P4-01 权限基础枚举测试。"""
 
 from __future__ import annotations
 

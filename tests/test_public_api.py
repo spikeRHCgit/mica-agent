@@ -210,7 +210,7 @@ def test_top_level_exports_engine_and_app() -> None:
     assert mica_agent.RunCancelled is RunCancelled
 
 
-def test_top_level_exports_p5_06_execution_contracts() -> None:
+def test_top_level_exports_p4_06_execution_contracts() -> None:
     from mica_agent.interactions import AskOption as AskOptionClass
     from mica_agent.interactions import AskPrompt as AskPromptClass
     from mica_agent.interactions import (
@@ -375,7 +375,7 @@ assert callable(mica_agent.register_runtime_tools)
     assert completed.returncode == 0, completed.stderr
 
 
-def test_top_level_exports_p5_04_runtime_tools() -> None:
+def test_top_level_exports_p4_04_runtime_tools() -> None:
     from mica_agent.runtime_tools import (
         DEFAULT_COMMAND_TIMEOUT_SECONDS,
         MAX_COMMAND_OUTPUT_BYTES,
@@ -397,7 +397,7 @@ def test_top_level_exports_tool_output_reporter() -> None:
     assert "ToolOutputReporter" in mica_agent.__all__
 
 
-def test_top_level_exports_p5_02_contracts() -> None:
+def test_top_level_exports_p4_02_contracts() -> None:
     from mica_agent.policy import PolicyEngine as PolicyEngineClass
     from mica_agent.policy import PolicyInput as PolicyInputClass
     from mica_agent.policy import PolicyOperation as PolicyOperationEnum
@@ -437,7 +437,7 @@ def test_top_level_exports_p5_02_contracts() -> None:
     assert validate_tool_schema is validate_tool_schema_function
 
 
-def test_top_level_exports_p5_03_contracts() -> None:
+def test_top_level_exports_p4_03_contracts() -> None:
     from mica_agent.file_tools import MAX_FILE_BYTES
     from mica_agent.file_tools import (
         register_file_tools as register_file_tools_function,
@@ -457,7 +457,7 @@ def test_top_level_exports_p5_03_contracts() -> None:
     assert mica_agent.WorkspacePathResolver is WorkspacePathResolverClass
 
 
-def test_p5_01_contract_modules_import_without_runtime_cycles() -> None:
+def test_p4_01_contract_modules_import_without_runtime_cycles() -> None:
     code = (
         "import sys\n"
         "import mica_agent.cancellation\n"
@@ -573,7 +573,7 @@ def test_models_module_is_independent_of_providers_and_events() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_p5_02_modules_import_without_runtime_cycles() -> None:
+def test_p4_02_modules_import_without_runtime_cycles() -> None:
     code = (
         "import sys\n"
         "import mica_agent.tool_registry\n"
@@ -591,7 +591,7 @@ def test_p5_02_modules_import_without_runtime_cycles() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_p5_03_imports_have_no_filesystem_or_runtime_side_effects() -> None:
+def test_p4_03_imports_have_no_filesystem_or_runtime_side_effects() -> None:
     code = (
         "import pathlib, sys\n"
         "def forbidden(*args, **kwargs): raise AssertionError('filesystem access')\n"

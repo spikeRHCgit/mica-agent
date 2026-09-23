@@ -1,4 +1,4 @@
-"""P6-10G2 中断检查点捕获与恢复闭环测试。"""
+"""P5-10G2 中断检查点捕获与恢复闭环测试。"""
 
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ def make_app(
     provider: object,
     *,
     tool_executor: ToolExecutor | None = None,
-    run_ids: tuple[str, ...] = ("run-p6-10g2-a", "run-p6-10g2-b"),
+    run_ids: tuple[str, ...] = ("run-p5-10g2-a", "run-p5-10g2-b"),
 ) -> tuple[MicaApp, SessionService, str]:
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
@@ -73,7 +73,7 @@ def make_app(
     service = SessionService(JsonlSessionStore(workspace, data_root))
     session = service.create_session()
     remaining = list(run_ids)
-    ids = iter(("id-p6-10g2-a", "id-p6-10g2-b"))
+    ids = iter(("id-p5-10g2-a", "id-p5-10g2-b"))
     app = MicaApp(
         provider,  # type: ignore[arg-type]
         "test-model",

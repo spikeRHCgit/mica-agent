@@ -1,4 +1,4 @@
-"""P5-03 的显式注册文件工具入口。"""
+"""P4-03 的显式注册文件工具入口。"""
 
 from __future__ import annotations
 

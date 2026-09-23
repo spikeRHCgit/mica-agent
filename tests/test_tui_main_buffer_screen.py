@@ -1,4 +1,4 @@
-"""P6-11A 主缓冲区前端集成测试：终端、Run、Ask、Permission、取消与退出。"""
+"""P5-11A 主缓冲区前端集成测试：终端、Run、Ask、Permission、取消与退出。"""
 
 from __future__ import annotations
 
@@ -352,7 +352,7 @@ def freeze_done_window(screen: MainBufferScreen) -> None:
 
     ``done`` 按设计只显示 ``DONE_VISIBLE_SECONDS``（2 秒）后淡出为 ``idle``。
     把「恰好抓到 done」当作同步点时，负载造成的调度延迟会让测试错过这个窗口，
-    从而把「产品已经正常结束」误判为超时（P6-11C-MR2 已用探针单独复现并证明：
+    从而把「产品已经正常结束」误判为超时（P5-11C-MR2 已用探针单独复现并证明：
     停顿 2.5 秒后 Run 仍已完成，只是状态已淡出）。冻结时钟不改变任何产品行为，
     只把被观测的瞬时状态固定下来。
     """
@@ -529,7 +529,7 @@ def test_escape_cancels_active_run_without_committing_turn(tmp_path: Path) -> No
     asyncio.run(scenario())
 
 
-# -- P6-11C-MR3：composer 物理光标即时刷新 ------------------------------------
+# -- P5-11C-MR3：composer 物理光标即时刷新 ------------------------------------
 
 LEFT = KeyPress(Keys.Left, "\x1b[D")
 RIGHT = KeyPress(Keys.Right, "\x1b[C")
@@ -1110,7 +1110,7 @@ def test_rejected_submit_keeps_the_paste_fragment(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-# -- P6-11C-MR2：Windows VT 零字符导航后备与 Esc flush ------------------------
+# -- P5-11C-MR2：Windows VT 零字符导航后备与 Esc flush ------------------------
 
 
 def test_windows_record_sequences_map_zero_char_navigation_records() -> None:

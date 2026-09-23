@@ -7,7 +7,7 @@
 
 - `startup-reference-wide.png`：正向目标。用于确认新会话启动首屏的整体构图、纵向顺序、
   资源分区、输入框边界和底部信息层级。
-- `startup-current-bottom-aligned.png`：负向问题。记录 P6-09 冒烟时启动内容被推到下半屏、
+- `startup-current-bottom-aligned.png`：负向问题。记录 P5-09 冒烟时启动内容被推到下半屏、
   大面积深蓝背景、资源区过于简化和底部信息缺失的问题。
 - `composer-current-incomplete-border.png`：负向问题局部。记录输入框聚焦后边界不稳定、缺少
   提示文字和快捷键信息的问题。
@@ -48,16 +48,16 @@
 - `runtime-tool-blocks-pi-reference.png`：动态工具色块正向参考。用于确认工具调用以大面积状态
   背景区别于普通模型正文、运行中安全摘要动态更新、历史工具可统一展开；截图中的代码、命令、
   路径、桌面内容和其他应用界面都不是 Mica 的实现输入。
-- `runtime-main-buffer-current-p6-11a.png`：P6-11A 用户真实终端验收后的负向视觉基线。主缓冲区、
+- `runtime-main-buffer-current-p5-11a.png`：P5-11A 用户真实终端验收后的负向视觉基线。主缓冲区、
   原生 scrollback、输入和交互功能已经通过，但用户消息、模型思考、正式回复与工具记录过于拥挤，
-  正式回复仍暴露原始 Markdown 标记；P6-11B 必须消除这些偏差，不得复刻其视觉层级。
+  正式回复仍暴露原始 Markdown 标记；P5-11B 必须消除这些偏差，不得复刻其视觉层级。
 - `runtime-content-hierarchy-pi-reference.png`：正文层级正向参考。只借鉴段落留白、标题/列表/行内代码
   的可读层级、次要过程信息与正式回复的区分，以及工具色块和普通正文的清晰边界；不照抄 Todo、
   token、成本、模型名、产品文案、桌面背景或其他应用控件。
-- `runtime-p6-11b-hierarchy-still-crowded.png`：负向问题。P6-11B 真实 Windows Terminal 复验：用户消息
+- `runtime-p5-11b-hierarchy-still-crowded.png`：负向问题。P5-11B 真实 Windows Terminal 复验：用户消息
   背景随文字收缩、用户/思考/回复/工具之间零间距、思考不够次要。只用于确认必须消除的偏差，
   不是待复刻目标。
-- `runtime-p6-11b-inline-code-overhighlighted.png`：负向问题。P6-11B 真实 Windows Terminal 复验：普通
+- `runtime-p5-11b-inline-code-overhighlighted.png`：负向问题。P5-11B 真实 Windows Terminal 复验：普通
   段落里的路径、工具名、命令和环境变量被行内代码灰块密集高亮。只用于确认必须消除的偏差，
   不是待复刻目标。
 
@@ -66,7 +66,7 @@
 - Worker 开始对应界面任务前必须实际打开相关图片，不得只读文字转述。主缓冲区迁移任务至少
   打开 `runtime-main-buffer-pi-reference.png`、`runtime-tool-blocks-pi-reference.png` 及当前任务
   涉及的 Ask、权限、工具或启动参考图。
-- P6-11B 还必须成对打开 `runtime-main-buffer-current-p6-11a.png` 与
+- P5-11B 还必须成对打开 `runtime-main-buffer-current-p5-11a.png` 与
   `runtime-content-hierarchy-pi-reference.png`：前者只证明需要消除的拥挤和原始 Markdown，后者
   只提供内容层级与阅读节奏目标。
 - 正向目标图中的布局和视觉层级需要复现；负向问题图只用于确认必须消除的偏差。

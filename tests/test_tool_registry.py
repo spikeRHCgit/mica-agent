@@ -1,4 +1,4 @@
-"""P5-02 ToolRegistry 公共行为测试。"""
+"""P4-02 ToolRegistry 公共行为测试。"""
 
 from __future__ import annotations
 

@@ -3,7 +3,7 @@
 ## 1. 文档定位
 
 本文是 Mica 终端交互前端的产品设计事实源，记录已经由用户确认的界面结构、视觉规则和
-交互行为。后续第六阶段计划负责把这些规则拆成可执行任务，不在阶段计划中复制本文正文。
+交互行为。后续第五阶段计划负责把这些规则拆成可执行任务，不在阶段计划中复制本文正文。
 
 本文已经定稿：
 
@@ -82,10 +82,10 @@ Context 中已成功加载的 global/workspace `AGENTS.md` 必须显示装配层
 - [负向问题：AGENTS 来源仅显示 yes](assets/tui/startup-context-paths-current-problem.png)
 - [主缓冲区整体正向参考](assets/tui/runtime-main-buffer-pi-reference.png)
 - [动态工具色块正向参考](assets/tui/runtime-tool-blocks-pi-reference.png)
-- [P6-11A 当前内容拥挤与原始 Markdown](assets/tui/runtime-main-buffer-current-p6-11a.png)
+- [P5-11A 当前内容拥挤与原始 Markdown](assets/tui/runtime-main-buffer-current-p5-11a.png)
 - [Pi 风格正文层级参考](assets/tui/runtime-content-hierarchy-pi-reference.png)
-- [P6-11B 负向：用户卡片收缩与记录拥挤](assets/tui/runtime-p6-11b-hierarchy-still-crowded.png)
-- [P6-11B 负向：行内代码灰块过密](assets/tui/runtime-p6-11b-inline-code-overhighlighted.png)
+- [P5-11B 负向：用户卡片收缩与记录拥挤](assets/tui/runtime-p5-11b-hierarchy-still-crowded.png)
+- [P5-11B 负向：行内代码灰块过密](assets/tui/runtime-p5-11b-inline-code-overhighlighted.png)
 
 三张图的具体角色和使用限制见 [资源说明](assets/tui/README.md)。正向目标图决定构图、边界、
 间距和信息层级，但其中的旧示例数据不是当前产品事实。当前内置工具固定为 `ask`、`bash`、
@@ -290,7 +290,7 @@ Mica · stop
 3. `hidden`：不显示思考正文，也不留下额外空白占位。
 
 显示模式完全由用户设置决定，不响应 `Ctrl+O`，也不依赖历史组件焦点；设置入口和持久化仍
-属于 Phase 7。
+属于 Phase 6。
 
 ## 8. 思考强度
 
@@ -318,7 +318,7 @@ Mica 不主动探测或判断某个模型支持哪些档位。后续模型配置
 猜测思考正文，但唯一 `working` 状态条仍正常工作。
 
 思考强度的 Provider 传递、思考内容识别和独立事件契约已经建立；TUI 只消费这些公共事件。
-模型能力配置、档位选择和界面偏好仍属于 Phase 7，不在 Phase 6 自行补全。
+模型能力配置、档位选择和界面偏好仍属于 Phase 6，不在 Phase 5 自行补全。
 
 ## 9. 模型正式回复
 
@@ -333,8 +333,8 @@ Mica 不主动探测或判断某个模型支持哪些档位。后续模型配置
 - 相邻高层语义记录（用户消息、思考、正式回复、工具）之间恰好保留一条无背景空白物理行；
   间距由渲染器统一插入，组件自身不附加空行。
 
-P6-11A 已经验证主缓冲区运行闭环，但其验收截图仍把用户消息、模型思考、工具记录和正式回复
-压在相邻行中，并把 Markdown 源标记直接暴露给用户。P6-11B 必须在不引入聊天气泡或全屏背景的
+P5-11A 已经验证主缓冲区运行闭环，但其验收截图仍把用户消息、模型思考、工具记录和正式回复
+压在相邻行中，并把 Markdown 源标记直接暴露给用户。P5-11B 必须在不引入聊天气泡或全屏背景的
 前提下，用稳定的身份标记、次要文字、段落留白和局部语义背景建立清晰层级；正式回复完成后必须
 呈现标题、列表、行内代码和代码块，而不是继续显示 `**`、反引号等原始标记。
 
@@ -375,10 +375,10 @@ P6-11A 已经验证主缓冲区运行闭环，但其验收截图仍把用户消�
 - [阻塞式底部交互覆盖层目标](assets/tui/runtime-interaction-overlay-reference.png)
 - [主缓冲区整体参考](assets/tui/runtime-main-buffer-pi-reference.png)
 - [动态工具色块参考](assets/tui/runtime-tool-blocks-pi-reference.png)
-- [P6-11A 当前内容拥挤与原始 Markdown](assets/tui/runtime-main-buffer-current-p6-11a.png)
+- [P5-11A 当前内容拥挤与原始 Markdown](assets/tui/runtime-main-buffer-current-p5-11a.png)
 - [Pi 风格正文层级参考](assets/tui/runtime-content-hierarchy-pi-reference.png)
-- [P6-11B 负向：用户卡片收缩与记录拥挤](assets/tui/runtime-p6-11b-hierarchy-still-crowded.png)
-- [P6-11B 负向：行内代码灰块过密](assets/tui/runtime-p6-11b-inline-code-overhighlighted.png)
+- [P5-11B 负向：用户卡片收缩与记录拥挤](assets/tui/runtime-p5-11b-hierarchy-still-crowded.png)
+- [P5-11B 负向：行内代码灰块过密](assets/tui/runtime-p5-11b-inline-code-overhighlighted.png)
 
 这些图片只约束对应组件的结构、密度和信息层级；其中的产品背景、旧工具集合、授权选项和
 示例数据不是 Mica 当前事实，具体行为继续以下文及现有公共契约为准。
@@ -623,7 +623,7 @@ Run，不等同于拒绝一个工具。`default` 仅在后端产生风险确认�
 询问；前端不自行判断命令风险，也不自动批准。记住允许规则、修改命令和请求解释不在本轮
 范围，不显示对应选项或快捷键。面板关闭后不进入历史，由对应工具卡片继续更新；Run
 仍在继续时恢复 working、禁用 composer 和事实区，Run 结束后恢复可编辑 composer。两模式迁移完成状态与后端边界见
-`docs/phase6_plan.md`。
+`docs/phase5_plan.md`。
 
 ### 11.8 输入可靠性、Esc flush 与超高面板
 
@@ -661,10 +661,10 @@ Run，不等同于拒绝一个工具。`default` 仅在后端产生风险确认�
 
 ## 12. 已完成的前置能力
 
-Phase 6 开始前所需的后端契约已经建立：
+Phase 5 开始前所需的后端契约已经建立：
 
 - 独立 `ls` 已删除；内置工具固定为 `read`、`write`、`edit`、`bash`、`ask`。目录查看通过
-  `bash` 完成；P6-07A 将其普通调用从逐次审批改为默认自动执行。
+  `bash` 完成；P5-07A 将其普通调用从逐次审批改为默认自动执行。
 - Provider 与 Engine 已建立独立思考事件，不从普通回复猜测思考内容。
 - 工具展示事件和会话 v3 已提供经过清洗的参数、状态、差异/结果摘要及成功轮次的最终展示
   快照；v1/v2 继续严格读取，不创建 sidecar 文件，也不重跑工具或读取当前工作区补造历史卡片。

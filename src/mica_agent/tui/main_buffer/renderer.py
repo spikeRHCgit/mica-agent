@@ -79,7 +79,7 @@ DEFAULT_STYLES: dict[str, str] = {
     "facts": BRAND_LIGHT,
     "facts_muted": MUTED,
     "interaction": BRAND_LIGHT,
-    # P6-11B 内容层级
+    # P5-11B 内容层级
     "user_bg": BG_USER,
     "user_marker": BRAND,
     "reasoning_line": MUTED,

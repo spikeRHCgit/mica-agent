@@ -229,7 +229,7 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
-    """延迟加载运行时装配入口和带第三方依赖的 P5-02 边界。"""
+    """延迟加载运行时装配入口和带第三方依赖的 P4-02 边界。"""
     if name == "AgentEngine":
         from .engine import AgentEngine
 

@@ -1,4 +1,4 @@
-"""P5-02 PolicyEngine 公共决策测试。"""
+"""P4-02 PolicyEngine 公共决策测试。"""
 
 from __future__ import annotations
 

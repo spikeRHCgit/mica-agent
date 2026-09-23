@@ -1,4 +1,4 @@
-# P5-01 公共工具、交互与取消契约
+# P4-01 公共工具、交互与取消契约
 
 ## 目标
 
@@ -20,21 +20,21 @@ JSON object 输入在构造时递归复制为只读 mapping，并把数组复制
 
 ## 验证与边界
 
-目标测试、旧 session/provider/engine/app 兼容性测试及全量质量检查均通过。P5-01 未实现注册表、Schema 参数验证、权限算法、真实工具、Provider tool calling、Engine 工具循环、会话 v2 或 CLI 集成，这些仍属于 P5-02 及后续任务。
+目标测试、旧 session/provider/engine/app 兼容性测试及全量质量检查均通过。P4-01 未实现注册表、Schema 参数验证、权限算法、真实工具、Provider tool calling、Engine 工具循环、会话 v2 或 CLI 集成，这些仍属于 P4-02 及后续任务。
 
 剩余风险：公共事件只约束可携带字段，后续事件生产者仍必须在进入事件前生成固定或已清洗的安全说明。
 
-# P5-02 工具注册、参数校验与权限策略
+# P4-02 工具注册、参数校验与权限策略
 
 ## 目标
 
-建立内存 `ToolRegistry`、标准 JSON Schema 参数校验和只接收规范化事实的 `PolicyEngine`，同时补齐 P5 不可变 JSON 快照到普通 JSON 值的集中转换入口。本任务不执行任何真实工具。
+建立内存 `ToolRegistry`、标准 JSON Schema 参数校验和只接收规范化事实的 `PolicyEngine`，同时补齐 P4 不可变 JSON 快照到普通 JSON 值的集中转换入口。本任务不执行任何真实工具。
 
 ## JSON Schema 依赖审计
 
 - `jsonschema` 是成熟的标准实现，支持 Draft 3、4、6、7、2019-09 和 2020-12，提供 Meta-Schema 自检；当前版本支持 Python 3.11，MIT 许可证，Windows CPython 有现成 wheel。它有 `attrs`、`jsonschema-specifications`、`referencing` 和 `rpds-py` 四个合理的运行时依赖；常规 Windows 安装不需要编译环境，但缺少 wheel 的源码安装环境需要为 `rpds-py` 准备 Rust 工具链。
 - `fastjsonschema` 更轻，BSD-3-Clause、纯 Python 且无运行时依赖，但只支持 Draft 04、06、07，采用代码生成，默认值行为还可能修改待验证数据，不适合作为 Mica 的长期标准边界。
-- 手写 P5 子集不增加依赖，但会重复实现类型、组合和 Meta-Schema 细节，容易形成不完整却被误认为完整标准的校验器，维护和安全风险最高。
+- 手写 P4 子集不增加依赖，但会重复实现类型、组合和 Meta-Schema 细节，容易形成不完整却被误认为完整标准的校验器，维护和安全风险最高。
 
 最终只增加直接依赖 `jsonschema>=4.25.1`，锁文件解析为 4.26.0，并固定使用 Draft 2020-12；没有 `$schema` 的 ToolSpec 也按该 draft 处理。验证器使用禁止远程获取的空引用注册表，默认测试和参数校验不会访问网络。第三方 Schema/参数异常统一转换为 Mica 固定错误，不向调用方暴露原始异常或数据。
 
@@ -44,19 +44,19 @@ JSON object 输入在构造时递归复制为只读 mapping，并把数组复制
 
 `validate_tool_schema()` 区分开发者提供的无效 Schema；`validate_tool_arguments()` 区分可恢复的模型参数错误。required、类型、嵌套 object、array、enum、`additionalProperties` 和 bool/integer 边界由 Draft 2020-12 校验，且验证只消费独立普通 JSON 副本，不修改请求快照。
 
-`to_mutable_json()` 是 P5 不可变 JSON 快照的唯一普通 JSON 转换入口：mapping 复制为 dict、tuple 复制为 list、标量保持 JSON 类型，结果可直接交给标准编码器，且修改结果不会影响原快照。
+`to_mutable_json()` 是 P4 不可变 JSON 快照的唯一普通 JSON 转换入口：mapping 复制为 dict、tuple 复制为 list、标量保持 JSON 类型，结果可直接交给标准编码器，且修改结果不会影响原快照。
 
 `PolicyEngine` 的顺序固定为 hard deny、当前调用的一次性授权、注入 allow rule、权限模式矩阵。hard deny 不能被任何后续分支覆盖；规则异常和非 bool 真值均不会放行。DEFAULT 只自动允许 read/list/ask；ACCEPT_EDITS 另允许 write/edit；SOLO 再允许明确标记的安全只读命令，但普通 command 和 other 在所有相应默认分支仍为 ASK。一次性授权不保存、不缓存，也不影响下一次同名调用。
 
 ## 验证与未实现范围
 
-公共目标测试和 P5-01/旧核心兼容测试覆盖注册快照、Schema 安全错误、完整权限矩阵、优先级、公共导入与懒加载；全量自动化测试、Ruff、格式检查和离线构建均通过。P5-02 未实现 ToolExecutor、真实文件或命令工具、路径/命令安全分析、Provider tool calling、Engine 工具循环、交互等待、会话 v2、配置读取或 CLI/TUI；这些仍属于 P5-03 及后续任务。
+公共目标测试和 P4-01/旧核心兼容测试覆盖注册快照、Schema 安全错误、完整权限矩阵、优先级、公共导入与懒加载；全量自动化测试、Ruff、格式检查和离线构建均通过。P4-02 未实现 ToolExecutor、真实文件或命令工具、路径/命令安全分析、Provider tool calling、Engine 工具循环、交互等待、会话 v2、配置读取或 CLI/TUI；这些仍属于 P4-03 及后续任务。
 
 新增运行依赖后，旧分发测试中“只有 httpx”以及依赖机器 uv registry cache 的假设不再成立。经用户明确授权，分发测试改为分别验证 wheel 依赖元数据、无依赖基础 CLI 懒加载，以及 Mica wheel 在当前 uv 锁定依赖环境中的离线运行；自动化测试本身仍不联网。
 
 剩余风险：完整 JSON Schema 支持会带来传递依赖体积；`rpds-py` 在没有对应 wheel 的平台需要编译环境。当前分发测试不再独立证明 uv 能从空 cache 离线安装全部第三方 wheel，该能力依赖发布环境准备 wheelhouse 或预热 cache。未来 Schema 若引入远程引用，当前安全边界会固定拒绝解析，而不会隐式联网。
 
-# P5-03 工作区路径边界与文件工具
+# P4-03 工作区路径边界与文件工具
 
 ## 目标与路径边界
 
@@ -76,13 +76,13 @@ JSON object 输入在构造时递归复制为只读 mapping，并把数组复制
 
 集中限制为 `MAX_FILE_BYTES = 262144`、`MAX_LIST_ENTRIES = 1000`、`MAX_LIST_OUTPUT_BYTES = 262144`，按 UTF-8 实际字节计量；超过时整体失败，不返回部分文件或不完整目录结果。`write` 与 `edit` 使用目标同目录临时文件、写入、flush、fsync、关闭和 `os.replace`；替换或此前步骤失败时清理临时文件，旧文件保持原字节，新目标不留下半写入。故障注入后已验证可恢复重试。
 
-真实 Windows 回归覆盖 `.npmrc.`、`.npmrc `、`.git./config`、`.git /config`、`normal.txt:secret`、保留设备名及 NUL；四个公开 handler 都安全返回 `PERMISSION_DENIED`，敏感原始字节不变，不含 traceback、绝对路径、HOME、凭据或原始异常。测试还验证 read/edit 的单次实际读取量、读/编辑超限无部分结果或临时文件、以及 ls 在第 1001 项后停止扫描。P5-01/P5-02 契约及工作区测试保持通过。P5-03 未实现 `bash`、`ask`、ToolExecutor、权限询问、Provider 工具调用、Engine 循环、CLI/TUI 集成、会话 v2 或文件回滚。
+真实 Windows 回归覆盖 `.npmrc.`、`.npmrc `、`.git./config`、`.git /config`、`normal.txt:secret`、保留设备名及 NUL；四个公开 handler 都安全返回 `PERMISSION_DENIED`，敏感原始字节不变，不含 traceback、绝对路径、HOME、凭据或原始异常。测试还验证 read/edit 的单次实际读取量、读/编辑超限无部分结果或临时文件、以及 ls 在第 1001 项后停止扫描。P4-01/P4-02 契约及工作区测试保持通过。P4-03 未实现 `bash`、`ask`、ToolExecutor、权限询问、Provider 工具调用、Engine 循环、CLI/TUI 集成、会话 v2 或文件回滚。
 
 剩余风险：文件工具是同步文件 I/O，且不提供 OS 级隔离或 TOCTOU 消除；普通 symlink 在本 Windows 权限配置下未能实际创建；POSIX 重解析点行为尚未做原机验收。
 
-# P5-04 Bash、ask 与子进程取消
+# P4-04 Bash、ask 与子进程取消
 
-`register_runtime_tools()` 原子注册 `bash` 与 `ask`，注册阶段只校验参数和名称冲突，不发现可执行文件、不访问显式 Bash 路径、不启动进程。四个 P5-04 对象通过 `mica_agent` 顶层懒加载导出；普通导入不会加载 runtime tools、App、Engine、CLI 或 Provider。
+`register_runtime_tools()` 原子注册 `bash` 与 `ask`，注册阶段只校验参数和名称冲突，不发现可执行文件、不访问显式 Bash 路径、不启动进程。四个 P4-04 对象通过 `mica_agent` 顶层懒加载导出；普通导入不会加载 runtime tools、App、Engine、CLI 或 Provider。
 
 `ask` 只通过注入的 `UserInputRequester` 请求一次用户响应，支持一般 `Awaitable`（包括 Future），不读取 stdin，也不导入 CLI/Engine/UI。缺失或无效问题、requester 异常、无效响应和 interaction ID 不匹配均转换为固定安全结果；取消令牌和外部 Task 取消会回收 requester 等待任务，外部 Task 取消仍重新抛出 `CancelledError`。
 
@@ -94,9 +94,9 @@ Windows 默认优先发现 Git for Windows，并支持从 PATH 中的 Git `git.e
 
 Windows 真实后代测试使用准备标记确认后代已经启动，再在延迟标记写入前分别触发 CancellationToken 取消、timeout 和输出超限；三条路径均在限定时间内返回，延迟标记最终不存在，测试没有 pending task、未关闭 pipe 或 traceback 警告。Windows taskkill 超时、启动失败、非零退出和进程已退出均保持安全清理路径。
 
-P5-04 未实现 ToolExecutor、权限判定执行、Provider tool calling、Engine 工具循环、CLI/TUI、会话 v2 或 P5-05～P5-08 能力；Bash 也不是操作系统级沙箱。
+P4-04 未实现 ToolExecutor、权限判定执行、Provider tool calling、Engine 工具循环、CLI/TUI、会话 v2 或 P4-05～P4-08 能力；Bash 也不是操作系统级沙箱。
 
-# P5-05 OpenAI-compatible 工具调用
+# P4-05 OpenAI-compatible 工具调用
 
 Provider 公共契约扩展为不可变的 `ProviderRequest(model, messages, tools=())` 和
 `Finish(reason=None, tool_calls=())`。两者继续使用 frozen/slots 数据对象，旧位置参数和
@@ -133,12 +133,12 @@ role、content 和 tool_call_id。
 请求测试通过真实 HTTP mock transport 捕获至少两个 ToolSpec 的 JSON，验证工具名称、描述、
 Schema 和顺序均与 ProviderRequest 一致；畸形工具参数测试包含伪造的凭据样式哨兵，并验证
 MalformedResponseError 的字符串和 repr 都不泄漏原始参数、调用 ID、工具名称或 traceback。
-P5-05 只负责协议适配，不执行工具、不访问 ToolRegistry、不接入
+P4-05 只负责协议适配，不执行工具、不访问 ToolRegistry、不接入
 Engine 循环。
 
-# P5-06 Engine 多步工具循环
+# P4-06 Engine 多步工具循环
 
-P5-06 新增 `ToolExecutor` 作为工具调用唯一入口，固定执行顺序为：查找注册工具、按
+P4-06 新增 `ToolExecutor` 作为工具调用唯一入口，固定执行顺序为：查找注册工具、按
 ToolSpec 校验参数、通过可注入的 Policy fact factory 构造权限事实、执行 PolicyEngine、
 必要时等待一次权限响应、调用 handler、校验返回的 ToolResult，并把异常转换为安全的结构化
 结果。未知工具、参数错误、硬性拒绝、用户拒绝和普通 handler 异常不会伪造 handler 开始
@@ -180,13 +180,13 @@ Provider 错误分类，内部异常转换为 UNKNOWN，取消只产生一个 Ru
 同步关闭、ProviderError 失败关闭、混合文本与工具调用、失败结果回传模型、权限和 ask
 等待、独立 interaction ID、重复 call_id 的迟到响应、Engine 终态后的迟到响应、取消、
 提前关闭、模型/工具上限、纯文本旧事件序列、公共懒加载导出和安全错误边界。目标组、
-严格警告组、分发组和安装态稳定性复跑均通过：CLI 生命周期与 P5-06 严格组 `122 passed`，
-P5-06 目标组 `343 passed`，分发组 `12 passed`，安装态 Unicode session 目标用例两次均为
+严格警告组、分发组和安装态稳定性复跑均通过：CLI 生命周期与 P4-06 严格组 `122 passed`，
+P4-06 目标组 `343 passed`，分发组 `12 passed`，安装态 Unicode session 目标用例两次均为
 `1 passed`；全量测试为 `796 passed, 1 skipped`。显式关闭测试替身 TemporaryDirectory
 后，严格警告测试没有 `ResourceWarning`、pending task 或 `async_generator_athrow`。
-P5-06 不实现会话 v2、MicaApp 工具装配、CLI/TUI 或会话提交；这些属于 P5-07/P5-08，尚未开始。
+P4-06 不实现会话 v2、MicaApp 工具装配、CLI/TUI 或会话提交；这些属于 P4-07/P4-08，尚未开始。
 
-# P5-07 会话 v2 与完整提交
+# P4-07 会话 v2 与完整提交
 
 会话当前写入版本升级为 v2，reader 继续严格接受固定旧 wire 的 v1。v1 turn 保留
 `user_message` 与 `assistant_message`；v2 turn 改用单个 `messages` 数组，按 USER、零个或多个
@@ -227,10 +227,10 @@ MicaApp 不再从 TextDelta 推测持久化消息。它只在收到 Engine 完�
 仍可按 v1 加载且恢复后可一次升级；跨层退出重载测试证明完整已清洗工具顺序进入下一次模型
 请求和 v2 JSONL。新增公共回归证明缺失版本、数组或对象版本容器均不会泄漏 `KeyError` 或
 `TypeError`，scan 能隔离损坏文件并保留健康 v1/v2 会话。剩余风险是清洗器按本阶段明确凭据键
-和常见样式工作，不是通用 DLP；工具副作用仍需用户在失败提示后自行检查。P5-08 CLI 工具装配、
+和常见样式工作，不是通用 DLP；工具副作用仍需用户在失败提示后自行检查。P4-08 CLI 工具装配、
 权限提示和安装态真实工具闭环尚未开始。
 
-# P5-08 基础 CLI 集成与阶段收口
+# P4-08 基础 CLI 集成与阶段收口
 
 基础文字 CLI 在 Context/AGENTS 预检后、Provider 构造前创建单个 InteractionBroker 和
 ToolRegistry，注册 read、ls、write、edit、bash、ask，并以同一 Broker 连接 ask、
@@ -260,18 +260,18 @@ ToolStarted 和 ToolFinished 仅输出 `tool <name>: started` 与 `tool <name>: 
 有限输出命令，确认 Unicode/空格 cwd、权限询问、合并输出、最终回答和进程退出均正常；未使用
 PowerShell 代替 Bash。
 
-最终自动化结果为：P5-08 集成目标文件 `23 passed`，CLI/P5-08 严格警告组 `64 passed`，工具、
+最终自动化结果为：P4-08 集成目标文件 `23 passed`，CLI/P4-08 严格警告组 `64 passed`，工具、
 Policy、Executor、App 与 Engine 严格组 `200 passed`，分发组 `14 passed`，全量
 `850 passed, 1 skipped`；Ruff、格式、离线构建
 和 diff 检查均通过。受控真实 OpenAI-compatible Provider 冒烟也已完成：首轮模型请求 write，
 default 模式询问并授权后创建预期临时文件、返回最终回答并退出；第二次 `--continue` 恢复完整
 历史，模型请求无需授权的 read 并返回最终回答。隔离 HOME 中恰好保存两个完整 v2 工具 Turn，
-真实 Key 未进入 CLI 输出或会话 JSONL，临时凭据环境、HOME 和工作区均已清理。P5-08 的任务单
+真实 Key 未进入 CLI 输出或会话 JSONL，临时凭据环境、HOME 和工作区均已清理。P4-08 的任务单
 验收证据至此齐全。剩余风险包括其他 OpenAI-compatible 服务对 tools 的实际支持差异、POSIX
 Bash 未做当前原机验证，以及工具副作用不自动回滚。本任务未实现 Textual TUI、配置文件、
 斜杠命令、扩展系统、npm 启动器或正式发布。
 
-# P5-09 内置系统提示词与启动上下文快照
+# P4-09 内置系统提示词与启动上下文快照
 
 内置系统提示词随 wheel 作为包资源分发；启动或恢复会话时，Mica 读取允许位置的 AGENTS.md，
 组装一次性的环境、规则与工具上下文快照。后续 Run 复用该冻结快照，不重复读取文件或重组系统
@@ -280,7 +280,7 @@ Bash 未做当前原机验证，以及工具副作用不自动回滚。本任务
 系统提示词和 AGENTS 快照只作为会话启动上下文，不混入普通用户消息、工具结果或思考正文。
 本任务不实现配置系统、Textual TUI、会话命令或其他后续阶段能力。
 
-# P5-10 内置工具收口
+# P4-10 内置工具收口
 
 ## 目标与产品边界
 
@@ -320,7 +320,7 @@ LIST 权限成员、列表常量或执行映射。
 沙箱边界、POSIX 原机覆盖和工具副作用不回滚等既有风险不变。本任务不实现思考后端、工具展示
 快照、Bash 动态输出、结构化 ask、Textual TUI 或其他后续阶段能力。
 
-# P5-11 思考后端契约
+# P4-11 思考后端契约
 
 ## 目标与公共契约
 
@@ -374,12 +374,12 @@ Python 从 wheel 导入 `ReasoningEffort`、`ReasoningDelta` 和
 
 ## 未实现范围与风险
 
-P5-11 不实现 openai-responses、models.json 或 Phase 7 配置系统，不实现思考显示模式、灰色文本、
+P4-11 不实现 openai-responses、models.json 或 Phase 6 配置系统，不实现思考显示模式、灰色文本、
 折叠、Ctrl+O、thinking 面板、动画或 Textual TUI；也不实现会话 v3、工具快照、Bash 动态输出、
 结构化 ask 或后续阶段能力。当前适配器只识别明确的 `reasoning_content` 字段，其他供应商字段
 不会自动探测；非空自定义映射代表调用方已声明允许档位，模型能力限制尚未由配置系统执行。
 
-# P5-12 工具呈现与历史快照
+# P4-12 工具呈现与历史快照
 
 ## 目标与公共契约
 
@@ -419,22 +419,22 @@ MicaApp 仅在 `RunCompleted` 且消息与终态快照均完整时提交整轮�
 ToolResult 展示明细可变以及 edit 位移后上下文行号错误，再以 `13 passed` 转为 GREEN。未实现
 Textual TUI、颜色/折叠、动态 Bash、结构化 ask、sidecar 会话或配置系统。
 
-P5-12 相关目标测试使用 `-W error` 为 `420 passed, 1 skipped`，全量测试为 `958 passed,
+P4-12 相关目标测试使用 `-W error` 为 `420 passed, 1 skipped`，全量测试为 `958 passed,
 2 skipped`，安装态分发测试为 `15 passed`；Ruff 检查、格式检查、`uv build --offline`、
 `git diff --check` 和 `git diff --cached --check` 均通过。当前保留 Windows 环境下普通 symlink
 不可用的既有跳过项；本任务没有执行 Git 写操作、远程操作或历史改写。
 
-# P5-13 Bash 动态输出
+# P4-13 Bash 动态输出
 
-## P5-13A：事件契约
+## P4-13A：事件契约
 
-P5-13A 完成工具输出增量的公共事件契约切片。新增不可变的
+P4-13A 完成工具输出增量的公共事件契约切片。新增不可变的
 `ToolOutputDelta(run_id, seq, call_id, tool_name, text)`，沿用既有 Run、序号和工具名校验；
 输出文本必须是非空字符串，原样保留且不进入 dataclass 默认 `repr`。
 
-## P5-13B：Bash 有界动态输出与安全清洗
+## P4-13B：Bash 有界动态输出与安全清洗
 
-P5-13B 完成 Bash 运行时输出源切片。新增同步 `ToolOutputReporter`，仅向 Bash 注入可选的
+P4-13B 完成 Bash 运行时输出源切片。新增同步 `ToolOutputReporter`，仅向 Bash 注入可选的
 `(call_id, tool_name, safe_text)` 回调；`ask` 不使用该回调。Bash 继续合并 stdout/stderr，
 按原始字节数执行总上限，使用增量 UTF-8 解码，并以完整 LF/CRLF 记录或 EOF 剩余文本为
 报告单位。每条记录在回调前复用集中凭据清洗逻辑，最终 `ToolResult` 仍保留完整解码输出，
@@ -444,10 +444,10 @@ P5-13B 完成 Bash 运行时输出源切片。新增同步 `ToolOutputReporter`�
 沿用进程树回收与异步任务清理边界，reporter 异常返回固定安全失败。返工补充了一个在
 cleanup 开始前关闭的报告 gate，确保异常终止阶段不会迟到报告 EOF 尾部；正常成功和非零
 退出仍报告 EOF 尾部。注册阶段拒绝异步函数，运行阶段对同步 callable 返回的 awaitable
-只做安全 close/cancel，不 await 且转换为固定失败。P5-13B 不创建 `ToolOutputDelta`，不
+只做安全 close/cancel，不 await 且转换为固定失败。P4-13B 不创建 `ToolOutputDelta`，不
 接入 Engine、CLI 或 TUI。
 
-## P5-13C1：ToolExecutor 输出路由与 Engine 事件闭环
+## P4-13C1：ToolExecutor 输出路由与 Engine 事件闭环
 
 C1 完成 `ToolOutputReporter → ToolExecutor → AgentEngine` 的单向输出链路。`ToolExecutor`
 提供同步 `output_reporter`，以 `(call_id, tool_name)` 为身份维护仅在当前 handler 执行期间
@@ -467,14 +467,14 @@ text)`，只由 Engine 注入 `run_id` 和严格递增的 `seq`；正常调用�
 路由复用隔离、正常非零退出、无输出和敏感内容清洗。取消及关闭均验证路由解除、工具执行
 等待结束和完成 sink 不提交半轮；事件中的安全文本保留 Unicode、空格与换行边界。
 
-当前边界：P5-13C2 尚未开始，CLI、TUI、安装态闭环和会话格式均未在本切片接入；因此
-P5-13 整体尚未完成。
+当前边界：P4-13C2 尚未开始，CLI、TUI、安装态闭环和会话格式均未在本切片接入；因此
+P4-13 整体尚未完成。
 
-P5-13C1 ToolExecutor 与 Engine 目标测试 `84 passed`，runtime/events 兼容组 `146 passed`，
-App/P5-12 组 `37 passed`，分发测试 `15 passed`，全量测试 `1021 passed, 2 skipped`；Ruff
+P4-13C1 ToolExecutor 与 Engine 目标测试 `84 passed`，runtime/events 兼容组 `146 passed`，
+App/P4-12 组 `37 passed`，分发测试 `15 passed`，全量测试 `1021 passed, 2 skipped`；Ruff
 检查、格式检查、`uv build --offline` 和 diff 检查均通过。本章节不记录测试凭据或原始敏感值。
 
-## P5-13C2：CLI 装配、基础动态显示与安装态验收
+## P4-13C2：CLI 装配、基础动态显示与安装态验收
 
 C2 将 CLI 的工具装配顺序固定为共享 `InteractionBroker`、`ToolRegistry` 和
 `ToolExecutor`，先注册文件工具，再把同一个 `executor.output_reporter` 传入
@@ -499,12 +499,12 @@ C2 同时保留取消、事件流关闭、工具路由解除和资源清理边�
 ToolExecutor、Engine、事件、Provider、会话或 TUI。C2 目标与既有 CLI 生命周期测试为
 `30 passed`，runtime/tools/Engine/events 兼容组为 `230 passed`，安装态分发测试为
 `15 passed`，全量测试为 `1024 passed, 2 skipped`；Ruff、格式检查、`uv build --offline`
-和 diff 检查均通过。P5-13 已完成并通过 master 验收。P5-14、结构化 ask 和 Textual TUI
+和 diff 检查均通过。P4-13 已完成并通过 master 验收。P4-14、结构化 ask 和 Textual TUI
 尚未开始。
 
-# P5-14 结构化 ask
+# P4-14 结构化 ask
 
-P5-14A 只建立前端无关的公共数据契约。新增 frozen、slots 的 `AskOption(label,
+P4-14A 只建立前端无关的公共数据契约。新增 frozen、slots 的 `AskOption(label,
 description=None, recommended=False)` 与 `AskPrompt(question, title=None, options=(),
 allow_custom=False)`；文本字段使用非空非纯空白校验，`recommended` 与 `allow_custom` 使用严格
 bool 校验。`AskPrompt` 只接受 tuple/list 选项输入，并在构造时复制为独立 tuple；无选项固定表示
@@ -517,7 +517,7 @@ bool 校验。`AskPrompt` 只接受 tuple/list 选项输入，并在构造时复
 Prompt 或任何运行时对象。
 
 目标交互与公共 API 测试为 `87 passed`，与 events/runtime tools/Engine 的兼容组为 `296 passed`，
-安装态分发测试为 `15 passed`。P5-14A 的公共数据契约在本切片基础上由 P5-14B 接入 runtime
+安装态分发测试为 `15 passed`。P4-14A 的公共数据契约在本切片基础上由 P4-14B 接入 runtime
 ask、InteractionBroker、InteractionRequest、AgentEngine 和 `UserInputRequested`：runtime 仍仅以
 `question` 构造 Provider 可见的原有 `_ASK_SPEC`，内部传递完整 `AskPrompt`；成功 `ToolResult.data`
 固定为有序的 `answer`、`selected_option_index`、`notes` 三字段映射。Broker 在 UI interaction ID
@@ -525,15 +525,15 @@ ask、InteractionBroker、InteractionRequest、AgentEngine 和 `UserInputRequest
 旧事件构造继续兼容，Prompt 与 question 不一致以及权限请求携带 Prompt 均固定拒绝。未接入 CLI、TUI、
 Provider、会话或持久化，也未修改权限交互。
 
-P5-14B 目标测试为 `275 passed`（含 `-W error`），P5-08 普通回答与空字符串回答兼容测试为
-`23 passed`，CLI/App/P5-08/P5-13 兼容组为 `104 passed`，安装态分发测试为 `15 passed`，全量测试
+P4-14B 目标测试为 `275 passed`（含 `-W error`），P4-08 普通回答与空字符串回答兼容测试为
+`23 passed`，CLI/App/P4-08/P4-13 兼容组为 `104 passed`，安装态分发测试为 `15 passed`，全量测试
 为 `1074 passed, 2 skipped`；Ruff、格式检查、`uv build --offline`、`git diff --check` 与
-`git diff --cached --check` 均通过。经 master 明确授权，`tests/test_p5_08_integration.py` 仅将
+`git diff --cached --check` 均通过。经 master 明确授权，`tests/test_p4_08_integration.py` 仅将
 参数化 ask 测试中旧的 `assert result["data"] == answer` 更新为上述三字段对象，普通回答和空回答
-均通过；该文件的 status、tool_call_id、TOOL Message、安全性及其他 P5-08 产品语义断言未修改。
+均通过；该文件的 status、tool_call_id、TOOL Message、安全性及其他 P4-08 产品语义断言未修改。
 `tasks/lessons.md` 保留 master 管理的既有修改，worker 未编辑。
 
-P5-14C1 在 InteractionBroker 的响应边界增加结构化一致性校验。自由文本 Prompt 只接受
+P4-14C1 在 InteractionBroker 的响应边界增加结构化一致性校验。自由文本 Prompt 只接受
 `selected_option_index=None`，仍允许空 answer 与任意 notes；有选项 Prompt 拒绝越界序号，并在
 `allow_custom=False` 时拒绝无序号的自定义回答。合法选项响应以 Prompt 对应的 option label
 规范化 answer，selected index 与 notes 原样保留；`allow_custom=True` 时无序号响应保留 answer
@@ -546,7 +546,7 @@ True 并完成等待；实现后交互与 Engine 目标组为 `136 passed`（含
 Ruff、格式检查、`uv build --offline`、`git diff --check` 与 `git diff --cached --check` 均通过，
 验收未出现异步或资源清理告警。
 
-P5-14C2 在既有 ask 工具上扩展 Provider 可见的结构化 ToolSpec。顶层仍为 object，`question`
+P4-14C2 在既有 ask 工具上扩展 Provider 可见的结构化 ToolSpec。顶层仍为 object，`question`
 为必填非空字符串；可选 `title` 为非空字符串，`options` 为二至四个 option object（必填非空
 `label`，`description` 为非空字符串，`recommended` 为严格 bool），并支持严格 bool
 `allow_custom`；顶层和 option object 均拒绝额外字段。runtime 先通过 Draft 2020-12 参数校验，
@@ -563,7 +563,7 @@ P5-14C2 在既有 ask 工具上扩展 Provider 可见的结构化 ToolSpec。顶
 下一轮模型上下文、v3 JSONL 和 `--continue` 恢复。测试还确认结构化 ask 不在仓库外工作区产生文件，
 会话只写入隔离临时 HOME，CLI stdout/stderr 与 JSONL 不含假 key、工作区绝对路径或 traceback，且
 第二次 `--continue` 不重新执行第一轮 ask；最终保持一个健康会话和两个完整 TurnEntry。新增
-P5-14 集成测试验证注入 Provider 下的同一会话两轮闭环。返工后目标测试为 `120 passed`（含
+P4-14 集成测试验证注入 Provider 下的同一会话两轮闭环。返工后目标测试为 `120 passed`（含
 `-W error`），兼容组为 `273 passed`（含 `-W error`），安装态分发测试为 `16 passed`，全量测试为
 `1105 passed, 2 skipped`；Ruff、格式检查、`uv build --offline` 和 diff 检查均通过。Textual TUI、
 会话格式新字段和其他工具扩展均不在 C2 范围内。

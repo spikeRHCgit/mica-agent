@@ -1,4 +1,4 @@
-"""P5-12 工具展示与会话 v3 的跨层公共闭环测试。"""
+"""P4-12 工具展示与会话 v3 的跨层公共闭环测试。"""
 
 from __future__ import annotations
 
@@ -66,8 +66,8 @@ def _make_app(
         context_builder=ContextBuilder(data_root=data_root, workspace=workspace),
         system_prompt="stable test system",
         tool_executor=tool_executor,
-        run_id_factory=lambda: "run-p5-12",
-        turn_id_factory=lambda: "turn-p5-12",
+        run_id_factory=lambda: "run-p4-12",
+        turn_id_factory=lambda: "turn-p4-12",
     )
     return app, service, session.meta.session_id, workspace_path
 
@@ -90,7 +90,7 @@ def test_real_write_tool_emits_safe_snapshots_and_persists_v3(tmp_path: Path) ->
                             "write",
                             {
                                 "path": "notes.txt",
-                                "content": "token=sk-p5-12-secret\n标题",
+                                "content": "token=sk-p4-12-secret\n标题",
                             },
                         ),
                     )
@@ -141,14 +141,14 @@ def test_real_write_tool_emits_safe_snapshots_and_persists_v3(tmp_path: Path) ->
         "content": "token=[REDACTED]\n标题",
     }
     assert (workspace_path / "notes.txt").read_text(encoding="utf-8") == (
-        "token=sk-p5-12-secret\n标题"
+        "token=sk-p4-12-secret\n标题"
     )
 
     stored = service.load_session(session_id)
     assert stored.meta.format_version == 4
     assert stored.turns[0].tool_presentations == (finished.presentation,)
     raw = service.store.path_for_session(session_id).read_text(encoding="utf-8")
-    assert "sk-p5-12-secret" not in raw
+    assert "sk-p4-12-secret" not in raw
     assert "[REDACTED]" in raw
     assert all(
         message.role is not MessageRole.SYSTEM

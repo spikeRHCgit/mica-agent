@@ -1,4 +1,4 @@
-"""主缓冲区专用工具视图测试（P6-11B §4.5 / §9）。
+"""主缓冲区专用工具视图测试（P5-11B §4.5 / §9）。
 
 覆盖六类视图的安全渲染规则、宽状态色块、NO_COLOR 状态符号、Bash 动态输出
 边界、write/edit 折叠规则，以及扩展工厂的安全性。
@@ -432,7 +432,7 @@ def test_factory_rejects_builtin_name_with_wrong_kind() -> None:
     assert factory.create(mismatched, state="success") is None
 
 
-# -- P6-11B 返工：工厂恢复完整快照值比较 -----------------------------------
+# -- P5-11B 返工：工厂恢复完整快照值比较 -----------------------------------
 
 
 @dataclass(frozen=True)
@@ -550,7 +550,7 @@ def test_builtin_names_still_cannot_be_overridden_by_an_equal_view() -> None:
     assert factory.fallbacks == 0
 
 
-# -- P6-11B 返工：内置 kind 优先的统一解析契约 --------------------------------
+# -- P5-11B 返工：内置 kind 优先的统一解析契约 --------------------------------
 
 
 BUILTIN_KIND_PAYLOADS: dict[ToolPresentationKind, Mapping[str, object]] = {

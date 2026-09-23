@@ -148,7 +148,7 @@ class LoopbackToolSSEServer:
         self._tool_name = tool_name
         self._arguments = arguments or {
             "path": "目标文件.txt",
-            "content": "sk-p5-08-sensitive-sentinel",
+            "content": "sk-p4-08-sensitive-sentinel",
         }
         self._response_texts = response_texts
         self.requests: list[dict[str, object]] = []
@@ -185,7 +185,7 @@ class LoopbackToolSSEServer:
         self._server.daemon_threads = True
         self._thread = threading.Thread(
             target=self._server.serve_forever,
-            name="mica-p5-08-loopback",
+            name="mica-p4-08-loopback",
             daemon=True,
         )
 
@@ -838,7 +838,7 @@ def test_installed_wheel_loads_prompt_and_agents_outside_repository(
     full_distribution: InstalledDistribution,
 ) -> None:
     dist = full_distribution
-    case_root = dist.outside_repository / "P5-09 installed case"
+    case_root = dist.outside_repository / "P4-09 installed case"
     home = case_root / "isolated home"
     workspace = case_root / "工作区 & with spaces"
     home.joinpath(".mica").mkdir(parents=True)
@@ -1164,7 +1164,7 @@ def test_installed_wheel_write_and_continue_restore_complete_tool_history(
     service = SessionService(JsonlSessionStore(workspace_identity, data_root))
     environment = cli_environment(dist.home, fake_credentials=True)
     fake_key = "sk-loopback-api-key-only"
-    sensitive = "sk-p5-08-sensitive-sentinel"
+    sensitive = "sk-p4-08-sensitive-sentinel"
     environment.update(MICA_API_KEY=fake_key, MICA_MODEL="tool-loopback-model")
 
     with LoopbackToolSSEServer() as server:
@@ -1234,7 +1234,7 @@ def test_installed_wheel_default_tui_tool_dialog_and_continue_restore(
 ) -> None:
     """Installed wheel: fake Screen drives the default frontend and continue."""
     dist = full_distribution
-    case_root = dist.outside_repository / "P6-09 TUI 工作区"
+    case_root = dist.outside_repository / "P5-09 TUI 工作区"
     home = case_root / "隔离 HOME"
     workspace = case_root / "工作区 with spaces"
     home.mkdir(parents=True)
@@ -1243,7 +1243,7 @@ def test_installed_wheel_default_tui_tool_dialog_and_continue_restore(
     workspace_identity = resolve_workspace(workspace)
     service = SessionService(JsonlSessionStore(workspace_identity, data_root))
     environment = cli_environment(home, fake_credentials=True)
-    fake_key = "sk-p6-09-loopback-key"
+    fake_key = "sk-p5-09-loopback-key"
     environment.update(MICA_API_KEY=fake_key, MICA_MODEL="installed-tui-model")
 
     driver = textwrap.dedent(
@@ -1283,7 +1283,7 @@ def test_installed_wheel_default_tui_tool_dialog_and_continue_restore(
             assert code == 0
 
         asyncio.run(main())
-        print("p6-09-tui-driver-ok")
+        print("p5-09-tui-driver-ok")
         """
     )
 
@@ -1309,9 +1309,9 @@ def test_installed_wheel_default_tui_tool_dialog_and_continue_restore(
         )
 
     assert first.returncode == 0, first.stderr
-    assert first.stdout == "p6-09-tui-driver-ok" + chr(10)
+    assert first.stdout == "p5-09-tui-driver-ok" + chr(10)
     assert second.returncode == 0, second.stderr
-    assert second.stdout == "p6-09-tui-driver-ok" + chr(10)
+    assert second.stdout == "p5-09-tui-driver-ok" + chr(10)
     assert first.stderr == ""
     assert second.stderr == ""
     observed = first.stdout + first.stderr + second.stdout + second.stderr

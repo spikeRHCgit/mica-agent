@@ -1,4 +1,4 @@
-"""P5-14 结构化 ask 的 Provider、CLI 与 v3 会话闭环测试。"""
+"""P4-14 结构化 ask 的 Provider、CLI 与 v3 会话闭环测试。"""
 
 from __future__ import annotations
 
