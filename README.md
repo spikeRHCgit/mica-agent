@@ -93,6 +93,6 @@ uv build --offline
 - `docs/tui_design.md`：已经确认的终端前端交互、视觉和动态呈现规则。
 - `docs/phase1_plan.md`：第一阶段的工程地基、已交付能力与验收结论。
 - `docs/phase2_plan.md`：第二阶段基础对话闭环的已交付能力与验收结论。
-- `docs/phase3_plan.md`：第三阶段（工作区隔离、JSONL 会话、恢复与上下文）的范围与验收标准。
+- `docs/phase3_plan.md`：第三阶段（工作区隔离、JSONL 会话、恢复与上下文）的交付、具体实现与验收结论。
 - `docs/phase4_plan.md`：已完成并通过验收的第四阶段（工具执行、权限控制与统一取消）计划。
 - `docs/phase5_plan.md`：已完成并通过验收的第五阶段（主缓冲区终端交互与中断恢复）计划。
