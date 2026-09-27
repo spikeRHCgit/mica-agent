@@ -309,6 +309,7 @@ class RunCancelled:
         _validate_seq(self.seq)
 
 
+# Unified event type emitted by the engine to frontends.
 EngineEvent = (
     RunStarted
     | ReasoningDelta
@@ -323,4 +324,3 @@ EngineEvent = (
     | RunFailed
     | RunCancelled
 )
-"""Engine 向前端输出的统一事件类型。"""

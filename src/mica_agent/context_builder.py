@@ -12,8 +12,8 @@ from pathlib import Path
 from .models import Message, MessageRole
 from .workspace import WorkspaceIdentity
 
+# Maximum size in bytes for each global or workspace AGENTS.md file.
 MAX_AGENTS_FILE_BYTES = 64 * 1024
-"""每个 global/workspace AGENTS.md 的统一字节上限。"""
 
 _INSTRUCTIONS_TAG_RE = re.compile(
     r"<\s*/?\s*instructions\b[^>]*>",

@@ -169,8 +169,8 @@ class ProviderErrorEvent:
     error: ProviderError
 
 
+# Unified event type emitted by provider streams.
 ProviderEvent = ProviderReasoningDelta | TextDelta | Finish | ProviderErrorEvent
-"""Provider 流式输出的统一事件类型。"""
 
 
 @runtime_checkable

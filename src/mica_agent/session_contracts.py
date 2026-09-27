@@ -25,8 +25,8 @@ from .tool_presentation import (
     _safe_relative_path,
 )
 
+# Current JSONL format version used for session writes.
 CURRENT_SESSION_FORMAT_VERSION = 4
-"""当前会话 JSONL 写入格式版本。"""
 
 _SUPPORTED_SESSION_FORMAT_VERSIONS = frozenset(
     {1, 2, 3, CURRENT_SESSION_FORMAT_VERSION}
@@ -219,11 +219,11 @@ class TurnEntry:
         )
 
 
+# Business record union for the session timeline.
 SessionEntry: TypeAlias = TurnEntry | RunCheckpoint
-"""会话时间线中的业务记录联合。"""
 
+# Strongly typed record union readable and writable by the store.
 SessionRecord: TypeAlias = SessionMeta | SessionEntry
-"""Store 可读写的强类型记录联合。"""
 
 
 def _format_utc_datetime(value: datetime) -> str:

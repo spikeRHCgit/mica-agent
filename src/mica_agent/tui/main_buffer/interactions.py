@@ -156,8 +156,9 @@ def _window_rows(
 class InteractionOutcome:
     """Outcome of handling one key."""
 
+    # Stable values: ``none`` only repaints or emits no external response;
+    # ``response`` emits an interaction response; ``cancel`` emits cancellation intent.
     action: str
-    """``none``（仅重绘）、``response`` 或 ``cancel``。"""
 
     response: PermissionResponse | UserInputResponse | None = None
 
