@@ -88,8 +88,12 @@ uv build --offline
 - `src/mica_agent/`：当前 Mica 的唯一 Python 源码包。
 - `tests/`：CLI 契约、Provider/Engine/App 测试与分发隔离验证。
 - `pyproject.toml`：分发元数据、入口与开发依赖。
+- `AGENTS.md`：agent 开发入口，包含启动步骤、文档路由和红线。
 - `docs/PROJECT_PLAN.md`：Mica 的正式项目方向和长期架构边界。
+- `docs/STATUS.md`：当前开发主线、进行中任务和待决策。
 - `docs/module_map.md`：按单个源码文件说明职责的技术地图，用于快速定位修改入口。
+- `docs/code_spec.md`：代码、测试与验证规范（讨论稿）。
+- `docs/decisions.md`：已确认的项目决策及其理由。
 - `docs/tui_design.md`：已经确认的终端前端交互、视觉和动态呈现规则。
 - `docs/phase1_plan.md`：第一阶段的工程地基、已交付能力与验收结论。
 - `docs/phase2_plan.md`：第二阶段基础对话闭环的已交付能力与验收结论。

@@ -31,8 +31,6 @@ model_responses.txt
 
 # Local credentials and user-managed notes.
 mykey.py
-tasks/*
-!tasks/lessons.md
 .claude/
 
 # Universal: never track Python bytecode caches anywhere.
