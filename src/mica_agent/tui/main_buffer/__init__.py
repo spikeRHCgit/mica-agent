@@ -1,7 +1,7 @@
-"""主缓冲区终端前端的显式导入入口。
+"""Explicit import boundary for the main-buffer terminal frontend.
 
-该子包不依赖 Textual，也不扩展 ``mica_agent`` 顶层公共 API；它是
-``mica cli`` 的默认终端前端。
+This Textual-independent package is the default terminal frontend for ``mica cli`` and
+does not extend the top-level ``mica_agent`` public API.
 """
 
 from .components import (

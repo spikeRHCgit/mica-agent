@@ -1,8 +1,8 @@
-"""主缓冲区前端的单 Run 生命周期控制器。
+"""Single-run lifecycle controller for the main-buffer frontend.
 
-集中拥有唯一活动 Run 的 ``CancellationToken``、消费任务、真实
-``run_id`` 和 ``MicaApp.run()`` 事件流，并转发公共交互响应。它不持有
-终端、不绘制。
+It exclusively owns the active run's ``CancellationToken``, consumer task, true
+``run_id``, and ``MicaApp.run()`` event stream, and forwards public interaction
+responses. It neither owns the terminal nor renders.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ class _ActiveRun:
 
 
 class MainBufferRuntime:
-    """拥有一个已装配 ``MicaApp`` 的单 Run 控制器。"""
+    """Single-run controller for one assembled ``MicaApp``."""
 
     def __init__(self, app: MicaApp, *, event_sink: EventSink) -> None:
         from mica_agent.app import MicaApp as App
@@ -66,7 +66,7 @@ class MainBufferRuntime:
         return self._active.task if self._active is not None else None
 
     def submit(self, prompt: str) -> bool:
-        """接受一次完整提交；关闭、已有活动 Run 或空白输入时拒绝。"""
+        """Accept one complete submission; reject when closed, busy, or given blank input."""
         if (
             self._closing
             or self._active is not None
@@ -97,7 +97,7 @@ class MainBufferRuntime:
         return self._app.respond_interaction(response) is True
 
     def cancel(self, run_id: str | None = None) -> bool:
-        """请求取消当前活动 Run；``run_id`` 为空时取消当前 Run。"""
+        """Request cancellation of the active run; ``None`` targets the current run."""
         state = self._active
         if self._closing or state is None or state.terminal or state.token.is_cancelled:
             return False
@@ -129,7 +129,7 @@ class MainBufferRuntime:
             state.interrupted = True
             reason = "cancelled"
             raise
-        except Exception:  # noqa: BLE001 - 后端异常不得逃逸到前端循环
+        except Exception:  # noqa: BLE001 - backend errors must not escape into the frontend loop
             state.token.cancel()
             state.interrupted = True
             reason = "runtime_error"
@@ -147,7 +147,7 @@ class MainBufferRuntime:
             state.task = None
 
     async def wait_idle(self) -> None:
-        """等待当前消费任务结束，不取消它。"""
+        """Wait for the active consumer task without cancelling it."""
         state = self._active
         if state is not None and state.task is not None:
             task = state.task
@@ -160,7 +160,7 @@ class MainBufferRuntime:
             self._active.token.cancel()
 
     async def aclose(self) -> None:
-        """幂等关闭：取消活动 Run 后关闭 MicaApp。"""
+        """Close idempotently by cancelling the active run before closing ``MicaApp``."""
         self.request_shutdown()
         if self._close_task is None:
             self._close_task = asyncio.create_task(
@@ -191,19 +191,20 @@ class MainBufferRuntime:
         finally:
             try:
                 await self._app.aclose()
-            except Exception:  # noqa: BLE001, S110 - Provider 关闭诊断保持私有
+            except Exception:  # noqa: BLE001, S110 - provider close diagnostics stay private
                 pass
 
 
 @dataclass(frozen=True, slots=True)
 class InterruptedMarker:
-    """内部标记：消费任务在未收到公共终态事件时结束。
+    """Internal marker for a consumer task that ended without a public terminal event.
 
-    只携带最小终止类别，不包含异常对象、消息、路径或任何后端细节：
+    It carries only a minimal termination category, never an exception, message, path,
+    or backend detail:
 
-    * ``cancelled``——使用者取消（Esc / Ctrl+C）；
-    * ``runtime_error``——Provider 或消费链抛异常；
-    * ``stream_ended``——事件流在没有终态事件的情况下结束。
+    * ``cancelled`` -- user cancellation (Esc / Ctrl+C);
+    * ``runtime_error`` -- the provider or consumer chain raised an error;
+    * ``stream_ended`` -- the event stream ended without a terminal event.
     """
 
     reason: str = "stream_ended"

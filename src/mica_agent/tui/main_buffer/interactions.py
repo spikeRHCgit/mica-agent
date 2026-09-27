@@ -1,8 +1,9 @@
-"""ask 与权限的独占输入模式。
+"""Exclusive input modes for ask and permission interactions.
 
-两种交互都把输入控制器切到唯一模式（``ASK`` / ``PERMISSION``），独占
-``↑``/``↓``、数字键、``Enter``、``Esc`` 和自己的文本输入。它们只产生
-公共响应对象或取消意图，不直接调用 Broker、Engine、Provider 或 Store。
+Each interaction places the input controller in one explicit mode (``ASK`` or
+``PERMISSION``) and owns arrows, digits, ``Enter``, ``Esc``, and its text input. It
+produces only public response objects or cancellation intent and never calls the
+broker, engine, provider, or store directly.
 """
 
 from __future__ import annotations
@@ -29,16 +30,16 @@ QUESTION_PERMISSION = "Do you want to proceed?"
 OPTION_YES = "Yes"
 OPTION_NO = "No"
 
-# 面板内的固定安全提示：只说明下一步能做什么，不回显响应、ID、Broker 状态、
-# 异常文本、路径或工具参数。
+# Fixed safe panel hints describe only the next action; they never echo responses,
+# identifiers, broker state, exception text, paths, or tool arguments.
 HINT_EMPTY_ANSWER = "请输入内容"
 HINT_RESPONSE_REJECTED = "提交未被接受，请重试或按 Esc 取消"
 HIDDEN_ABOVE = "… 上方还有 {count} 行"
 HIDDEN_BELOW = "… 下方还有 {count} 行"
 
-# 面板行的重要性：数值越大越晚删除。空行最先删，其次是选项说明与冗长详情，
-# 再次是标题、footer 与分隔线；问题主句、选项标签、自定义行、提示与文本输入
-# 行不参与按级删除（空间实在不够时由窗口化保证当前选中行可见）。
+# Higher ranks survive degradation longer. Blank rows go first, then descriptions and
+# verbose detail, then titles, footer, and separators. Questions, option labels, custom
+# rows, hints, and text input are windowed rather than rank-dropped so selection stays visible.
 RANK_BLANK = 0
 RANK_DESCRIPTION = 1
 RANK_TITLE = 2
@@ -49,7 +50,7 @@ RANK_CORE = 5
 
 @dataclass(frozen=True, slots=True)
 class PanelRow:
-    """面板的一行及其降级重要性。"""
+    """One panel row and its degradation priority."""
 
     text: str
     rank: int
@@ -57,7 +58,7 @@ class PanelRow:
 
 @dataclass(frozen=True, slots=True)
 class PanelView:
-    """一次面板排版的结果：物理行与当前选中行。"""
+    """One panel layout: physical rows and the selected-row index."""
 
     lines: list[str]
     selected_row: int
@@ -66,14 +67,14 @@ class PanelView:
 def fit_panel_rows(
     rows: list[PanelRow], limit: int | None, anchor: int, also: list[int] | None = None
 ) -> tuple[list[PanelRow], int]:
-    """把面板压到 ``limit`` 行以内，并保证 ``anchor`` 行可见。
+    """Fit a panel within ``limit`` rows while keeping ``anchor`` visible.
 
-    先按重要性从低到高删除可选行（同级里优先删离选中行最远的行）；仍然放不下
-    时围绕选中行取窗口，窗口**必须**包含选中行，并用固定提示说明上下方剩余
-    行数。``also`` 给出窗口化时优先与选中行同窗的行（面板内的固定提示），
-    ``limit`` 为 ``None`` 时不改变任何行。返回值是（可见行, 选中行在可见行中
-    的下标）：只要 ``rows`` 非空且 ``limit >= 1``，该下标一定落在可见行范围内，
-    且 ``visible[下标]`` 就是原 ``anchor`` 行。
+    Optional rows are removed from lowest to highest priority, choosing the row farthest
+    from selection within a rank. If that is insufficient, a window around selection
+    must include the selected row and uses fixed hints for hidden rows. ``also`` marks
+    rows, such as safe panel hints, that should share the window when possible. A
+    ``None`` limit preserves all rows. For non-empty ``rows`` and ``limit >= 1``, the
+    returned selection index is valid and identifies the original ``anchor`` row.
     """
     if not rows:
         return [], 0
@@ -102,7 +103,7 @@ def fit_panel_rows(
 
 
 def _farthest_row(rows: list[PanelRow], rank: int, focus: int) -> int:
-    """该级别里离选中行最远的行下标（同距离时取靠后的行）。"""
+    """Return the row in this rank farthest from selection, preferring the later tie."""
     candidates = [index for index, row in enumerate(rows) if row.rank == rank]
     return max(candidates, key=lambda index: (abs(index - focus), index))
 
@@ -110,18 +111,15 @@ def _farthest_row(rows: list[PanelRow], rank: int, focus: int) -> int:
 def _window_rows(
     rows: list[PanelRow], limit: int, focus: int, preferred: list[int]
 ) -> tuple[list[PanelRow], int]:
-    """围绕选中行取窗口：**选中行是硬约束**，其余目标只能次级争取。
+    """Window around selection, treating the selected row as a hard constraint.
 
-    候选窗口一律被限制在选中行的两侧（``start <= focus < end``），因此无论提示
-    行、问题主句还是上下隐藏计数怎样竞争，都不可能把选中行挤出结果。评分顺序
-    是``（覆盖的提示行数, 是否已交代被隐藏的行, 内容行数, 更靠上）``：
-
-    * 提示行（拒绝/空答案提示）优先，它直接说明面板为何还在；
-    * 其次要求窗口有交代：要么不隐藏任何行，要么用上下计数把隐藏行说清楚，
-      要么已经显示出那条固定提示（提示比计数更能说明状态）；
-    * 内容行数最后比较，用来尽量留住问题主句与选项标签。
-
-    返回的选中行下标始终指向 ``rows[focus]``（原本的 ``anchor`` 行）。
+    Every candidate satisfies ``start <= focus < end``, so hints, questions, and hidden
+    counts cannot displace selection. Candidates are scored by covered hint rows,
+    whether hidden content is explained, retained content rows, then earlier position.
+    Rejection and empty-answer hints rank first because they explain why the panel
+    remains. Next, the window should either hide nothing, show hidden-row counts, or
+    include that fixed hint. Content count then preserves as much question and option
+    text as possible. The returned index always identifies ``rows[focus]``.
     """
     if not rows:
         return [], 0
@@ -145,7 +143,7 @@ def _window_rows(
     _, start, end, slots = best
     prefix: list[PanelRow] = []
     suffix: list[PanelRow] = []
-    # 计数行只在两条都能放下时才显示：宁可不说，也不留下半个误导性的说明。
+    # Show hidden-row counts only when every required count fits; a partial account misleads.
     if slots <= budget - (end - start):
         if start > 0:
             prefix = [PanelRow(HIDDEN_ABOVE.format(count=start), RANK_CORE)]
@@ -156,7 +154,7 @@ def _window_rows(
 
 @dataclass(frozen=True, slots=True)
 class InteractionOutcome:
-    """一次按键处理的结果。"""
+    """Outcome of handling one key."""
 
     action: str
     """``none``（仅重绘）、``response`` 或 ``cancel``。"""
@@ -174,7 +172,7 @@ class InteractionOutcome:
 
 @dataclass
 class AskInteraction:
-    """结构化 ask 面板的活动状态。"""
+    """Active state of a structured ask panel."""
 
     interaction_id: str
     prompt: AskPrompt
@@ -195,7 +193,7 @@ class AskInteraction:
 
     @property
     def row_count(self) -> int:
-        """可选行总数：选项行加上可选的 ``Type something.`` 行。"""
+        """Selectable rows: option rows plus the optional ``Type something.`` row."""
         return len(self.prompt.options) + (1 if self._custom_enabled() else 0)
 
     @property
@@ -207,7 +205,7 @@ class AskInteraction:
         return self.editing in {"custom", "free"}
 
     def fail(self) -> None:
-        """业务侧拒绝本次响应：只在面板内留下固定安全提示。"""
+        """Record business rejection using only the fixed safe panel hint."""
         self.hint = HINT_RESPONSE_REJECTED
 
     def buffer_text(self) -> str:
@@ -220,13 +218,11 @@ class AskInteraction:
         return ""
 
     def handle(self, key: Key) -> InteractionOutcome:
-        # 只有真正被本交互消费、并且改变状态的按键才清除上一次的提示：PageUp、
-        # PageDown、未知功能键与越界数字不改变交互，也就不该让拒绝提示消失。
+        # Clear the prior hint only for a consumed key that changes state. PageUp,
+        # PageDown, unknown keys, and out-of-range digits must not hide rejection.
         if self.is_text_entry or self.editing == "notes":
             return self._handle_text(key)
         return self._handle_options(key)
-
-    # -- 选项模式 -----------------------------------------------------------
 
     def _handle_options(self, key: Key) -> InteractionOutcome:
         total = self.row_count
@@ -237,7 +233,7 @@ class AskInteraction:
                 self.hint = ""
             return InteractionOutcome.none()
         if key.name == "text" and key.data.isdigit():
-            # 数字键与面板的公开编号一致：只定位已编号的选项行。
+            # Digits match public panel numbering and select only numbered option rows.
             index = int(key.data) - 1
             if 0 <= index < len(self.prompt.options):
                 self.selected = index
@@ -271,8 +267,6 @@ class AskInteraction:
             return InteractionOutcome.none()
         return InteractionOutcome.none()
 
-    # -- 文本模式 -----------------------------------------------------------
-
     def _handle_text(self, key: Key) -> InteractionOutcome:
         if key.name == "escape":
             return InteractionOutcome.cancel()
@@ -281,8 +275,8 @@ class AskInteraction:
             and self.editing == "custom"
             and self.prompt.options
         ):
-            # 自定义输入里 Up/Down 退出编辑回到固定选项：Up 落到最后一个固定
-            # 选项，Down 落到第一个；草稿保留，等再次进入时恢复。
+            # In custom input, Up/Down returns to fixed options: Up selects the last and
+            # Down the first. Preserve the draft for the next entry into custom input.
             self.hint = ""
             self.editing = "options"
             self.selected = len(self.prompt.options) - 1 if key.name == "up" else 0
@@ -292,15 +286,15 @@ class AskInteraction:
             self.editing = "options"
             return InteractionOutcome.none()
         if key.name == "enter":
-            # Enter 是重试：先清掉旧提示；空答案再换成「请输入内容」。
+            # Enter retries: clear the old hint, then replace it if the answer is blank.
             self.hint = ""
             answer = self.buffer_text().strip()
             if not answer:
                 self.hint = HINT_EMPTY_ANSWER
                 return InteractionOutcome.none()
             if self.editing == "custom":
-                # 自定义回答不是编号选项，必须用 ``None`` 下标提交，否则会被
-                # 业务侧当作越界选项拒绝。
+                # A custom answer is not numbered; submit a ``None`` index so business
+                # validation does not reject it as an out-of-range option.
                 return InteractionOutcome(
                     "response",
                     UserInputResponse(
@@ -327,7 +321,7 @@ class AskInteraction:
         return InteractionOutcome.none()
 
     def _edit_text(self, remove: int | None, insert: str = "") -> bool:
-        """写入文本缓冲；返回本次是否真的改变了内容。"""
+        """Edit the text buffer and report whether content changed."""
         current = self.buffer_text()
         if remove == -1:
             updated = current[:-1]
@@ -346,12 +340,10 @@ class AskInteraction:
             self._text = updated
         return updated != current
 
-    # -- 绘制 ---------------------------------------------------------------
-
     def panel(
         self, width: int, palette: Palette, *, limit: int | None = None
     ) -> PanelView:
-        """排版面板；``limit`` 给出当前可用行数，超出时按固定优先级降级。"""
+        """Lay out the panel, degrading by fixed priority when ``limit`` is exceeded."""
         inner = max(8, width)
         rows: list[PanelRow] = [
             PanelRow(
@@ -452,11 +444,11 @@ class AskInteraction:
     def panel_lines(
         self, width: int, palette: Palette, *, limit: int | None = None
     ) -> list[str]:
-        """面板的物理行（不含选中行锚点，供只关心行内容的使用者）。"""
+        """Return physical panel rows without the selection anchor."""
         return self.panel(width, palette, limit=limit).lines
 
     def _question_rows(self, question: str, inner: int, limit: int | None) -> list[str]:
-        """问题主句至少保留一行；行数不足时优先把空间让给选项标签。"""
+        """Keep at least one question row, yielding scarce space to option labels."""
         lines = wrap_line(question, inner)
         if limit is None:
             return lines
@@ -468,13 +460,13 @@ class AskInteraction:
         return [*lines[: budget - 1], "…"]
 
     def _mandatory_row_count(self) -> int:
-        """问题之外无法再删的行数：全部选项标签与自定义行。"""
+        """Count non-removable rows beyond the question: options and the custom row."""
         return self.row_count
 
 
 @dataclass
 class PermissionInteraction:
-    """权限确认面板的活动状态；只提供一次允许和拒绝。"""
+    """Active permission panel offering only allow-once and deny."""
 
     interaction_id: str
     tool_name: str
@@ -483,11 +475,11 @@ class PermissionInteraction:
     hint: str = ""
 
     def fail(self) -> None:
-        """业务侧拒绝本次响应：只在面板内留下固定安全提示。"""
+        """Record business rejection using only the fixed safe panel hint."""
         self.hint = HINT_RESPONSE_REJECTED
 
     def handle(self, key: Key) -> InteractionOutcome:
-        # 与 Ask 一致：只有被本交互消费、并且改变状态的按键才清除拒绝提示。
+        # As in ask mode, only a consumed key that changes state clears rejection.
         if key.name in {"up", "down"}:
             self.selected = 1 - self.selected
             self.hint = ""
@@ -517,7 +509,7 @@ class PermissionInteraction:
     def panel(
         self, width: int, palette: Palette, *, limit: int | None = None
     ) -> PanelView:
-        """排版面板；``limit`` 给出当前可用行数，超出时按固定优先级降级。"""
+        """Lay out the panel, degrading by fixed priority when ``limit`` is exceeded."""
         inner = max(8, width)
         rows: list[PanelRow] = [
             PanelRow(
@@ -529,7 +521,7 @@ class PermissionInteraction:
         if self.detail:
             detail_rows = wrap_line(sanitize_text(self.detail, newlines=True), inner)
             for position, line in enumerate(detail_rows):
-                # 第一行是真正的授权对象，比后续换行更晚删除。
+                # The first row names the authorization target and outlives wrapped detail.
                 rank = RANK_TITLE if position == 0 else RANK_DESCRIPTION
                 rows.append(PanelRow(palette.paint(line, "text"), rank))
         rows.append(PanelRow("", RANK_BLANK))
@@ -564,12 +556,12 @@ class PermissionInteraction:
     def panel_lines(
         self, width: int, palette: Palette, *, limit: int | None = None
     ) -> list[str]:
-        """面板的物理行（不含选中行锚点，供只关心行内容的使用者）。"""
+        """Return physical panel rows without the selection anchor."""
         return self.panel(width, palette, limit=limit).lines
 
 
 def _fit(text: str, width: int) -> str:
-    """把分隔线或标签裁剪到给定显示宽度。"""
+    """Truncate a separator or label to the display width."""
     if cell_len(text) <= width:
         return text
     return truncate_tail(text, width)

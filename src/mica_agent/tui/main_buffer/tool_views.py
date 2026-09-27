@@ -1,19 +1,19 @@
-"""主缓冲区专用工具视图：安全展示快照 → 宽状态色块。
+"""Main-buffer tool views from safe snapshots to full-width status blocks.
 
-一次工具调用只产生一条语义记录，状态变化时原地更新。视图只消费公共
-``ToolPresentationSnapshot``（已经清洗、没有运行时资源），不读取工具参数、
-ToolResult、工作区、Provider 或 Executor 私有状态。
+One tool call produces one semantic record updated in place as state changes. Views
+consume only public ``ToolPresentationSnapshot`` values, which are sanitized and contain
+no runtime resources. They never inspect tool arguments, ``ToolResult``, workspace,
+provider, or executor internals.
 
-视觉规则：
+Pending and running use dark blue, success dark green, and failure or cancellation dark
+red across the available width. In NO_COLOR mode, ``○ ● ✓ × ■`` and safe fixed reasons
+carry state. Card titles omit lifecycle words, long content folds by tool type, and the
+global expansion toggle affects only terminal records.
 
-* 待执行/执行为深蓝、成功为深绿、失败或取消为深红，背景填满可用内容宽度；
-* 彩色模式由背景表达状态，NO_COLOR 使用 ``○ ● ✓ × ■`` 与固定安全原因；
-* 卡片标题不出现 ``running``/``success``/``completed`` 等状态词；
-* 长内容按工具类型折叠，全局展开只影响终态记录。
-
-``ToolViewFactory`` 是唯一的解析接缝：内置工具固定优先，外部映射在构造时
-复制且不能覆盖内置名；处理器抛普通异常、返回非法对象或身份不一致时安全
-回退通用视图，异常文本与 traceback 不进入卡片或诊断。
+``ToolViewFactory`` is the sole resolution seam. Built-ins have fixed precedence;
+external mappings are copied at construction and cannot shadow built-in names. Ordinary
+handler exceptions, invalid objects, or snapshot mismatch fall back safely to a generic
+view without exposing exception text or tracebacks.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from mica_agent.tool_presentation import ToolPresentationKind
 from .renderer import Palette, cell_len
 from .sanitize import sanitize_scalar, sanitize_text
 
-# 工具状态 → 背景样式名（颜色只表达生命周期，不是唯一线索）。
+# Tool state maps to background style; color is not the sole lifecycle cue.
 STATE_STYLES = {
     "pending": "tool_pending",
     "running": "tool_running",
@@ -53,7 +53,7 @@ _FAILED_STATES = frozenset({"failed", "cancelled"})
 
 
 def _payload_text(snapshot: object, key: str) -> str:
-    """读取快照 payload 中的文本；即使快照来自扩展也再清洗一次。"""
+    """Read and resanitize text from a snapshot payload, including extension snapshots."""
     payload = getattr(snapshot, "payload", None)
     if not isinstance(payload, Mapping):
         return ""
@@ -68,14 +68,14 @@ def _logical_lines(value: str) -> list[str]:
 
 @dataclass(frozen=True, slots=True)
 class _Part:
-    """一段文本及其样式名。"""
+    """Text paired with its semantic style name."""
 
     text: str = field(repr=False)
     style: str = "text"
 
 
 class ToolView:
-    """工具视图基类：负责状态背景、安全原因与 NO_COLOR 状态符号。"""
+    """Base tool view for state background, safe reason, and NO_COLOR symbol."""
 
     kind = "tool"
 
@@ -108,24 +108,22 @@ class ToolView:
 
     @property
     def can_expand(self) -> bool:
-        """该记录是否存在可展开的额外安全内容。"""
+        """Whether this record has additional safe content to expand."""
         return False
 
     def reason(self) -> str:
-        """固定安全原因：只使用快照携带的安全消息。"""
+        """Return a safe fixed reason using only the snapshot message."""
         message = getattr(self._snapshot, "message", None)
         return sanitize_scalar(message, fallback="") if message else ""
-
-    # -- 渲染 ---------------------------------------------------------------
 
     def rows(
         self, width: int, palette: Palette, *, expanded: bool
     ) -> list[list[_Part]]:
-        """返回未填色的逻辑行（子类实现）。"""
+        """Return logical rows before background fill."""
         raise NotImplementedError
 
     def render(self, width: int, palette: Palette, expanded: bool) -> list[str]:
-        """返回物理行：填满可用宽度的状态色块（NO_COLOR 下带状态符号）。"""
+        """Return full-width status rows, using symbols in NO_COLOR mode."""
         width = max(1, width)
         rows = self.rows(width, palette, expanded=expanded)
         background = STATE_STYLES[self._state]
@@ -136,14 +134,14 @@ class ToolView:
         return lines
 
     def split(self, *args: object, **kwargs: object) -> None:
-        """工具记录有界，永远不参与流式切分。"""
+        """Tool records are bounded and never participate in stream splitting."""
 
     def __repr__(self) -> str:
         return f"<{type(self).__name__} state={self._state}>"
 
 
 def _compose(parts: list[_Part], width: int, palette: Palette, background: str) -> str:
-    """把逻辑行拼成一条填满背景宽度的物理行。"""
+    """Compose a logical row into a physical row that fills the background width."""
     bg = palette.styles.get(background, "")
     output = ""
     used = 0
@@ -178,7 +176,7 @@ def _truncate(text: str, limit: int) -> str:
 
 
 def _hint(candidates: list[str], width: int) -> str:
-    """从长到短选择能放进可用宽度的折叠提示（窄终端保留核心信息）。"""
+    """Choose the longest folding hint that fits, preserving essentials when narrow."""
     for text in candidates:
         if cell_len(text) <= width:
             return text
@@ -192,7 +190,7 @@ def _wrap(text: str, width: int, indent: str = "") -> list[str]:
 
 
 class ReadToolView(ToolView):
-    """单行紧凑卡片：只显示工具名与安全相对路径。"""
+    """Compact single-row card containing only tool name and safe relative path."""
 
     kind = "read"
 
@@ -211,7 +209,7 @@ class ReadToolView(ToolView):
 
 
 class WriteToolView(ToolView):
-    """文件内容预览卡片：纯文本正文与十行折叠。"""
+    """File-content preview card with plain text and a ten-row fold."""
 
     kind = "write"
 
@@ -271,7 +269,7 @@ class WriteToolView(ToolView):
 
 
 class EditToolView(ToolView):
-    """逐行差异卡片：真实行号、上下文、二十条变化折叠。"""
+    """Linewise diff card with real row numbers, context, and a twenty-change fold."""
 
     kind = "edit"
 
@@ -405,7 +403,7 @@ class EditToolView(ToolView):
 
 
 class BashToolView(ToolView):
-    """命令 + 动态输出卡片：命令行三行折叠、输出八行有界预览。"""
+    """Command and live-output card with three command rows and eight output rows."""
 
     kind = "bash"
 
@@ -416,7 +414,7 @@ class BashToolView(ToolView):
 
     @property
     def output_lines(self) -> list[str]:
-        """终态用快照全文；活动工具用有界实时缓冲。"""
+        """Use snapshot output when terminal, otherwise the bounded live buffer."""
         if self.state in {"running", "pending"} and self._live_output:
             return _logical_lines(self._live_output)
         output = _payload_text(self._snapshot, "output")
@@ -424,7 +422,7 @@ class BashToolView(ToolView):
 
     @property
     def output_hidden(self) -> int:
-        """被折叠的更早逻辑行数（活动工具按已收到的总数计算）。"""
+        """Number of folded earlier logical rows, based on total received while active."""
         lines = len(self.output_lines)
         if self.state in {"running", "pending"}:
             return max(0, self._live_total - lines)
@@ -552,7 +550,7 @@ class BashToolView(ToolView):
 
 
 class AskToolView(ToolView):
-    """ask 完成记录：问题与真实答案；备注随答案一起显示。"""
+    """Completed ask record containing the question, real answer, and answer note."""
 
     kind = "ask"
 
@@ -574,7 +572,7 @@ class AskToolView(ToolView):
 
 
 class GenericToolView(ToolView):
-    """通用兜底：只显示工具名与固定安全原因，不伪造可展开内容。"""
+    """Generic fallback showing only tool name and a fixed safe reason."""
 
     kind = "generic"
 
@@ -605,7 +603,7 @@ def _append_reason(rows: list[list[_Part]], view: ToolView) -> None:
 
 ToolViewBuilder = Callable[[object, str], ToolView]
 
-# 内置工具名 → presentation kind；两者不一致时拒绝投影，不回退通用视图。
+# Built-in names map to presentation kinds; mismatches reject projection without fallback.
 _KIND_BY_NAME = {
     "read": ToolPresentationKind.READ,
     "write": ToolPresentationKind.WRITE,
@@ -624,11 +622,11 @@ _BUILTIN_VIEWS: dict[ToolPresentationKind, type[ToolView]] = {
 
 
 def _same_snapshot(view: object, snapshot: object) -> bool:
-    """完整快照值比较：字段等值的副本接受，任一字段不同即拒绝。
+    """Compare complete snapshot values, accepting equal copies and rejecting any mismatch.
 
-    与 ``create_tool_card`` 的既有工厂契约一致：身份（call_id、
-    tool_name）、kind、status、message 与 payload 等全部字段按值比较，
-    因此两次独立构造但字段完全相同的快照会被接受。
+    The factory contract compares identity, ``kind``, ``status``, ``message``, payload,
+    and all remaining fields by value, so independently constructed equal snapshots are
+    accepted.
     """
     if not isinstance(view, ToolView):
         return False
@@ -649,11 +647,12 @@ def _same_snapshot(view: object, snapshot: object) -> bool:
 
 
 class ToolViewFactory:
-    """把安全展示快照解析成专用工具视图的单一接缝。
+    """Sole seam that resolves a safe presentation snapshot into a tool view.
 
-    外部只能按工具名提供额外构建器，且不能覆盖内置名；构建器只接收安全
-    快照，普通异常、非法返回或身份不一致时安全回退通用视图，异常文本、
-    ``repr`` 与 traceback 不进入卡片或诊断（只累加一个固定计数）。
+    External builders are keyed by tool name and cannot shadow built-ins. They receive
+    only the safe snapshot. Ordinary exceptions, invalid returns, or identity mismatch
+    fall back to the generic view without placing exception text, ``repr``, or traceback
+    in cards or diagnostics; only a fixed counter increments.
     """
 
     def __init__(self, overrides: Mapping[str, ToolViewBuilder] | None = None) -> None:
@@ -667,12 +666,12 @@ class ToolViewFactory:
 
     @property
     def fallbacks(self) -> int:
-        """安全回退到通用视图的次数（不含异常或身份细节）。"""
+        """Number of safe generic fallbacks, excluding exception or identity details."""
         return self._fallbacks
 
     @property
     def overrides(self) -> tuple[str, ...]:
-        """已接受的外部工具名（构造时复制，不暴露映射本身）。"""
+        """Accepted external tool names from the copied, private mapping."""
         return tuple(sorted(self._overrides))
 
     def create(
@@ -683,11 +682,12 @@ class ToolViewFactory:
         live_output: str = "",
         live_total: int = 0,
     ) -> ToolView | None:
-        """按内置 kind 优先的统一契约解析展示视图。
+        """Resolve a view under one built-in-first contract.
 
-        ``None`` 表示身份与 kind 不匹配，调用方应拒绝投影。顺序与既有
-        Textual seam 一致：保留工具名只接受对应 kind；内置 kind（含 ASK）
-        只给名称正确的内置视图；外部 builder 只能处理 ``GENERIC`` 且非保留名。
+        ``None`` means identity and kind mismatch, so the caller must reject projection.
+        Reserved names accept only their corresponding kind; built-in kinds, including
+        ASK, require the matching built-in name; external builders handle only
+        ``GENERIC`` snapshots with non-reserved names.
         """
         name = getattr(snapshot, "tool_name", None)
         kind = getattr(snapshot, "kind", None)
@@ -708,7 +708,7 @@ class ToolViewFactory:
             return view_type(snapshot, state=state)
         if kind is not ToolPresentationKind.GENERIC:
             if kind in _BUILTIN_VIEWS:
-                # 自定义名称不能截获内置 kind（含 ASK），也不回退通用视图。
+                # Custom names cannot intercept built-in kinds, including ASK, or use fallback.
                 return None
             return GenericToolView(snapshot, state=state)
         builder = self._overrides.get(name) if isinstance(name, str) else None
@@ -718,7 +718,7 @@ class ToolViewFactory:
         try:
             view = builder(snapshot, state)
             accepted = _same_snapshot(view, snapshot)
-        except Exception:  # noqa: BLE001 - 工厂、返回类型与快照比较的普通异常边界
+        except Exception:  # noqa: BLE001 - boundary for builder, return, and snapshot errors
             accepted = False
         if not accepted:
             self._fallbacks += 1

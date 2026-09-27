@@ -1,14 +1,14 @@
-"""主缓冲区终端的唯一 IO 所有者。
+"""Sole IO owner for the main-buffer terminal.
 
-本模块是 ``main_buffer`` 子包中唯一接触 stdin/stdout 与终端能力的模块：
-它负责原始输入、终端尺寸、颜色能力判断和主缓冲区输出。它**不**进入
-alternate screen、不捕获鼠标、不清除 scrollback，也不解释任何界面语义，
-因此渲染器、编辑器和编排层都只能通过它输出字符。
+This is the only ``main_buffer`` module that touches stdin, stdout, or terminal
+capabilities. It owns raw input, terminal size, color capability, and main-buffer
+output. It never enters the alternate screen, captures the mouse, clears scrollback,
+or interprets UI semantics; renderer, editor, and orchestration output only through it.
 
-安全边界：渲染器写出的可信 ANSI 与不可信正文在**语义正文边界**分开
-（见 :mod:`mica_agent.tui.main_buffer.sanitize`），因此 :meth:`Terminal.write`
-不再做二次清洗；真正的防线是 :func:`find_forbidden_sequences`，它对**实际
-发送出去的完整字节流**做模式检测，而不是把字符串枚举当作主要防线。
+Trusted renderer ANSI and untrusted body text separate at the semantic-text boundary in
+:mod:`mica_agent.tui.main_buffer.sanitize`, so :meth:`Terminal.write` does not sanitize
+again. :func:`find_forbidden_sequences` is the safety backstop: it parses the complete
+emitted byte stream instead of relying on a fixed string list.
 """
 
 from __future__ import annotations
@@ -27,28 +27,28 @@ _BEL = "\x07"
 _ESC = "\x1b"
 _ST = "\x1b\\"
 
-# 明确禁止的终端效果（文档与测试引用的样例，不是主要防线）。
+# Explicitly forbidden effects used as examples by documentation and tests, not the main guard.
 FORBIDDEN_SEQUENCES: tuple[str, ...] = (
     "\x1b[?1049h",  # alternate screen on
     "\x1b[?1049l",  # alternate screen off
     "\x1b[?47h",
-    "\x1b[?1000h",  # 鼠标捕获
+    "\x1b[?1000h",  # mouse capture
     "\x1b[?1002h",
     "\x1b[?1003h",
     "\x1b[?1005h",
     "\x1b[?1006h",
     "\x1b[?1015h",
-    "\x1b[3J",  # 清除 scrollback
+    "\x1b[3J",  # clear scrollback
 )
 
-# 唯一允许出现的私有模式：自动换行与光标可见性。
+# The only allowed private modes control autowrap and cursor visibility.
 _ALLOWED_PRIVATE_MODES = frozenset({"7", "25"})
-# 整屏/滚动缓冲区擦除（ED 参数 1/2/3）；0 与缺省是「擦除光标以下」，允许。
+# ED 1/2/3 erase the screen or scrollback; default/0 erases below the cursor and is allowed.
 _FORBIDDEN_ERASE_PARAMS = frozenset({"1", "2", "3"})
-# 会改变终端窗口或剪贴板的 OSC 操作。
+# OSC operations that modify the terminal window or clipboard.
 _FORBIDDEN_OSC_NUMBERS = frozenset({"0", "1", "2", "52"})
 
-# 允许出现的控制字符：换行、制表与回车（CRLF 和回到行首是重绘原语）。
+# Newline, tab, and carriage return are allowed; CRLF and row return are repaint primitives.
 _ALLOWED_CONTROL_CHARS = frozenset({"\n", "\t", "\r"})
 
 _AUTOWRAP_OFF = "\x1b[?7l"
@@ -58,27 +58,28 @@ DEFAULT_SIZE = (80, 24)
 
 
 class KeyInput(Protocol):
-    """prompt_toolkit ``Input`` 中主缓冲区前端实际使用的子集。"""
+    """Subset of prompt_toolkit ``Input`` used by the main-buffer frontend."""
 
     def read_keys(self) -> list[Any]:
-        """返回当前已就绪的按键，不阻塞。"""
+        """Return all currently ready keys without blocking."""
 
     def flush_keys(self) -> list[Any]:
-        """结束未完成的输入序列并返回因此产生的按键。"""
+        """Finish incomplete input sequences and return the keys they produce."""
 
     def attach(self, callback: Callable[[], None]) -> AbstractContextManager[None]:
-        """在事件循环中注册输入就绪回调。"""
+        """Register an input-ready callback with the event loop."""
 
     def raw_mode(self) -> AbstractContextManager[None]:
-        """进入原始模式。"""
+        """Enter raw mode."""
 
 
 def default_input_factory() -> KeyInput:
-    """构造平台默认的低层输入；只在进入原始模式时调用。
+    """Build the platform input only when entering raw mode.
 
-    Windows 控制台在 VT 输入模式下偶尔只给出 ``uChar`` 为 ``\\x00`` 的导航
-    记录，锁定版读取器会丢弃它们，因此这里就地叠加一层 VirtualKeyCode 后备。
-    其他平台、非 VT 模式与管道输入保持锁定版行为。
+    A Windows console in VT input mode can yield navigation records whose ``uChar`` is
+    ``\\x00``; the locked reader drops them, so this instance receives a
+    ``VirtualKeyCode`` fallback. Other platforms, non-VT mode, and piped input retain
+    locked-reader behavior.
     """
     from prompt_toolkit.input import create_input
 
@@ -87,13 +88,11 @@ def default_input_factory() -> KeyInput:
     return acquired
 
 
-# -- Windows 控制台记录的导航后备 ---------------------------------------------
-
-# Windows 控制台记录类型（Win32 ABI）：1 = KEY_EVENT。
+# Win32 console record type 1 is KEY_EVENT.
 KEY_EVENT_TYPE = 0x0001
 
-# 受支持的导航 VirtualKeyCode 及其等效 VT 序列。序列与锁定版 prompt_toolkit
-# 的 ANSI 序列表一致，因此后备路径与标准终端路径产生完全相同的按键。
+# Supported navigation VirtualKeyCodes and equivalent VT sequences. Matching the
+# locked prompt_toolkit ANSI table makes fallback and standard paths produce equal keys.
 NAVIGATION_VIRTUAL_KEYS: dict[int, str] = {
     0x26: "\x1b[A",  # VK_UP
     0x28: "\x1b[B",  # VK_DOWN
@@ -106,10 +105,10 @@ NAVIGATION_VIRTUAL_KEYS: dict[int, str] = {
 
 
 def windows_key_event(record: Any) -> Any | None:
-    """取出记录中的按键按下事件；非按键事件、key-up 与未知记录返回 ``None``。
+    """Extract a key-down event, returning ``None`` for other or unknown records.
 
-    只按属性读取（``EventType``/``Event.KeyEvent``），因此不需要导入任何
-    Win32 类型，测试也能用等价替身构造记录。
+    Attribute-only access through ``EventType`` and ``Event.KeyEvent`` avoids importing
+    Win32 types and lets tests construct equivalent stand-ins.
     """
     if getattr(record, "EventType", None) != KEY_EVENT_TYPE:
         return None
@@ -120,15 +119,13 @@ def windows_key_event(record: Any) -> Any | None:
 
 
 def windows_record_sequences(records: Iterable[Any]) -> list[str]:
-    """把一批 Windows 控制台记录解释为按原顺序排列的待解析输入串。
+    """Interpret Windows console records as ordered parser input sequences.
 
-    * ``uChar != "\\x00"``：原样产出该字符，继续走标准 VT 路径；
-    * ``uChar == "\\x00"`` 且是明确支持的导航 VirtualKeyCode：产出等效 VT
-      序列（例如 ``VK_UP`` → ``"\\x1b[A"``），由同一个 ``Vt100Parser`` 解析；
-    * key-up、鼠标/菜单/焦点事件、未知记录与不支持的 VirtualKeyCode：不产出。
-
-    同一批记录里已经有字符记录的 VirtualKeyCode 不再使用后备，因此同一个
-    物理按键既不会既走标准序列又走后备，也不会被合并成两次导航。
+    A non-null ``uChar`` follows the standard VT path unchanged. A null ``uChar`` with a
+    supported navigation ``VirtualKeyCode`` yields its equivalent VT sequence for the
+    same ``Vt100Parser``. Key-up, mouse, menu, focus, unknown, and unsupported records
+    yield nothing. If a batch already contains a character record for a virtual key,
+    fallback is suppressed so one physical key cannot be emitted twice.
     """
     events = [event for event in map(windows_key_event, records) if event is not None]
     typed = {
@@ -147,11 +144,11 @@ def windows_record_sequences(records: Iterable[Any]) -> list[str]:
 
 
 class WindowsVtKeyReader:
-    """Windows 控制台记录到按键的纯解释器，不做任何平台 IO。
+    """Pure Windows console-record interpreter with no platform IO.
 
-    它只持有锁定版 ``Vt100Parser``：标准字符与导航后备都变成同一批输入串，
-    因此解析结果与真实 VT 序列完全一致（例如 ``Keys.Up`` + ``"\\x1b[A"``）。
-    单独 ``Esc`` 仍要等 :meth:`flush` 结束未完成序列之后才产生按键。
+    A locked ``Vt100Parser`` receives both standard characters and navigation fallback
+    as the same input sequences, making results equal to real VT input. A lone ``Esc``
+    becomes a key only when :meth:`flush` finishes the incomplete sequence.
     """
 
     def __init__(self) -> None:
@@ -159,30 +156,30 @@ class WindowsVtKeyReader:
         self._parser = Vt100Parser(lambda key_press: self._buffer.append(key_press))
 
     def feed(self, text: str) -> None:
-        """喂入一段已经确定是 VT 输入的文本。"""
+        """Feed text already known to be VT input."""
         self._parser.feed(text)
 
     def feed_records(self, records: Iterable[Any]) -> None:
-        """喂入一批控制台记录：记录 → 输入串 → 锁定版解析器。"""
+        """Feed console records through input sequences into the locked parser."""
         for sequence in windows_record_sequences(records):
             self._parser.feed(sequence)
 
     def flush(self) -> list[Any]:
-        """结束未完成的序列并返回因此产生的按键（单独 ``Esc`` 在这里出现）。"""
+        """Finish incomplete sequences and return produced keys, including lone ``Esc``."""
         self._parser.flush()
         return self.take()
 
     def take(self) -> list[Any]:
-        """取出并清空当前已解析出的按键。"""
+        """Take and clear all currently parsed keys."""
         keys, self._buffer = self._buffer, []
         return keys
 
 
 def is_windows_vt_reader(reader: Any) -> bool:
-    """该对象是否为可叠加导航后备的 Windows VT 读取器。
+    """Return whether an object accepts the Windows navigation fallback.
 
-    按形状判断（``read``/``flush_keys``/``handle``/``_vt100_parser``）而不是
-    导入具体类型，因此不需要任何 Win32 导入，测试也能用等价替身验证适配器。
+    Shape-checking ``read``, ``flush_keys``, ``handle``, and ``_vt100_parser`` avoids any
+    Win32 type import and supports equivalent test stand-ins.
     """
     if not callable(getattr(reader, "read", None)):
         return False
@@ -194,11 +191,11 @@ def is_windows_vt_reader(reader: Any) -> bool:
 
 
 def _hybrid_reader_type(base_type: type) -> type:
-    """构造「标准 VT 字符 + 零字符导航后备」的混合读取器类型。
+    """Build a reader type combining standard VT characters and null-char navigation.
 
-    平台 IO（控制台句柄、事件等待、``ReadConsoleInputW``）仍由锁定版
-    prompt_toolkit 完成；这里只接管「记录 → 待解析输入串」这一步并复用它的
-    解析器语义。
+    Locked prompt_toolkit retains platform IO, handles, event waits, and
+    ``ReadConsoleInputW``. This layer owns only record-to-parser-input interpretation and
+    reuses locked parser semantics.
     """
 
     class WindowsVtInputReader(base_type):  # type: ignore[misc, valid-type]
@@ -207,39 +204,40 @@ def _hybrid_reader_type(base_type: type) -> type:
             self._mica_keys = WindowsVtKeyReader()
 
         def _get_keys(self, count: Any, input_records: Any) -> tuple[()]:
-            """把这一批记录交给 Mica 的解释器，锁定版解析器不再经手。"""
+            """Send this record batch to Mica's interpreter instead of the locked parser."""
             self._mica_keys.feed_records(
                 input_records[index] for index in range(count.value)
             )
             return ()
 
         def read(self) -> list[Any]:
-            """走锁定版平台 IO，返回 Mica 解释后的按键。"""
+            """Use locked platform IO and return keys interpreted by Mica."""
             super().read()
             return self._mica_keys.take()
 
         def flush_keys(self) -> list[Any]:
-            """结束未完成的序列；单独 ``Esc`` 只在这里成为按键。"""
+            """Finish incomplete sequences; a lone ``Esc`` becomes a key only here."""
             return self._mica_keys.flush()
 
     return WindowsVtInputReader
 
 
 def windows_navigation_reader(reader: Any) -> Any:
-    """返回叠加了零字符导航后备的新读取器。
+    """Return a new reader with null-character navigation fallback.
 
-    以 ``type(reader)`` 为基类就地扩展，因此不导入任何 Win32 类型，也不
-    复制控制台句柄与记录轮询。
+    Extending ``type(reader)`` avoids Win32 imports and does not duplicate console
+    handles or record polling.
     """
     return _hybrid_reader_type(type(reader))()
 
 
 def install_windows_navigation_fallback(inner: Any) -> bool:
-    """就地为 Windows VT 输入安装导航后备；返回是否已安装。
+    """Install navigation fallback on one Windows VT input and report success.
 
-    Windows 专属能力全部通过被替换的读取器本身获得，本模块不导入 Win32
-    类型；替换只作用于**这一个输入实例**，不修改 prompt_toolkit 源码，也不
-    做进程级全局替换。任何失败都保留锁定版读取器不变。
+    The replaced reader provides every Windows-specific capability, so this module
+    imports no Win32 type. Replacement affects only this input instance, modifies no
+    prompt_toolkit source or process-global state, and leaves the locked reader intact
+    on failure.
     """
     if sys.platform != "win32":
         return False
@@ -248,11 +246,11 @@ def install_windows_navigation_fallback(inner: Any) -> bool:
         return False
     try:
         replacement = windows_navigation_reader(current)
-    except Exception:  # noqa: BLE001 - 安装失败时保留锁定版读取器
+    except Exception:  # noqa: BLE001 - installation failure preserves the locked reader
         return False
     close = getattr(current, "close", None)
     if callable(close):
-        # 旧读取器的句柄释放失败不该影响替换：新读取器已经建好自己的句柄。
+        # Failure to close the old handle cannot invalidate a replacement with its own handle.
         with suppress(Exception):
             close()
     inner.console_input_reader = replacement
@@ -260,10 +258,11 @@ def install_windows_navigation_fallback(inner: Any) -> bool:
 
 
 def find_forbidden_sequences(text: str) -> list[str]:
-    """扫描实际输出流，返回其中不可接受的终端效果描述。
+    """Scan the emitted output stream for unacceptable terminal effects.
 
-    这是主缓冲区安全边界的主要防线：它按终端序列的语法解析，而不是匹配
-    固定字符串，因此未知的私有模式、整屏擦除、标题与剪贴板操作都会被抓出。
+    This main-buffer safety guard parses terminal sequence syntax rather than matching a
+    fixed string list, catching unknown private modes, full-screen erasure, title
+    changes, and clipboard operations.
     """
     findings: list[str] = []
     index = 0
@@ -297,7 +296,7 @@ def find_forbidden_sequences(text: str) -> list[str]:
 
 
 def _inspect_introducer(text: str, index: int, findings: list[str]) -> int:
-    """检查 ``ESC``/C1 之后的序列并返回下一个待扫描下标。"""
+    """Inspect a sequence after ``ESC``/C1 and return the next scan index."""
     introducer = text[index]
     if introducer == "[":
         return _inspect_csi(text, index + 1, findings)
@@ -306,7 +305,7 @@ def _inspect_introducer(text: str, index: int, findings: list[str]) -> int:
     if introducer in {"P", "X", "^", "_"}:
         findings.append(f"ESC {introducer} 字符串控制")
         return _skip_to_string_end(text, index + 1)
-    if introducer == "c":  # RIS 全量复位
+    if introducer == "c":  # full RIS reset
         findings.append("ESC c")
         return index + 1
     return index + 1
@@ -339,7 +338,7 @@ def _inspect_osc(text: str, index: int, findings: list[str]) -> int:
 
 @dataclass(frozen=True, slots=True)
 class _Sequence:
-    """一段 CSI 的参数区间、终止字节下标与下一扫描位置。"""
+    """CSI parameter extent, final-byte index, and next scan position."""
 
     param_end: int
     final: int
@@ -373,7 +372,7 @@ def _skip_to_string_end(text: str, index: int) -> int:
 
 @dataclass(frozen=True, slots=True)
 class Capabilities:
-    """当前终端的只读能力快照。"""
+    """Read-only snapshot of current terminal capabilities."""
 
     ansi: bool
     interactive: bool
@@ -382,10 +381,10 @@ class Capabilities:
 
 
 class Terminal:
-    """主缓冲区的唯一 IO 所有者。
+    """Sole IO owner for the main buffer.
 
-    除本类外，``main_buffer`` 的任何模块都不允许写 stdout 或读取原始输入。
-    ``emitted`` 保存实际发送的全部文本，供测试与视觉证据核对。
+    No other ``main_buffer`` module may write stdout or read raw input. ``emitted``
+    records all actual output for tests and visual evidence.
     """
 
     def __init__(
@@ -411,8 +410,6 @@ class Terminal:
         self.emitted: list[str] = []
         self.cleanup_errors: list[str] = []
 
-    # -- 能力 ---------------------------------------------------------------
-
     def capabilities(self) -> Capabilities:
         width, height = self.size()
         return Capabilities(
@@ -432,29 +429,28 @@ class Terminal:
         return max(1, columns), max(1, lines)
 
     def set_size(self, size: tuple[int, int] | None) -> None:
-        """注入终端尺寸；``None`` 表示回到真实终端查询（测试接缝）。"""
+        """Inject terminal size, or use ``None`` to resume real size queries."""
         self._forced_size = size
 
     def interactive_enabled(self) -> bool:
-        """当前输出是否是可进行光标寻址的交互式终端。"""
+        """Whether output is an interactive terminal that supports cursor addressing."""
         if self._forced_interactive is not None:
             return self._forced_interactive
         return bool(getattr(self._output, "isatty", lambda: False)())
 
     def ansi_enabled(self) -> bool:
-        """是否使用颜色；与交互能力独立，NO_COLOR 只关闭颜色。"""
+        """Whether to use color; NO_COLOR disables color without disabling interaction."""
         return self.interactive_enabled() and not (
             self._environ.get("NO_COLOR")
             or self._environ.get("TERM", "").strip().lower() == "dumb"
         )
 
-    # -- 输出 ---------------------------------------------------------------
-
     def write(self, text: str) -> None:
-        """发送一段已经完成换行处理的文本。
+        """Emit text whose newline handling is already complete.
 
-        这是**可信控制**入口：渲染器生成的光标与擦除序列必须原样写出，
-        因此这里不做清洗。不可信正文在进入语义块之前就已清洗。
+        This is the trusted-control entry point: renderer-generated cursor and erase
+        sequences must pass through unchanged, so no sanitization occurs here. Untrusted
+        body text is sanitized before entering a semantic block.
         """
         if not text:
             return
@@ -463,18 +459,16 @@ class Terminal:
         self._output.flush()
 
     def write_line(self, text: str) -> None:
-        """发送一行并换行。"""
+        """Emit one row followed by a newline."""
         self.write(text + "\r\n")
 
     def emitted_text(self) -> str:
-        """实际发送过的完整字节流（测试与诊断用）。"""
+        """Return the complete emitted byte stream for tests and diagnostics."""
         return "".join(self.emitted)
 
     def forbidden_findings(self) -> list[str]:
-        """对实际发送过的完整字节流做安全扫描。"""
+        """Safety-scan the complete emitted byte stream."""
         return find_forbidden_sequences(self.emitted_text())
-
-    # -- 输入 ---------------------------------------------------------------
 
     @property
     def input(self) -> KeyInput:
@@ -487,10 +481,10 @@ class Terminal:
         return self._input is not None
 
     def open_input(self) -> None:
-        """进入原始模式并关闭自动换行；重复调用安全。
+        """Enter raw mode and disable autowrap; repeated calls are safe.
 
-        任何一步失败都会回收已经获取的资源后再向上抛出，因此调用方只需
-        在 ``finally`` 中调用一次 :meth:`close_input`。
+        Failure at any step releases acquired resources before propagating, so callers
+        need only one :meth:`close_input` call in ``finally``.
         """
         if self._input is not None:
             return
@@ -512,31 +506,32 @@ class Terminal:
             raise
 
     def attach_input(self, callback: Callable[[], None]) -> None:
-        """注册输入就绪回调；成功注册后由 :meth:`close_input` detach。"""
+        """Attach an input-ready callback that :meth:`close_input` will detach."""
         if self._attached is not None:
             return
         self._attached = self.input.attach(callback)
         self._attached.__enter__()
 
     def drain_keys(self) -> list[Any]:
-        """消费当前所有就绪按键。"""
+        """Consume all currently ready keys."""
         return self.input.read_keys()
 
     def flush_keys(self) -> list[Any]:
-        """结束输入中未完成的序列并返回因此产生的按键。
+        """Finish incomplete input sequences and return the resulting keys.
 
-        单独 ``Esc`` 只有在有界延迟后调用本方法时才成为按键，因此调用方必须
-        使用结果，而不是像丢弃缓冲那样忽略返回值。与 :meth:`drain_keys`
-        对称：没有未完成序列时返回空列表。
+        A lone ``Esc`` becomes a key only when this method runs after a bounded delay,
+        so callers must consume the result rather than treat it as a discarded buffer.
+        Symmetrically with :meth:`drain_keys`, no incomplete sequence returns an empty
+        list.
         """
         return self.input.flush_keys()
 
     def close_input(self) -> None:
-        """恢复终端状态并释放输入对象；重复调用安全。
+        """Restore terminal state and release input; repeated calls are safe.
 
-        每一项清理互相隔离：单项失败只记录在 :attr:`cleanup_errors`，
-        不会阻止其他必要清理，也不会以异常形式打扰使用者。
-        普通 ``Exception`` 之外（例如 ``CancelledError``）不在此吞掉。
+        Cleanup steps are isolated: one failure is recorded in :attr:`cleanup_errors`
+        without blocking other required cleanup or surfacing to the user. Exceptions
+        outside ordinary ``Exception``, such as ``CancelledError``, are not swallowed.
         """
         if self._input is None and self._attached is None:
             return
@@ -563,7 +558,7 @@ class Terminal:
     def _attempt(self, label: str, action: Callable[[], Any]) -> None:
         try:
             action()
-        except Exception as error:  # noqa: BLE001 - 清理失败只记账不外抛
+        except Exception as error:  # noqa: BLE001 - record cleanup failure without raising
             self.cleanup_errors.append(f"{label}: {type(error).__name__}")
 
 

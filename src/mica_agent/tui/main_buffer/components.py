@@ -1,7 +1,8 @@
-"""主缓冲区的纯文本与语义展示组件。
+"""Plain-text and semantic presentation components for the main buffer.
 
-本模块只把已经确认的安全快照和公开状态转成**语义块**或**已排版的
-chrome 行**，不做 IO、不读业务对象、不导入 Textual。
+This module turns verified safe snapshots and public state into semantic blocks or
+laid-out chrome lines. It performs no IO, reads no business object, and imports no
+Textual code.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ COMPOSER_MAX_LINES = 8
 IDLE_HINT = "Enter to send · Ctrl+J for new line"
 COMPOSER_PLACEHOLDER = "Type your request or command..."
 COMPOSER_PROMPT = "› "
-# 用户消息的左侧身份标记与思考块的左侧细线。
+# Left identity marker for user messages and thin rule for reasoning blocks.
 USER_MARKER = "▌"
 REASONING_BAR = "│ "
 REASONING_COLLAPSED_ROWS = 2
@@ -68,7 +69,7 @@ def _safe_line(value: object | None, *, fallback: str = "none") -> str:
 
 
 def logo_lines(width: int, palette: Palette) -> list[str]:
-    """按终端宽度返回 Textual 前端同一几何的 Logo 行。"""
+    """Return full, compact, or text logo lines for the terminal width."""
     if width < LOGO_COMPACT_MIN_WIDTH:
         return [palette.paint("Mica", "brand")]
     rows = _FULL_ROWS if width >= LOGO_FULL_MIN_WIDTH else _COMPACT_ROWS
@@ -119,7 +120,7 @@ def _pad(text: str, width: int) -> str:
 
 
 def startup_blocks(snapshot: object, width: int, palette: Palette) -> list[Block]:
-    """启动首屏：Logo、定位文案、资源面板与真实就绪说明。"""
+    """Build the startup logo, orientation copy, resource panel, and readiness facts."""
 
     blocks: list[Block] = []
     for line in logo_lines(width, palette):
@@ -149,8 +150,8 @@ def startup_blocks(snapshot: object, width: int, palette: Palette) -> list[Block
         ),
     ]
     panel = _panel_lines(sections, width, palette)
-    # 面板行已按纯文本测量/截断后再着色，且宽度小于终端宽度，
-    # 因此声明为可信的不可换行行，避免二次排版切碎 ANSI 序列。
+    # Panel lines are measured and truncated before styling and fit the terminal width.
+    # Mark them trusted and non-wrapping so a second layout pass cannot split ANSI.
     blocks.extend(Block("raw", line, styled=True) for line in panel)
     blocks.append(Block("brand", "Mica is ready."))
     return blocks
@@ -161,19 +162,19 @@ def _join_names(names: tuple[str, ...]) -> str:
 
 
 def user_block(text: str) -> BlockLike:
-    """用户消息：左侧短蓝线标识，正文按纯文本（不解释 Markdown）。"""
+    """Build a user message with a short left marker and literal plain text."""
     return UserBlock(sanitize_text(text, newlines=True))
 
 
 def assistant_block(text: str) -> BlockLike:
-    """朴素的正式回复文本块（Markdown 渲染见 :mod:`markdown`）。"""
+    """Build a plain assistant reply block; Markdown rendering lives in :mod:`markdown`."""
     return Block("assistant", sanitize_text(text, newlines=True))
 
 
 def reasoning_block(
     text: str, mode: ReasoningDisplayMode = ReasoningDisplayMode.COLLAPSED
 ) -> BlockLike:
-    """思考块：默认折叠，隐藏模式不产生任何行。"""
+    """Build a reasoning block, collapsed by default and empty when hidden."""
     return ReasoningBlock(sanitize_text(text, newlines=True), mode)
 
 
@@ -182,7 +183,7 @@ def status_line(
     *,
     elapsed: float | None = None,
 ) -> str | None:
-    """唯一工作状态条的纯文本；空闲时不常驻。"""
+    """Return the sole work-status line, or no persistent line while idle."""
     if state == "idle":
         return None
     if state == "working":
@@ -208,10 +209,11 @@ def _duration(seconds: float | None) -> str:
 
 @dataclass(frozen=True, slots=True)
 class UserBlock:
-    """用户消息：整行低对比度深灰背景 + 左侧短蓝色身份标记，正文按纯文本。
+    """User message with a low-contrast row and a short left identity marker.
 
-    用户原文不被解释为 Markdown：即使正文里出现 ``#``、``**`` 或围栏，
-    也只是普通字符。块自身不附加空行；相邻高层记录的间距由渲染器统一插入。
+    Source text remains literal plain text: ``#``, ``**``, and fences have no Markdown
+    meaning. The block adds no blank line; the renderer owns spacing between adjacent
+    high-level records.
     """
 
     text: str = field(repr=False)
@@ -233,15 +235,16 @@ class UserBlock:
         return lines
 
     def split(self, *args: object, **kwargs: object) -> None:
-        """用户消息不参与流式切分。"""
+        """User messages never participate in streaming splits."""
 
 
 @dataclass(frozen=True, slots=True)
 class ReasoningBlock:
-    """模型思考：灰色次要文字、左侧细灰线、比正式回复更深一级的缩进。
+    """Model reasoning rendered as muted text behind a thin left rule.
 
-    只有 ``ReasoningDelta`` 会创建本块；``hidden`` 不产生任何行，因此也
-    不会影响相邻块间距，``collapsed``（默认）最多两行并带克制省略提示。
+    Only ``ReasoningDelta`` creates this block. ``hidden`` produces no rows and cannot
+    affect adjacent spacing; ``collapsed`` is the default and shows at most two rows
+    with a restrained omission marker.
     """
 
     text: str = field(repr=False)
@@ -279,7 +282,7 @@ class ReasoningBlock:
         return [first, second]
 
     def split(self, *args: object, **kwargs: object) -> None:
-        """思考块不参与流式切分。"""
+        """Reasoning blocks never participate in streaming splits."""
 
 
 def _user_line(marker: str, row: str, width: int, palette: Palette) -> str:
@@ -307,7 +310,7 @@ def _user_line(marker: str, row: str, width: int, palette: Palette) -> str:
 
 @dataclass(frozen=True, slots=True)
 class ComposerFrame:
-    """输入框的可绘制结果与光标位置。"""
+    """Drawable composer result and cursor position."""
 
     lines: list[str]
     cursor: tuple[int, int]
@@ -315,17 +318,17 @@ class ComposerFrame:
 
 
 def composer_body_width(width: int) -> int:
-    """composer 正文可用列数（已扣除左右边框与提示前缀）。"""
+    """Composer body width after subtracting borders and the prompt prefix."""
     return max(1, composer_inner_width(width) - cell_len(COMPOSER_PROMPT))
 
 
 def composer_inner_width(width: int) -> int:
-    """composer 边框内部列数。"""
+    """Width inside the composer border."""
     return max(4, width - 2)
 
 
 def _plain_rule(title: str, inner: int, *, left: str) -> str:
-    """未着色的边框行；标题嵌在横线中间，方便标注上下隐藏行数。"""
+    """Unstyled rule with an embedded label for hidden-row counts."""
     label = f"{left}{title} " if title else ""
     return label + _BOX_H * max(0, inner - cell_len(label))
 
@@ -347,10 +350,10 @@ def composer_frame(
     hidden_above: int = 0,
     hidden_below: int = 0,
 ) -> ComposerFrame:
-    """绘制完整边框输入框，并给出 chrome 内的物理光标坐标。
+    """Draw the bordered composer and return its physical cursor in chrome.
 
-    正文行必须已经按 :func:`composer_body_width` 软换行；本函数只负责
-    加边框、补占位提示与标注上下隐藏行数。
+    Body rows must already be soft-wrapped to :func:`composer_body_width`; this function
+    only adds borders, placeholder hints, and hidden-row labels.
     """
     inner = composer_inner_width(width)
     body: list[str] = []
@@ -376,7 +379,7 @@ def composer_frame(
     else:
         for index, text in enumerate(draft_lines[:COMPOSER_MAX_LINES]):
             prefix = prompt if index == 0 else "  "
-            # 正文保留前导/尾随空格与空白行，只清控制内容并展开制表符。
+            # Preserve leading/trailing spaces and blank rows; strip only controls and expand tabs.
             body.append(prefix + expand_tabs(sanitize_text(text, newlines=False)))
     top = (
         _BOX_TL
@@ -415,7 +418,7 @@ def facts_lines(
     width: int,
     palette: Palette,
 ) -> list[str]:
-    """底部两行事实：workspace (branch) / model 与 sessions。"""
+    """Build the two footer fact rows: workspace (branch) / model and sessions."""
     left_value = _safe_line(workspace, fallback="none")
     if branch:
         left_value += f" ({_safe_line(branch, fallback='')})"
@@ -439,10 +442,10 @@ def facts_lines(
 
 
 def read_git_branch(workspace_path: object, *, timeout: float = 2.0) -> str | None:
-    """读取当前工作区的 Git 分支；失败时返回 ``None``。
+    """Read the current workspace Git branch, returning ``None`` on failure.
 
-    这是输入区恢复时刷新的受控公开工作区事实：只返回分支名，不返回
-    remote、提交、路径或任何命令输出正文。
+    This is a controlled public workspace fact refreshed after input resumes. It returns
+    only the branch name, never a remote, commit, path, or command-output body.
     """
     try:
         completed = subprocess.run(

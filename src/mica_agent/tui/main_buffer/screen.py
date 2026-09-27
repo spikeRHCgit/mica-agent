@@ -1,12 +1,13 @@
-"""主缓冲区前端的编排与模式机。
+"""Main-buffer frontend orchestration and mode machine.
 
-模式机只有四种活动模式：``IDLE``、``RUNNING``、``ASK``、``PERMISSION``
-（外加终态 ``CLOSED``）。终端失焦不改变模式，输入所有权只由显式模式决定，
-因此长时间没有焦点事件也不会改变第一发按键的处理方式。
+The active modes are ``IDLE``, ``RUNNING``, ``ASK``, and ``PERMISSION``, plus terminal
+``CLOSED``. Terminal focus does not change mode; explicit mode alone owns input, so
+missing focus events cannot change how the next key is handled.
 
-编排层拥有终端、渲染器、编辑器和单 Run 控制器，但不拥有业务状态：会话、
-工具结果、权限与交互 pending 全部仍由既有服务负责。公共事件必须通过
-Run 身份、单调 ``seq`` 与 ``(run_id, call_id)`` 三重校验后才会修改记录。
+The orchestration layer owns the terminal, renderer, editor, and single-run controller,
+but not business state. Existing services retain sessions, tool results, permissions,
+and pending interactions. Public events may mutate records only after run identity,
+monotonic ``seq``, and ``(run_id, call_id)`` checks.
 """
 
 from __future__ import annotations
@@ -81,16 +82,16 @@ DONE_VISIBLE_SECONDS = 2.0
 REFRESH_INTERVAL = 0.25
 MAX_TOOL_DETAIL = 72
 MAX_OUTPUT_LINES = 8
-# 单独 Esc 的有界等待窗口：只有在这段时间内没有后续字节时才结束未完成的
-# 转义序列，因此完整的 ESC[A / ESC[B 不会被拆成 Escape 加文本。
+# A lone Esc finishes only after this bounded window without another byte, preventing
+# complete ESC[A or ESC[B sequences from splitting into Escape plus text.
 ESCAPE_FLUSH_DELAY = 0.1
 
-# 内部终止类别到工作状态的映射；真实公共终态事件优先。
+# Internal interruption reasons map to status; real public terminal events take precedence.
 _STOP_REASONS = frozenset({"cancelled"})
 _RECORDED = "recorded"
 CHECKPOINT_INCOMPLETE_MARKER = "incomplete"
 
-# RunFailed 的固定安全文案：只按公共 ErrorCategory 映射，绝不拼接原始 message。
+# RunFailed uses fixed safe text mapped only from public ErrorCategory, never raw messages.
 _FAILURE_MESSAGES: dict[ErrorCategory, str] = {
     ErrorCategory.AUTHENTICATION: "Provider authentication failed.",
     ErrorCategory.RATE_LIMIT: "Provider rate limit reached.",
@@ -102,7 +103,7 @@ _FAILURE_MESSAGES: dict[ErrorCategory, str] = {
     ErrorCategory.UNKNOWN: "The run stopped because of an error.",
 }
 
-# 公共契约：ToolFinished.status 与最终快照状态必须一一对应（其余终态为 FAILED）。
+# Public contract: ToolFinished.status must match final snapshot status; others are FAILED.
 _FINAL_PRESENTATION_STATUS = {
     ToolResultStatus.SUCCESS: ToolPresentationStatus.SUCCESS,
     ToolResultStatus.CANCELLED: ToolPresentationStatus.CANCELLED,
@@ -110,7 +111,7 @@ _FINAL_PRESENTATION_STATUS = {
 
 
 class MainBufferScreen:
-    """主缓冲区前端：一个 MicaApp、一个终端、一个活动 Run。"""
+    """Main-buffer frontend for one MicaApp, one terminal, and one active run."""
 
     def __init__(
         self,
@@ -142,7 +143,7 @@ class MainBufferScreen:
             if isinstance(reasoning_mode, ReasoningDisplayMode)
             else ReasoningDisplayMode.COLLAPSED
         )
-        # 工厂映射在构造时复制；内置工具名不会被外部视图覆盖。
+        # The factory copies mappings at construction; external views cannot shadow built-ins.
         self._tool_views = ToolViewFactory(tool_views)
         self._assistant_block: StreamingMarkdownBlock | None = None
         self._pending_tool: ToolView | None = None
@@ -179,8 +180,6 @@ class MainBufferScreen:
         self.diagnostics: list[str] = []
         self.cleanup_errors: list[str] = []
 
-    # -- 只读视图（测试与诊断） ---------------------------------------------
-
     @property
     def mode(self) -> Mode:
         return self._mode
@@ -199,12 +198,12 @@ class MainBufferScreen:
 
     @property
     def composer_text(self) -> str:
-        """当前草稿的显示文本（长粘贴为摘要形式）。"""
+        """Displayed draft text, with long pastes represented by summaries."""
         return self._editor.text
 
     @property
     def submit_text(self) -> str:
-        """当前草稿真正会提交给 MicaApp 的原文。"""
+        """Original draft text that would be submitted to MicaApp."""
         return self._editor.submit_text()
 
     @property
@@ -221,29 +220,25 @@ class MainBufferScreen:
 
     @property
     def closed(self) -> bool:
-        """关闭流程是否已经跑完（终端与业务资源都已收敛）。"""
+        """Whether shutdown has converged both terminal and business resources."""
         return self._shutdown_done
 
     @property
     def interaction(self) -> AskInteraction | PermissionInteraction | None:
-        """当前独占输入的 ask/权限交互（只读视图）。"""
+        """Current ask or permission interaction with exclusive input ownership."""
         return self._ask or self._permission
 
-    # -- 公开接缝 -----------------------------------------------------------
-
     def update_session_snapshot(self, snapshot: object | None) -> None:
-        """公开快照更新接缝：模型切换、会话重命名或切换后由外层调用。"""
+        """Update the public snapshot after model or session changes."""
         self._session_snapshot = snapshot
         self.render()
 
     def handle_resize(self) -> None:
-        """重新读取终端尺寸并重排帧；不改变草稿、模式与事件顺序。"""
+        """Read terminal size and reflow without changing draft, mode, or event order."""
         self.render()
 
-    # -- 生命周期 -----------------------------------------------------------
-
     async def run(self) -> None:
-        """进入原始模式、渲染首帧并运行模式机直到退出。"""
+        """Enter raw mode, render the first frame, and run the mode machine until exit."""
         capabilities = self._terminal.capabilities()
         if not capabilities.interactive:
             raise RuntimeError("main buffer frontend requires an interactive terminal")
@@ -276,33 +271,33 @@ class MainBufferScreen:
                 await self.handle_event(payload)
             self.render()
             if self._facts_dirty:
-                # 先让状态与终态行落地，再刷新公开事实（不阻塞终态渲染）。
+                # Emit status and terminal rows before refreshing public facts.
                 self._facts_dirty = False
                 await self._refresh_branch()
                 self.render()
 
     async def _shutdown(self) -> None:
-        """幂等关闭：先停刷新与待触发 flush，再无条件下线终端，最后关业务资源。"""
+        """Shut down idempotently: stop refresh and flush, restore terminal, close runtime."""
         if self._closed:
             return
         self._closed = True
         self._cancel_escape_flush()
         try:
             await self._stop_refresh()
-        except Exception as error:  # noqa: BLE001 - 清理失败只记账不外抛
+        except Exception as error:  # noqa: BLE001 - record cleanup failure without raising
             self.cleanup_errors.append(f"stop refresh: {type(error).__name__}")
         finally:
             self._finalize_terminal()
             try:
                 await self._runtime.aclose()
-            except Exception as error:  # noqa: BLE001 - 清理失败只记账不外抛
+            except Exception as error:  # noqa: BLE001 - record cleanup failure without raising
                 self.cleanup_errors.append(f"close runtime: {type(error).__name__}")
             finally:
                 self._mode = "closed"
                 self._shutdown_done = True
 
     def _finalize_terminal(self) -> None:
-        """同步恢复终端：每一步互相隔离，单项失败不阻断其余恢复。"""
+        """Restore terminal state synchronously with each cleanup step isolated."""
         renderer = self._renderer
         if renderer is not None:
             self._attempt("commit pending", renderer.commit_pending)
@@ -310,10 +305,10 @@ class MainBufferScreen:
         self._attempt("close input", self._terminal.close_input)
 
     def _attempt(self, label: str, action: Callable[[], Any]) -> None:
-        """执行一个清理步骤；失败只记固定标签，不向使用者暴露异常内容。"""
+        """Run one cleanup step, recording only a fixed label on failure."""
         try:
             action()
-        except Exception as error:  # noqa: BLE001 - 清理失败只记账不外抛
+        except Exception as error:  # noqa: BLE001 - record cleanup failure without raising
             self.cleanup_errors.append(f"{label}: {type(error).__name__}")
 
     def _startup_document(self) -> None:
@@ -389,7 +384,7 @@ class MainBufferScreen:
     def _history_tool_block(
         self, call: object, presentation: ToolPresentationSnapshot | None
     ) -> BlockLike:
-        """历史工具记录：有合法快照时复用专用视图，否则退化为中性记录。"""
+        """Use a specialized view for valid historical snapshots, otherwise a neutral record."""
         name = getattr(call, "name", None)
         if isinstance(
             presentation, ToolPresentationSnapshot
@@ -403,41 +398,39 @@ class MainBufferScreen:
             "muted", f"tool {sanitize_scalar(name, fallback='tool')} · {_RECORDED}"
         )
 
-    # -- 输入 ---------------------------------------------------------------
-
     def _on_input_ready(self, loop: asyncio.AbstractEventLoop) -> None:
-        """输入就绪回调：把按键送入同一个队列，并管理唯一的待触发 flush。
+        """Enqueue ready keys and manage the sole pending flush.
 
-        回调可能来自输入线程，因此对事件循环的所有操作都通过线程安全入口，
-        顺序与调用顺序一致。
+        The callback may run on an input thread, so every event-loop operation uses its
+        thread-safe entry point in call order.
         """
         try:
             keys = self._terminal.drain_keys()
         except EOFError:
-            # 输入流已结束：当成一次 EOF 请求，交给同一条空闲退出规则判断。
+            # Treat an ended input stream as EOF under the same idle-exit rule.
             loop.call_soon_threadsafe(self._queue.put_nowait, ("key", Key("ctrl_d")))
             return
-        except Exception as error:  # noqa: BLE001 - 读取失败不得终止前端
+        except Exception as error:  # noqa: BLE001 - input failure must not terminate the frontend
             self.diagnostics.append(f"input read failed: {type(error).__name__}")
             return
         if not keys:
-            # 空 drain 可能是单独 Esc：安排一次性有界 flush；已有待触发句柄时
-            # 合并，不重复排程，也不轮询。
+            # An empty drain may be lone Esc: schedule one bounded flush, coalescing an
+            # existing handle without rescheduling or polling.
             loop.call_soon_threadsafe(self._schedule_escape_flush, loop)
             return
-        # 完整的序列已经解析出来：取消待触发 flush，避免把 ESC[A 拆开。
+        # A complete sequence cancels pending flush so ESC[A remains intact.
         loop.call_soon_threadsafe(self._cancel_escape_flush)
         self._enqueue_keys(loop, keys)
 
     def _enqueue_keys(self, loop: asyncio.AbstractEventLoop, keys: list[Any]) -> None:
-        """按原顺序把按键送入前端队列（drain 与 flush 共用的唯一入口）。"""
+        """Enqueue keys in order through the sole path shared by drain and flush."""
         for keypress in keys:
             loop.call_soon_threadsafe(
                 self._queue.put_nowait, ("key", normalize_key(keypress))
             )
 
     def _schedule_escape_flush(self, loop: asyncio.AbstractEventLoop) -> None:
-        """安排一次有界延迟的 flush；已关闭或已有待触发句柄时不做任何事。"""
+        """Schedule one bounded flush unless closed or one is already pending."""
         if self._closed or self._flush_handle is not None:
             return
         self._flush_handle = loop.call_later(
@@ -445,13 +438,13 @@ class MainBufferScreen:
         )
 
     def _flush_pending_input(self, loop: asyncio.AbstractEventLoop) -> None:
-        """结束输入里未完成的序列，并把结果按键走与 drain 相同的入队路径。"""
+        """Finish incomplete input and enqueue resulting keys through the drain path."""
         self._flush_handle = None
         if self._closed:
             return
         try:
             keys = self._terminal.flush_keys()
-        except Exception as error:  # noqa: BLE001 - flush 失败不得终止前端
+        except Exception as error:  # noqa: BLE001 - flush failure must not terminate the frontend
             self.diagnostics.append(f"input flush failed: {type(error).__name__}")
             return
         self._enqueue_keys(loop, keys)
@@ -462,11 +455,11 @@ class MainBufferScreen:
             handle.cancel()
 
     def _handle_key(self, key: Key) -> bool:
-        """处理一个按键；返回 True 表示应当退出。"""
+        """Handle one key and return whether the frontend should exit."""
         if key.name == "ctrl_c":
             return self._handle_interrupt()
         if key.name == "ctrl_o":
-            # 全局工具详情开关：只影响工具记录，不改变思考/Ask/composer/facts。
+            # Global tool details affect only tool records, not reasoning, ask, composer, or facts.
             renderer = self._renderer
             if renderer is not None:
                 renderer.toggle_expanded()
@@ -481,8 +474,8 @@ class MainBufferScreen:
         if self._mode == "running":
             return False
         if key.name == "ctrl_d":
-            # 最小规则（当前没有更细的 CLI 事实源）：空闲且草稿为空时退出，
-            # 有草稿或处于交互/运行模式时忽略，不删字符也不伪造 Run。
+            # Exit only when idle with a blank draft; otherwise ignore Ctrl-D without
+            # deleting text or inventing a run.
             return self._editor.is_blank
         self._handle_composer_key(key)
         return False
@@ -511,7 +504,7 @@ class MainBufferScreen:
             self._editor.move(key.name)
 
     def _submit(self) -> None:
-        """提交草稿；运行时拒绝时保留草稿、不追加用户消息、不伪造 Run。"""
+        """Submit a draft; runtime rejection preserves it and creates no user row or run."""
         if self._editor.is_blank:
             self._editor.clear()
             return
@@ -560,8 +553,8 @@ class MainBufferScreen:
         if self._runtime.respond_interaction(outcome.response) is True:
             self._close_interaction()
             return
-        # 业务侧拒绝：保留交互对象、选择、自定义草稿与备注，只在面板内显示
-        # 固定安全提示；使用者可以重试或按 Esc 取消，不回显任何内部信息。
+        # Business rejection preserves the interaction, selection, custom draft, and note.
+        # Show only a fixed panel message so users can retry or cancel without leaked internals.
         self.diagnostics.append("interaction response rejected")
         interaction.fail()
 
@@ -573,13 +566,11 @@ class MainBufferScreen:
             self._status = "working"
             self._start_refresh()
 
-    # -- 事件 ---------------------------------------------------------------
-
     async def _enqueue_event(self, event: object) -> None:
         await self._queue.put(("event", event))
 
     def _accept_event(self, event: object) -> bool:
-        """Run 身份、单调 seq 与终态后迟到事件的唯一准入检查。"""
+        """Sole admission check for run identity, monotonic seq, and post-terminal events."""
         run_id = getattr(event, "run_id", None)
         seq = getattr(event, "seq", None)
         if not isinstance(run_id, str) or not isinstance(seq, int):
@@ -603,7 +594,7 @@ class MainBufferScreen:
         return True
 
     async def handle_event(self, event: object) -> None:
-        """把一条公共事件投影到界面（运行时 sink 与测试共用的公开边界）。"""
+        """Project one public event onto the UI through the runtime and test boundary."""
         if isinstance(event, InterruptedMarker):
             self._finish_run("stop" if event.reason in _STOP_REASONS else "error")
             return
@@ -690,7 +681,7 @@ class MainBufferScreen:
     def _accept_presentation(
         self, presentation: ToolPresentationSnapshot | None
     ) -> bool:
-        """校验名称与 presentation kind 一致；不一致时拒绝投影。"""
+        """Require name and presentation kind to agree before projection."""
         if presentation is None:
             return False
         expected = {
@@ -718,7 +709,7 @@ class MainBufferScreen:
         return True
 
     def _accept_final_presentation(self, event: ToolFinished) -> bool:
-        """校验最终快照的完整身份与状态；不一致时整条 ToolFinished 都不投影。"""
+        """Validate final snapshot identity and state, rejecting the whole event on mismatch."""
         presentation = event.presentation
         if presentation is None:
             return True
@@ -743,7 +734,7 @@ class MainBufferScreen:
         return True
 
     def _finish_tool(self, event: ToolFinished) -> None:
-        """收口当前工具记录；最终快照身份不一致时保留 pending 卡片等待合法终态。"""
+        """Finalize the tool record, retaining pending state if final identity mismatches."""
         if not self._accept_final_presentation(event):
             return
         status = {
@@ -767,7 +758,7 @@ class MainBufferScreen:
         renderer = self._renderer
         if renderer is not None:
             if self._assistant_block is not None:
-                # 结束流式：用完整累计源文本做一次稳定 Markdown 渲染。
+                # Finish streaming with one stable Markdown render from accumulated source.
                 self._assistant_block.finish()
                 renderer.set_pending(self._assistant_block)
             renderer.commit_pending()
@@ -781,26 +772,26 @@ class MainBufferScreen:
             renderer.set_pending(block)  # type: ignore[arg-type]
 
     def _live_output(self) -> str:
-        """活动 Bash 的有界实时输出（最近八条完整逻辑行 + 至多一条进行中行）。"""
+        """Bounded live Bash output: eight complete logical rows plus one partial row."""
         lines = [*self._tool_output]
         if self._tool_partial:
             lines.append(self._tool_partial)
         if not lines:
             return ""
         text = "\n".join(lines)
-        # 末尾空行必须显式补换行，否则会被逻辑行解析当成行结束符吞掉。
+        # Preserve a trailing blank row explicitly so logical-line parsing cannot discard it.
         return f"{text}\n" if lines[-1] == "" else text
 
     def _live_total(self) -> int:
-        """已收到的真实逻辑行数（含尚未换行的进行中行）。"""
+        """Count received logical rows, including a partial row without newline."""
         return self._tool_output_total + (1 if self._tool_partial else 0)
 
     def _append_tool_output(self, text: str) -> None:
-        """按逻辑行累积动态输出：保留空行、跨事件片段与尾部无换行文本。
+        """Accumulate live output by logical row, preserving blanks and event fragments.
 
-        跨事件到达的片段先拼回同一条逻辑行；``\n`` 结尾终止该行，尾部
-        不完整的部分留待下一次事件继续拼接，因此不会把两个片段错误地
-        拆成两条逻辑行，也不会丢掉连续空白行。
+        Fragments from separate events rejoin the same logical row. A newline terminates
+        that row while an incomplete tail waits for the next event, preventing false row
+        splits and preserving consecutive blank rows.
         """
         cleaned = sanitize_text(text, newlines=True)
         if not cleaned:
@@ -811,7 +802,7 @@ class MainBufferScreen:
             self._tool_output.append(self._tool_partial)
             self._tool_output_total += 1
             self._tool_partial = part
-        # 有界预览：未结束的进行中行也占一条，因此完整行至多七条。
+        # The partial row consumes one preview slot, leaving at most seven complete rows.
         limit = MAX_OUTPUT_LINES - 1 if self._tool_partial else MAX_OUTPUT_LINES
         del self._tool_output[:-limit]
 
@@ -823,7 +814,7 @@ class MainBufferScreen:
             live_total=self._live_total(),
         )
         if view is None:
-            # 名称与 presentation kind 不一致：拒绝投影，不回退通用视图。
+            # Reject name-kind mismatch rather than silently accepting a generic projection.
             self.diagnostics.append("tool view identity mismatch")
             view = GenericToolView(self._pending_presentation, state=state)
         self._pending_tool = view
@@ -877,10 +868,8 @@ class MainBufferScreen:
         else:
             self._done_deadline = None
 
-    # -- 工作状态刷新 -------------------------------------------------------
-
     def _start_refresh(self) -> None:
-        """确保同一时间只有一个工作状态刷新任务。"""
+        """Ensure only one status-refresh task exists at a time."""
         task = self._refresh_task
         if task is not None and not task.done():
             return
@@ -896,7 +885,7 @@ class MainBufferScreen:
         await asyncio.gather(task, return_exceptions=True)
 
     async def _refresh_loop(self) -> None:
-        """唯一受控刷新任务：推进点动画、让 done 到期淡出。"""
+        """Sole controlled refresh task for progress animation and done expiry."""
         while not self._closed:
             await self._sleep(REFRESH_INTERVAL)
             if self._closed:
@@ -915,20 +904,18 @@ class MainBufferScreen:
             return
 
     async def _refresh_branch(self) -> None:
-        """刷新公开事实里的 Git 分支；不轮询、不访问业务私有对象。"""
+        """Refresh the public Git branch fact without polling or private business access."""
         if self._workspace_path is None:
             return
         try:
             self._branch = await asyncio.to_thread(
                 self._read_branch, self._workspace_path
             )
-        except Exception as error:  # noqa: BLE001 - 事实刷新失败不影响运行
+        except Exception as error:  # noqa: BLE001 - fact refresh failure must not stop the run
             self.diagnostics.append(f"branch refresh failed: {type(error).__name__}")
 
-    # -- 绘制 ---------------------------------------------------------------
-
     def render(self) -> None:
-        """按当前状态绘制一帧（模式机与测试共用的公开入口）。"""
+        """Render one frame through the public mode-machine and test entry point."""
         renderer = self._renderer
         if renderer is None or self._closed:
             return
@@ -945,10 +932,11 @@ class MainBufferScreen:
         renderer.set_width(width)
 
     def _build_chrome(self) -> tuple[list[str], tuple[int, int] | None, int | None]:
-        """构造底部 chrome；返回（物理行, 光标位置, 选中行锚点）。
+        """Build bottom chrome and return rows, cursor position, and selection anchor.
 
-        交互面板同时拿到当前可用行数与自己的选中行，因此超高面板可以降级而
-        不是被渲染器从顶部静默裁掉；锚点是渲染器的最后保护层。
+        Interaction panels receive both available height and selected row, allowing tall
+        panels to degrade instead of being silently clipped from the top. The renderer's
+        anchor is the final safeguard.
         """
         renderer = self._renderer
         assert renderer is not None

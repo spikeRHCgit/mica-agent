@@ -1,17 +1,20 @@
-"""composer 草稿、光标与按键解释。
+"""Composer draft, cursor, and key interpretation.
 
-编辑器只是输入状态的容器：它不绘制、不写 stdout、不导入 Textual，也不
-知道 Run 或会话。按键解释把 prompt_toolkit 的 ``KeyPress`` 归一成稳定的
-``Key``，使上层模式机可以在不依赖具体终端库的情况下测试。
+The editor owns only input state: it neither renders nor writes stdout, imports no
+Textual code, and knows nothing about runs or sessions. Key interpretation normalizes
+prompt_toolkit ``KeyPress`` values into stable ``Key`` values for an independent outer
+mode machine.
 
-草稿文本分两层：
+Draft text has two layers:
 
-* **显示文本**（``Buffer`` 里的内容）：长粘贴折叠为 ``[paste #N +M lines]``；
-* **提交文本**（``submit_text()``）：把已登记的粘贴片段还原成完整原文。
+* display text in ``Buffer``, where long pastes collapse to
+  ``[paste #N +M lines]``;
+* submission text from ``submit_text()``, where registered paste fragments expand back
+  to their complete source.
 
-长粘贴片段是不可拆分的编辑单元：光标整体跨过它，Backspace/Delete 一接触
-就整体删除。片段身份由内部的登记表决定，因此手打一段同名摘要只是普通
-文本，不会被当作真实粘贴。
+A long paste is an indivisible editing unit: cursor movement crosses it as a whole and
+Backspace/Delete removes it as a whole on contact. An internal registry determines
+fragment identity, so manually typing the same summary remains ordinary text.
 """
 
 from __future__ import annotations
@@ -32,7 +35,7 @@ PASTE_LINE_THRESHOLD = 9
 
 @dataclass(frozen=True, slots=True)
 class Key:
-    """归一化后的按键。"""
+    """Normalized key value."""
 
     name: str
     data: str = ""
@@ -63,7 +66,7 @@ _KEY_NAMES: dict[Any, str] = {
 
 
 def normalize_key(keypress: Any) -> Key:
-    """把 prompt_toolkit ``KeyPress`` 归一为稳定按键。"""
+    """Normalize a prompt_toolkit ``KeyPress`` into a stable key value."""
     key = getattr(keypress, "key", None)
     data = getattr(keypress, "data", "") or ""
     if key in _KEY_NAMES:
@@ -80,7 +83,7 @@ def normalize_key(keypress: Any) -> Key:
 
 
 def logical_line_count(text: str) -> int:
-    """按换行边界计算内容行数；末尾换行不再额外计一行。"""
+    """Count content lines at newline boundaries without counting a trailing newline."""
     normalized = text.replace("\r\n", "\n")
     if not normalized:
         return 0
@@ -92,7 +95,7 @@ def logical_line_count(text: str) -> int:
 
 @dataclass(frozen=True, slots=True)
 class PasteFragment:
-    """一个不可展开的长粘贴片段。"""
+    """One indivisible long-paste fragment."""
 
     original: str
     line_count: int
@@ -117,7 +120,7 @@ class _Span:
 
 @dataclass(frozen=True, slots=True)
 class ComposerView:
-    """按终端列宽排版后的草稿视图。"""
+    """Draft view laid out for the terminal width."""
 
     lines: list[str]
     cursor_row: int
@@ -125,18 +128,16 @@ class ComposerView:
 
 
 class ComposerEditor:
-    """基于 prompt_toolkit ``Buffer`` 的草稿编辑器。"""
+    """Draft editor backed by a prompt_toolkit ``Buffer``."""
 
     def __init__(self) -> None:
         self._buffer = Buffer(multiline=True, enable_history_search=False)
         self._spans: list[_Span] = []
         self._next_number = 1
 
-    # -- 只读视图 -----------------------------------------------------------
-
     @property
     def text(self) -> str:
-        """显示文本（长粘贴为摘要形式）。"""
+        """Display text with long pastes represented by summaries."""
         return self._buffer.text
 
     @property
@@ -161,15 +162,15 @@ class ComposerEditor:
 
     @property
     def cursor_column(self) -> int:
-        """返回光标在当前逻辑行内的终端列偏移。"""
+        """Return the cursor's terminal-cell offset within its logical line."""
         return cell_len(self._buffer.document.current_line_before_cursor)
 
     def wrapped(self, width: int) -> ComposerView:
-        """按终端列宽软换行，并给出光标所在的显示行与列。
+        """Soft-wrap to the terminal width and locate the cursor in display coordinates.
 
-        软换行只影响显示：``submit_text()`` 返回的仍是未换行的原文。
-        制表符先按 :func:`expand_tabs` 确定性展开，因此软换行、光标列
-        与显示层用同一套宽度计算。
+        Wrapping affects display only; ``submit_text()`` still returns the unwrapped
+        source. Tabs are expanded deterministically through :func:`expand_tabs`, so
+        wrapping, cursor columns, and display use the same width calculation.
         """
         text = expand_tabs(self._buffer.text)
         lines = wrap_line(text, width)
@@ -182,7 +183,7 @@ class ComposerEditor:
         )
 
     def submit_text(self) -> str:
-        """返回提交给 MicaApp 的完整原文（粘贴片段还原为原始正文）。"""
+        """Return the complete source for ``MicaApp``, expanding paste fragments."""
         if not self._spans:
             return self._buffer.text
         parts: list[str] = []
@@ -194,10 +195,8 @@ class ComposerEditor:
         parts.append(self._buffer.text[last:])
         return "".join(parts)
 
-    # -- 编辑 ---------------------------------------------------------------
-
     def insert(self, text: str) -> None:
-        """插入文本；达到阈值的长粘贴折叠为不可拆分的摘要片段。"""
+        """Insert text, folding a long paste into an indivisible summary fragment."""
         cleaned = sanitize_text(text, newlines=True)
         if not cleaned:
             return
@@ -257,12 +256,10 @@ class ComposerEditor:
         self._set(text, position)
 
     def clear(self) -> None:
-        """清空草稿、片段与编号。"""
+        """Clear the draft, fragments, and numbering."""
         self._spans = []
         self._next_number = 1
         self._buffer.reset()
-
-    # -- 片段维护 -----------------------------------------------------------
 
     def _fold(self, text: str) -> PasteFragment | None:
         count = logical_line_count(text)
@@ -338,7 +335,7 @@ def windowed_lines(
     *,
     limit: int = MAX_DRAFT_LINES,
 ) -> tuple[list[str], int]:
-    """返回围绕光标的可见草稿窗口与窗口起始行。"""
+    """Return the visible draft window around the cursor and its starting row."""
     if limit <= 0 or len(lines) <= limit:
         return list(lines), 0
     cursor = min(max(cursor_row, 0), len(lines) - 1)

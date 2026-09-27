@@ -1,24 +1,26 @@
-"""不可信正文与可信 ANSI 之间的唯一清洗接缝。
+"""Sole sanitization seam between untrusted text and trusted ANSI.
 
-主缓冲区的全部正文——用户输入、模型输出、工具可见字段、交互文案、动态
-事实——都视为**不可信文本**：它只能作为字符出现在屏幕上，绝不能改变
-终端状态。渲染器自己生成的样式、光标与擦除序列才是**可信控制**。
+All main-buffer text -- user input, model output, visible tool fields, interaction copy,
+and dynamic facts -- is untrusted: it may appear only as characters and must never
+change terminal state. Only renderer-generated styling, cursor, and erase sequences
+are trusted controls.
 
-清洗规则以「删除整段控制内容」为准，而不是把危险字节原样回显：
+Sanitization removes complete control content rather than echoing dangerous bytes:
 
-* ``ESC`` 起始的 CSI / OSC / DCS / 两字符转义整段丢弃；
-* C1 区的 ``CSI``(0x9B) 与 ``OSC``(0x9D) 同样整段丢弃；
-* ``BEL``、``BS``、``DEL`` 与其余 C0/C1 控制字符丢弃；
-* ``CRLF`` / 单独 ``CR`` 归一为 ``LF``；
-* 普通 Unicode（含中文、Emoji、组合字符、ZWJ 序列）原样保留。
+* CSI, OSC, DCS, and two-character escapes beginning with ``ESC`` are removed whole;
+* C1 ``CSI`` (0x9B) and ``OSC`` (0x9D) sequences are removed likewise;
+* ``BEL``, ``BS``, ``DEL``, and all other C0/C1 controls are removed;
+* ``CRLF`` and lone ``CR`` are normalized to ``LF``;
+* ordinary Unicode, including CJK, emoji, combining characters, and ZWJ sequences, is
+  preserved.
 
-只做删除与换行归一，**从不插入** ``ESC`` 或任何控制字符，因此清洗结果
-不能再组成新的有效控制序列。
+The sanitizer only removes content and normalizes newlines. It never inserts ``ESC``
+or another control, so its output cannot form a new valid control sequence.
 """
 
 from __future__ import annotations
 
-# 未被识别为序列起始、但同样不得出现在正文里的控制字符。
+# Controls that cannot begin recognized sequences but still must not enter body text.
 _DEL = 0x7F
 _C1_START = 0x80
 _C1_END = 0x9F
@@ -35,10 +37,10 @@ _C1_ST = "\x9c"
 
 
 def sanitize_text(value: str, *, newlines: bool = True, tabs: bool = True) -> str:
-    """清除非可信文本中的终端控制内容。
+    """Remove terminal control content from untrusted text.
 
-    ``newlines=False`` 时把换行压平为空格，供单行字段（工具名、事实行、
-    面板标签）使用；``tabs=False`` 同理处理制表符。
+    ``newlines=False`` flattens newlines to spaces for single-line fields such as tool
+    names, fact lines, and panel labels; ``tabs=False`` does the same for tabs.
     """
     if not isinstance(value, str):
         return ""
@@ -81,13 +83,13 @@ def sanitize_text(value: str, *, newlines: bool = True, tabs: bool = True) -> st
 
 
 def sanitize_scalar(value: object, *, fallback: str = "none") -> str:
-    """清洗单行字段并压平空白；空结果回退为固定占位符。"""
+    """Sanitize and flatten a single-line field; use a fixed fallback when empty."""
     text = sanitize_text(str(value), newlines=False, tabs=False).strip()
     return text or fallback
 
 
 def _skip_escape(value: str, index: int) -> int:
-    """从 ``ESC`` 位置跳过一个完整转义序列，返回下一个待处理下标。"""
+    """Skip one complete escape sequence from ``ESC`` and return the next index."""
     cursor = index + 1
     if cursor >= len(value):
         return cursor
@@ -102,7 +104,7 @@ def _skip_escape(value: str, index: int) -> int:
 
 
 def _skip_csi(value: str, index: int) -> int:
-    """跳过 CSI 参数、中间字节与终止字节。"""
+    """Skip CSI parameters, intermediate bytes, and the final byte."""
     length = len(value)
     while index < length:
         code = ord(value[index])
@@ -115,7 +117,7 @@ def _skip_csi(value: str, index: int) -> int:
 
 
 def _skip_osc(value: str, index: int) -> int:
-    """跳过 OSC 正文，直到 BEL、ST/C1-ST 或字符串结束。"""
+    """Skip OSC content through BEL, ST/C1-ST, or the end of the string."""
     length = len(value)
     while index < length:
         character = value[index]
@@ -130,7 +132,7 @@ def _skip_osc(value: str, index: int) -> int:
 
 
 def _skip_string(value: str, index: int) -> int:
-    """跳过 DCS/SOS/PM/APC 正文，直到 ST/C1-ST 或字符串结束。"""
+    """Skip DCS/SOS/PM/APC content through ST/C1-ST or the end of the string."""
     length = len(value)
     while index < length:
         character = value[index]

@@ -1,6 +1,7 @@
-"""只属于终端前端的不可变视图状态。
+"""Immutable view state owned by the terminal frontend.
 
-本模块不导入任何终端 UI 框架；共享枚举与快照供主缓冲区前端使用。
+This module imports no terminal UI framework; its shared enums and snapshots support
+the main-buffer frontend.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from mica_agent.context_builder import AgentFileSource
 
 
 class ReasoningDisplayMode(Enum):
-    """思考正文的 TUI 显示模式。"""
+    """TUI display mode for model reasoning text."""
 
     FULL = "full"
     COLLAPSED = "collapsed"
@@ -23,7 +24,7 @@ class ReasoningDisplayMode(Enum):
 
 @dataclass(frozen=True, slots=True, repr=False)
 class TuiSessionSnapshot:
-    """CLI 注入的安全底部事实，不让前端读取业务对象。"""
+    """Safe footer facts injected by the CLI without exposing business objects."""
 
     workspace: str | None = None
     session_label: str | None = None
@@ -49,7 +50,7 @@ class TuiSessionSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class StartupResourceSnapshot:
-    """由外部装配层明确注入的安全启动事实。"""
+    """Safe startup facts explicitly injected by the outer assembly layer."""
 
     system_prompt_name: str | None = None
     agent_sources: tuple[AgentFileSource, ...] = ()

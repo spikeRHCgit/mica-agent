@@ -1,15 +1,16 @@
-"""安全、宽度感知的模型正式回复 Markdown 渲染。
+"""Safe, width-aware Markdown rendering for final model replies.
 
-职责边界很小：Mica 只负责**安全边界、主题映射与物理行集成**，解析与
-排版交给锁文件中已有的 Rich（不新增依赖、不升级版本）。
+Mica owns only the safety boundary, theme mapping, and physical-row integration;
+locked Rich handles parsing and layout.
 
-* 不可信源文本先过清洗接缝，再交给 Markdown 解析器；
-* 渲染结果按行转成物理行，样式序列由本模块按 Rich 解析出的 Style 重新
-  生成——只允许加粗/斜体/下划线/暗淡与前景/背景色，**从不生成 OSC 8
-  超链接**，也不透传任何控制字符；
-* 代码块使用比终端背景稍亮的深灰背景并填满可用宽度；NO_COLOR 下改为
-  等宽的 ``│ `` 边界，结构不依赖颜色；
-* 不加载图片、不访问 URL、不执行代码、不改光标与终端模式。
+* Untrusted source passes through the sanitization seam before Markdown parsing.
+* Rendered segments are rebuilt from Rich ``Style`` values, allowing only structural
+  attributes and foreground/background colors. This module never emits OSC 8 links or
+  passes through control characters.
+* Code blocks fill the width over a dark background, or use an equal-width ``│ `` rule
+  under NO_COLOR so structure does not depend on color.
+* Rendering never loads images, visits URLs, executes code, or changes cursor or
+  terminal modes.
 """
 
 from __future__ import annotations
@@ -35,13 +36,13 @@ from .renderer import (
 )
 from .sanitize import sanitize_text
 
-# 单块 Markdown 源上限：避免超长回复让一次渲染无界。
+# Per-block source limit keeps one reply from making rendering unbounded.
 MAX_SOURCE_CHARS = 120_000
-# 流式光标：只在模型仍在输出正文时追加在最后一行末尾。
+# The stream cursor appears at the final row only while body text is still arriving.
 STREAM_CURSOR = "▌"
-# NO_COLOR 下代码块的等宽边界（替代背景色）。
+# Equal-width code-block boundary used instead of background color under NO_COLOR.
 CODE_BAR = "│ "
-# Pygments 代码主题名称（Rich 内置按名称解析；未知名称回退为纯文本）。
+# Pygments theme name resolved by Rich; an unknown theme falls back to plain text.
 CODE_THEME = "one-dark"
 
 _MARKDOWN_THEME = Theme(
@@ -74,13 +75,13 @@ _COLOURED_ATTRIBUTES = ("bold", "dim", "italic", "underline")
 
 
 class _LeftHeading(Heading):
-    """标题保持左对齐：Mica 的正文沿单一阅读主轴左对齐。"""
+    """Keep headings left-aligned with Mica's single reading axis."""
 
     LEVEL_ALIGN: ClassVar[dict[str, str]] = {}
 
 
 class _MicaMarkdown(Markdown):
-    """使用 Mica 主题与左对齐标题的 Markdown 渲染器。"""
+    """Markdown renderer using the Mica theme and left-aligned headings."""
 
     elements: ClassVar[dict[str, type]] = {
         **Markdown.elements,
@@ -89,12 +90,12 @@ class _MicaMarkdown(Markdown):
 
 
 def stream_cursor_style() -> Style:
-    """流式光标的样式（小型蓝色光标）。"""
+    """Style for the small blue streaming cursor."""
     return Style(color="#7dd3fc")
 
 
 def render_markdown(source: str, width: int, palette: Palette) -> list[str]:
-    """把 Markdown 源渲染成物理行（自带可信样式序列）。"""
+    """Render Markdown source into physical rows with trusted style sequences."""
     text = markdown_source(source)
     if not text.strip():
         return [""]
@@ -105,7 +106,7 @@ def render_markdown(source: str, width: int, palette: Palette) -> list[str]:
 def render_markdown_preview(
     source: str, width: int, palette: Palette, *, streaming: bool
 ) -> list[str]:
-    """渲染正文预览；``streaming`` 时在末尾追加蓝色光标。"""
+    """Render a body preview, appending the blue cursor while ``streaming``."""
     text = markdown_source(source)
     if not text.strip():
         return [""]
@@ -114,7 +115,7 @@ def render_markdown_preview(
 
 
 def markdown_source(value: str) -> str:
-    """清洗并限制不可信 Markdown 源文本。"""
+    """Sanitize and bound untrusted Markdown source text."""
     if not isinstance(value, str):
         return ""
     cleaned = sanitize_text(value, newlines=True)
@@ -126,10 +127,11 @@ def markdown_source(value: str) -> str:
 def _render_segments(
     text: str, width: int, *, cursor: bool = False
 ) -> list[list[object]]:
-    """用 Rich 解析并排版，返回逐行的 Segment 列表。
+    """Parse and lay out with Rich, returning segments grouped by physical row.
 
-    解析器构造与渲染处于同一个普通异常边界内：任一阶段抛普通异常都
-    降级为已清洗纯文本物理行（不泄漏异常文本，`BaseException` 继续上抛）。
+    Parser construction and rendering share one ordinary-exception boundary. Failure at
+    either stage falls back to sanitized plain-text rows without exposing exception
+    text; ``BaseException`` continues to propagate.
     """
     try:
         console = Console(
@@ -152,7 +154,7 @@ def _render_segments(
             inline_code_lexer=None,
         )
         lines = console.render_lines(markdown, options, pad=False)
-    except Exception:  # noqa: BLE001 - 解析器构造或渲染失败都必须降级
+    except Exception:  # noqa: BLE001 - parser construction and rendering must degrade safely
         rows = [[Segment(row)] for row in _fallback_rows(text, width)]
     else:
         rows = [list(line) for line in lines]
@@ -162,11 +164,12 @@ def _render_segments(
 
 
 def _append_cursor(rows: list[list[object]], width: int) -> list[list[object]]:
-    """把流式光标放在正文末尾，并计入物理行宽度预算。
+    """Place the stream cursor after the body within the physical width budget.
 
-    末行按 :func:`_paint_line` 的实际可见宽度（非代码行不含行尾填充空白）
-    还有空余列时直接追加；已占满 ``width`` 时另起一条物理行。正文不删
-    不截，光标只出现一次，且无论哪条路径每个字符串都是一条不超宽的物理行。
+    Append it to the final row when that row's visible width, measured as
+    :func:`_paint_line` displays it, has room. Otherwise use a new physical row. Body
+    text is never removed or truncated, the cursor appears once, and every returned
+    string is one non-overwide physical row.
     """
     cursor = Segment(STREAM_CURSOR, stream_cursor_style())
     if rows:
@@ -187,25 +190,25 @@ def _append_cursor(rows: list[list[object]], width: int) -> list[list[object]]:
 
 
 def _fallback_rows(text: str, width: int) -> list[str]:
-    """Rich 渲染失败后的安全降级：已清洗纯文本逐物理行输出。
+    """Safely degrade a Rich failure into sanitized plain-text physical rows.
 
-    先按逻辑换行拆分，再按终端列宽硬换行，因此每个字符串都是一条独立
-    物理行且不超过 ``width``；制表符展开为空格，绝不保留任何 C0/C1 控制
-    内容，也不引入超链接、备用屏幕或鼠标捕获序列。
+    Split logical lines and hard-wrap to terminal width, so each string is one row no
+    wider than ``width``. Tabs become spaces; no C0/C1 control, hyperlink, alternate
+    screen, or mouse-capture sequence survives.
     """
     width = max(1, width)
     plain = expand_tabs(sanitize_text(text, newlines=True))
     rows: list[str] = []
     for row in wrap_line(plain, width):
         if cell_len(row) > width:
-            # 单个宽字符可能超过极窄宽度：宽度契约优先。
+            # A wide character may exceed an extremely narrow width; honor the width contract.
             row = truncate_head(row, width)
         rows.append(row)
     return rows or [""]
 
 
 def _paint_line(line: list[object], palette: Palette) -> str:
-    """把一行 Segment 转成带受控样式序列的物理行。"""
+    """Convert one segment row into a physical row with controlled styling."""
     segments = [segment for segment in line if getattr(segment, "text", "")]
     if not segments:
         return ""
@@ -216,13 +219,13 @@ def _paint_line(line: list[object], palette: Palette) -> str:
             return ""
     text = "".join(_paint_segment(segment, palette) for segment in segments)
     if code_row and not palette.enabled:
-        # NO_COLOR：去掉无意义的背景填充，改用等宽边界保持宽度不变。
+        # Under NO_COLOR, replace meaningless background padding with an equal-width rule.
         text = truncate_head(CODE_BAR + _drop_prefix(text.rstrip(), 1), cell_len(text))
     return text
 
 
 def _strip_trailing_spaces(segments: list[object]) -> list[object]:
-    """去掉行尾无背景的空白（光标行结尾保留光标本身）。"""
+    """Drop trailing unbacked spaces while preserving a final stream cursor."""
     body = list(segments)
     tail: list[object] = []
     if body and getattr(body[-1], "text", "") == STREAM_CURSOR:
@@ -237,7 +240,7 @@ def _strip_trailing_spaces(segments: list[object]) -> list[object]:
 
 
 def _is_code_row(segments: list[object]) -> bool:
-    """判断整行是否属于带背景的代码块（行内代码只覆盖局部，不算）。"""
+    """Return whether the entire row has code-block background, excluding inline code."""
     body = segments
     if body and getattr(body[-1], "text", "") == STREAM_CURSOR:
         body = body[:-1]
@@ -253,7 +256,7 @@ def _style_of(segment: object) -> Style:
 
 
 def _paint_segment(segment: object, palette: Palette) -> str:
-    """按 Segment 的解析样式生成 ANSI；从不生成超链接序列。"""
+    """Generate ANSI from a segment's parsed style, never a hyperlink sequence."""
     text = str(getattr(segment, "text", ""))
     if not text:
         return ""
@@ -267,7 +270,7 @@ def _paint_segment(segment: object, palette: Palette) -> str:
 
 
 def _wrap_attributes(text: str, style: Style) -> str:
-    """NO_COLOR：只保留加粗/暗淡/斜体/下划线等结构性属性。"""
+    """Under NO_COLOR, preserve only structural attributes such as emphasis."""
     codes = [code for code in _attribute_codes(style)]
     if not codes:
         return text
@@ -292,13 +295,13 @@ def _colour_code(colour: object, *, background: bool) -> str:
     prefix = "48" if background else "38"
     try:
         triplet = colour.get_truecolor()  # type: ignore[attr-defined]
-    except Exception:  # noqa: BLE001 - 无法解析的颜色直接忽略
+    except Exception:  # noqa: BLE001 - ignore colors that cannot be resolved
         return ""
     return f"{prefix};2;{triplet.red};{triplet.green};{triplet.blue}"
 
 
 def _drop_prefix(text: str, cells: int) -> str:
-    """按终端列宽从行首丢弃若干列（用于替换代码块的内边距）。"""
+    """Drop terminal cells from the start when replacing code-block padding."""
     used = 0
     index = 0
     while index < len(text) and used < cells:
@@ -309,7 +312,7 @@ def _drop_prefix(text: str, cells: int) -> str:
 
 @dataclass(frozen=True, slots=True)
 class MarkdownBlock:
-    """已收口的正式回复：保存安全源文本，按宽度/调色板重新排版。"""
+    """Final assistant reply that reflows safe source for width and palette."""
 
     source: str = field(repr=False)
     frozen: int = 0
@@ -335,12 +338,12 @@ class MarkdownBlock:
 
 
 class StreamingMarkdownBlock:
-    """流式正文：按累计源文本渐进渲染，并自带已写出前缀计数。
+    """Incremental body renderer with an owned count of already-written prefix rows.
 
-    冻结前缀由本块自己维护（``frozen``），因此渲染器切分后继续追加增量
-    不会重复写出已经进入 scrollback 的行；不完整的围栏与拆开的 Unicode
-    增量都只影响最后一次渲染结果，不会抛出异常。累计源文本始终不超过
-    ``MAX_SOURCE_CHARS``，因此一次超长回复不会带来无界增长。
+    The block owns its frozen prefix, so appending after a renderer split never rewrites
+    rows already in scrollback. Incomplete fences and split Unicode chunks affect only
+    the latest rendering and do not raise. Accumulated source never exceeds
+    ``MAX_SOURCE_CHARS``.
     """
 
     kind = "assistant"
@@ -365,10 +368,11 @@ class StreamingMarkdownBlock:
         return self._streaming
 
     def append(self, delta: str) -> None:
-        """追加一段增量，并让完整累计源文本保持在 ``MAX_SOURCE_CHARS`` 内。
+        """Append a delta while bounding accumulated source by ``MAX_SOURCE_CHARS``.
 
-        到达上限后累计源固定为前 ``MAX_SOURCE_CHARS`` 个字符：后续追加
-        不再改变内容（确定性且幂等），渲染、光标与 :meth:`finish` 行为不变。
+        At the limit, source stays fixed at its first ``MAX_SOURCE_CHARS`` characters;
+        further appends are deterministic no-ops and preserve rendering, cursor, and
+        :meth:`finish` behavior.
         """
         chunk = markdown_source(delta)
         if not chunk or len(self._source) >= MAX_SOURCE_CHARS:
@@ -377,7 +381,7 @@ class StreamingMarkdownBlock:
         self._source = combined[:MAX_SOURCE_CHARS]
 
     def finish(self) -> None:
-        """结束流式：去掉光标，用完整累计源文本做一次稳定渲染。"""
+        """Finish streaming, remove the cursor, and stably render all accumulated source."""
         self._streaming = False
 
     def render(self, width: int, palette: Palette, expanded: bool) -> list[str]:
