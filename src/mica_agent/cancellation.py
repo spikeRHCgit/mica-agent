@@ -1,4 +1,4 @@
-"""Provider、Engine 与工具共享的统一取消信号。"""
+"""Unified cancellation signal shared by providers, the engine, and tools."""
 
 from __future__ import annotations
 
@@ -8,11 +8,12 @@ _CANCELLED_MESSAGE = "operation cancelled"
 
 
 class CancellationRequested(Exception):
-    """协作式取消令牌已发出取消信号。"""
+    """A cooperative cancellation token has raised its cancellation signal."""
 
 
 class CancellationToken:
-    """可重复发出、可供多个协程等待的一次性取消信号。"""
+    """One-shot cancellation signal that may be signalled repeatedly and awaited by many
+    coroutines."""
 
     __slots__ = ("_event",)
 
@@ -21,18 +22,18 @@ class CancellationToken:
 
     @property
     def is_cancelled(self) -> bool:
-        """取消信号是否已经发出。"""
+        """Whether the cancellation signal has been raised."""
         return self._event.is_set()
 
     def cancel(self) -> None:
-        """发出取消信号；重复调用保持已取消状态。"""
+        """Raise the cancellation signal; repeated calls keep the cancelled state."""
         self._event.set()
 
     async def wait(self) -> None:
-        """异步等待取消信号。"""
+        """Await the cancellation signal."""
         await self._event.wait()
 
     def raise_if_cancelled(self) -> None:
-        """已取消时抛出固定、安全的取消异常。"""
+        """Raise a fixed, safe cancellation error when already cancelled."""
         if self.is_cancelled:
             raise CancellationRequested(_CANCELLED_MESSAGE)

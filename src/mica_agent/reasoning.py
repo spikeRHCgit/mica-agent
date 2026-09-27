@@ -1,4 +1,4 @@
-"""供应商无关的模型思考强度契约。"""
+"""Provider-agnostic model reasoning-effort contract."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from enum import Enum
 
 
 class ReasoningEffort(Enum):
-    """Mica 统一使用的不可变思考强度。"""
+    """Immutable reasoning effort shared across Mica."""
 
     OFF = "off"
     MINIMAL = "minimal"

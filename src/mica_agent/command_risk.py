@@ -1,4 +1,4 @@
-"""有限纯词法风险提示；不执行命令、不读取脚本，不证明命令安全。"""
+"""Limited purely lexical risk hint; runs no command, reads no script, proves no safety."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""ToolSpec 的固定 Draft 2020-12 Schema 校验边界。"""
+"""Fixed Draft 2020-12 schema validation boundary for ``ToolSpec``."""
 
 from __future__ import annotations
 
@@ -15,15 +15,15 @@ _INVALID_ARGUMENTS_MESSAGE = "tool arguments do not match input schema"
 
 
 class InvalidToolSchemaError(ValueError):
-    """开发者提供的工具输入 Schema 无效。"""
+    """The tool input schema supplied by a developer is invalid."""
 
 
 class ToolArgumentsValidationError(ValueError):
-    """模型参数不符合工具输入 Schema。"""
+    """Model arguments do not match the tool input schema."""
 
 
 def validate_tool_schema(spec: ToolSpec) -> None:
-    """确认 ToolSpec.input_schema 是有效的 Draft 2020-12 Schema。"""
+    """Confirm ``spec.input_schema`` is a valid Draft 2020-12 schema."""
     if not isinstance(spec, ToolSpec):
         raise TypeError("spec must be a ToolSpec")
 
@@ -35,7 +35,7 @@ def validate_tool_schema(spec: ToolSpec) -> None:
 
 
 def validate_tool_arguments(spec: ToolSpec, arguments: JsonObject) -> None:
-    """按 ToolSpec 的 Draft 2020-12 Schema 校验一次模型参数快照。"""
+    """Validate one model-argument snapshot against the ``ToolSpec`` input schema."""
     validate_tool_schema(spec)
     if not isinstance(arguments, Mapping):
         raise TypeError("arguments must be a JSON object")

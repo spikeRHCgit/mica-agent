@@ -1,4 +1,4 @@
-"""P4-03 的显式注册文件工具入口。"""
+"""Explicit registration entry for the workspace file tools."""
 
 from __future__ import annotations
 
@@ -319,7 +319,7 @@ async def _not_available(
 
 
 def register_file_tools(registry: ToolRegistry, workspace: WorkspaceIdentity) -> None:
-    """显式、原子地注册当前工作区的三个文件工具。"""
+    """Explicitly and atomically register the three file tools of the current workspace."""
     if not isinstance(registry, ToolRegistry):
         raise TypeError("registry must be a ToolRegistry")
     if not isinstance(workspace, WorkspaceIdentity):

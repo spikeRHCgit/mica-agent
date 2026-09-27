@@ -1,14 +1,16 @@
-"""Mica 命令行入口（P2-04）。
+"""Mica command-line entry point.
 
-公共契约保持不变：无参数输出帮助、``--help``、``--version``、
-无效参数退出码 2，两个入口（``mica`` 与 ``python -m mica_agent``）
-行为一致。``mica cli`` 启动基础交互对话：从环境变量读取连接参数，
-装配 OpenAICompatibleProvider 与 MicaApp，实时渲染 EngineEvent。
+Public contract: running with no arguments prints help; ``--help``, ``--version``, and
+exit code 2 for invalid arguments are supported; the ``mica`` and
+``python -m mica_agent`` entry points behave identically. ``mica cli`` starts the
+interactive chat: it reads connection settings from environment variables, assembles
+``OpenAICompatibleProvider`` and ``MicaApp``, and renders ``EngineEvent`` values as they
+arrive.
 
-``run_interactive`` 是注入式交互核心：测试通过替身驱动
-（Provider 工厂、stdin 读取、stdout/stderr 写入），产品默认值
-分别构造真实 Provider、读取标准输入并写入标准输出；正式
-``mica cli`` 默认进入主缓冲区终端前端，``--plain`` 保留基础文字界面。
+``run_interactive`` is the injectable interaction core: tests drive it with stand-ins
+(provider factory, stdin reader, stdout/stderr writers), while the product defaults
+build a real provider and use standard input and output. ``mica cli`` enters the main
+buffer terminal frontend by default; ``--plain`` keeps the basic text interface.
 """
 
 from __future__ import annotations
@@ -133,7 +135,8 @@ def main() -> None:
 
 
 def _load_config() -> tuple[str, str, str] | None:
-    """读取并校验三个阶段性连接参数；缺失时输出诊断并返回 None。"""
+    """Read and validate the three connection settings; print a diagnostic and return None
+    if any are missing."""
     values = {name: os.environ.get(name, "") for name in _ENVIRONMENT_VARIABLES}
     missing = [name for name, value in values.items() if not value.strip()]
     if missing:
@@ -151,7 +154,8 @@ def _main_cli(
     *,
     plain: bool = False,
 ) -> int:
-    """mica cli 同步入口：手动事件循环以支持 Ctrl+C 优雅退出。"""
+    """Synchronous ``mica cli`` entry point: a manual event loop allows graceful Ctrl+C
+    exit."""
     config = _load_config()
     if config is None:
         return 2
@@ -172,7 +176,8 @@ def _main_cli(
         try:
             loop.run_until_complete(task)
         except KeyboardInterrupt:
-            # Ctrl+C：取消主任务，让清理路径（事件流与 App 关闭）完成。
+            # Ctrl+C: cancel the main task so the cleanup path (event stream and app
+            # close) can finish.
             task.cancel()
             try:
                 loop.run_until_complete(task)
@@ -210,7 +215,7 @@ async def run_interactive(
     turn_id_factory: TurnIdFactory | None = None,
     clock: Clock | None = None,
 ) -> int:
-    """装配会话、上下文、Provider 与 App，再进入基础交互。"""
+    """Assemble session, context, provider, and app, then enter basic interaction."""
     if session_mode not in {"new", "continue", "resume"}:
         raise ValueError("session_mode must be new, continue, or resume")
     if not isinstance(permission_mode, PermissionMode):
@@ -347,7 +352,7 @@ async def _run_selected_session(
         try:
             await _interact(app, read, out, err)
         except asyncio.CancelledError:
-            # Ctrl+C：取消当前 Run 后完成清理并正常退出。
+            # Ctrl+C: cancel the current run, finish cleanup, and exit normally.
             pass
         except Exception:  # noqa: BLE001 - do not expose session details
             err("error: session unavailable\n")
@@ -405,7 +410,7 @@ async def _run_main_buffer(
     stored_session: StoredSession,
     workspace: WorkspaceIdentity,
 ) -> int:
-    """运行默认的主缓冲区前端；失败时只给出固定安全诊断。"""
+    """Run the default main-buffer frontend; failures produce only fixed safe diagnostics."""
     try:
         from .tui.main_buffer import MainBufferScreen, Terminal
 
@@ -417,7 +422,7 @@ async def _run_main_buffer(
             stored_session=stored_session,
             workspace_path=workspace.workspace_path,
         )
-    except Exception:  # noqa: BLE001 - 前端启动诊断保持安全
+    except Exception:  # noqa: BLE001 - frontend startup diagnostics must stay safe
         await app.aclose()
         err("mica: unable to start terminal interface\n")
         return 2
@@ -425,14 +430,14 @@ async def _run_main_buffer(
         await screen.run()
     except asyncio.CancelledError:
         if not getattr(screen, "closed", False):
-            with suppress(Exception):  # 关闭诊断保持私有
+            with suppress(Exception):  # close diagnostics must stay private
                 await app.aclose()
         raise
-    except Exception:  # noqa: BLE001 - 前端细节保持私有
-        # 失败路径兜底关闭业务资源；正常关闭时 screen 已自行收敛，
-        # 因此这里不会重复关闭 Provider。
+    except Exception:  # noqa: BLE001 - frontend details must stay private
+        # Failure path closes business resources as a fallback; on a normal close the
+        # screen has already converged, so the provider is not closed twice.
         if not getattr(screen, "closed", False):
-            with suppress(Exception):  # 关闭诊断保持私有
+            with suppress(Exception):  # close diagnostics must stay private
                 await app.aclose()
         err("mica: unable to start terminal interface\n")
         return 2
@@ -574,7 +579,8 @@ async def _interact(
     write_out: Write,
     write_err: Write,
 ) -> None:
-    """多轮交互循环：读取输入、渲染 EngineEvent、转换退出信号。"""
+    """Multi-turn interaction loop: read input, render ``EngineEvent``, translate exit
+    signals."""
     while True:
         try:
             line = await read_line()
@@ -600,7 +606,8 @@ async def _interact(
                     if isinstance(event, ReasoningDelta):
                         continue
                     if isinstance(event, TextDelta):
-                        # 空字符串也原样写出，但不改变换行状态。
+                        # An empty string is written verbatim without changing the
+                        # newline state.
                         write_out(event.text)
                         if event.text:
                             has_output = True
@@ -632,8 +639,9 @@ async def _interact(
                         app.respond_interaction(response)
                     elif isinstance(event, (RunCompleted, RunFailed, RunCancelled)):
                         flush_tool_output_line()
-                        # 有非空文本且未以换行结尾时才补一个必要换行；
-                        # 无文本的终态不得向 stdout 写空行。
+                        # Add a newline only when there is non-empty text that does not
+                        # end with one; a terminal event without text must not write a
+                        # blank line to stdout.
                         if has_output and not ends_with_newline:
                             write_out("\n")
                         if isinstance(event, RunFailed):
@@ -643,7 +651,8 @@ async def _interact(
                         elif isinstance(event, RunCancelled):
                             write_err("cancelled\n")
         except asyncio.CancelledError:
-            # 活动 Run 被取消：事件流已由 aclosing 清理，退出 CLI。
+            # The active run was cancelled: aclosing has cleaned the event stream, exit
+            # the CLI.
             return
 
 
@@ -738,10 +747,11 @@ def _default_provider_factory(api_url: str, api_key: str) -> Provider:
 
 
 def _default_read_line() -> Awaitable[str]:
-    """在 daemon 线程读取 stdin。
+    """Read stdin in a daemon thread.
 
-    避免阻塞事件循环；daemon 线程保证 Ctrl+C 退出后进程不会被
-    ``input()`` 挂起（非 daemon 线程会在解释器退出时被 join）。
+    This avoids blocking the event loop; the daemon thread keeps the process from
+    hanging in ``input()`` after a Ctrl+C exit (non-daemon threads are joined at
+    interpreter exit).
     """
     loop = asyncio.get_running_loop()
     future: asyncio.Future[str] = loop.create_future()
@@ -760,7 +770,7 @@ def _read_line_worker(
 ) -> None:
     try:
         value = input()
-    except BaseException as exc:  # noqa: BLE001 - daemon 线程内任何异常都必须转发给事件循环
+    except BaseException as exc:  # noqa: BLE001 - any daemon-thread exception must reach the event loop
         loop.call_soon_threadsafe(_finish_read_line, future, exc)
     else:
         loop.call_soon_threadsafe(_finish_read_line, future, value)
@@ -776,7 +786,7 @@ def _finish_read_line(future: asyncio.Future[str], result: object) -> None:
 
 
 def _default_write(text: str) -> None:
-    """实时写出：立即 flush，保证流式文本可见。"""
+    """Write immediately and flush so streaming text becomes visible."""
     sys.stdout.write(text)
     sys.stdout.flush()
 

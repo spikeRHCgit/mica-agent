@@ -1,9 +1,10 @@
-"""Mica 的最小命令行入口包。
+"""Minimal command-line entry package for Mica.
 
-顶层只暴露跨模块共享的公共契约对象：标准消息、引擎事件、
-AgentEngine 与 MicaApp 装配入口。Engine/App 通过模块级
-``__getattr__`` 延迟加载，保持 ``import mica_agent.models``
-等轻量子模块导入不触发 Provider 网络栈加载。
+The top level exposes only cross-module public contract objects: standard messages,
+engine events, and the ``AgentEngine`` / ``MicaApp`` assembly entry points.
+``AgentEngine`` and ``MicaApp`` are loaded lazily through the module-level
+``__getattr__`` so that importing a lightweight submodule such as
+``mica_agent.models`` does not pull in the provider network stack.
 """
 
 from .cancellation import CancellationRequested, CancellationToken
@@ -229,7 +230,7 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
-    """延迟加载运行时装配入口和带第三方依赖的 P4-02 边界。"""
+    """Lazily load runtime assembly entry points and third-party-dependent boundaries."""
     if name == "AgentEngine":
         from .engine import AgentEngine
 

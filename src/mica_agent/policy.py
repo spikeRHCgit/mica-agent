@@ -1,4 +1,4 @@
-"""基于规范化权限事实的内存决策策略。"""
+"""In-memory decision policy over normalized permission facts."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from .permissions import PermissionMode, PolicyDecision
 
 
 class PolicyOperation(Enum):
-    """权限矩阵识别的稳定操作类别。"""
+    """Stable operation categories recognized by the permission matrix."""
 
     READ = "read"
     WRITE = "write"
@@ -24,7 +24,7 @@ class PolicyOperation(Enum):
 
 @dataclass(frozen=True, slots=True)
 class PolicyInput:
-    """后续安全边界规范化后提交的最小权限事实。"""
+    """Minimal permission facts submitted after safety-boundary normalization."""
 
     tool_name: str
     operation: PolicyOperation
@@ -76,7 +76,7 @@ AllowRule: TypeAlias = Callable[[PolicyInput], bool]
 
 
 class PolicyEngine:
-    """按固定优先级决定规范化操作是否允许、询问或拒绝。"""
+    """Decide allow, ask, or deny for normalized operations in a fixed priority order."""
 
     def __init__(
         self,
@@ -99,7 +99,7 @@ class PolicyEngine:
         return self._mode
 
     def decide(self, policy_input: PolicyInput) -> PolicyDecision:
-        """solo 绕过策略；default 按事实、规则和默认矩阵决定。"""
+        """Solo bypasses policy; default decides from facts, rules, and the default matrix."""
         if not isinstance(policy_input, PolicyInput):
             raise TypeError("policy_input must be a PolicyInput")
         if self._mode is PermissionMode.SOLO:

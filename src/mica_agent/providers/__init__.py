@@ -1,4 +1,4 @@
-"""Provider 公共契约包：只暴露供应商无关的接口和数据对象。"""
+"""Provider contract package: exposes only provider-agnostic interfaces and data objects."""
 
 from .base import (
     AuthenticationError,

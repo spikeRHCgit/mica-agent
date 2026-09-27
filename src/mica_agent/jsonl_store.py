@@ -1,4 +1,4 @@
-"""可靠的单工作区 JSONL 会话文件存储边界。"""
+"""Reliable single-workspace JSONL session-file storage boundary."""
 
 from __future__ import annotations
 
@@ -28,39 +28,39 @@ from .workspace import WorkspaceIdentity, default_data_root
 
 
 class SessionStorageError(SessionError):
-    """文件系统存储错误的稳定边界。"""
+    """Stable boundary for filesystem storage errors."""
 
 
 class SessionNotFoundError(SessionStorageError):
-    """目标会话文件不存在。"""
+    """The target session file does not exist."""
 
     def __init__(self) -> None:
         super().__init__("session not found")
 
 
 class SessionAlreadyExistsError(SessionStorageError):
-    """创建目标会话时文件已经存在。"""
+    """The file already exists when creating the target session."""
 
     def __init__(self) -> None:
         super().__init__("session already exists")
 
 
 class SessionLockTimeoutError(SessionStorageError):
-    """在限定时间内无法获得会话锁。"""
+    """The session lock cannot be acquired within the configured timeout."""
 
     def __init__(self) -> None:
         super().__init__("session lock timed out")
 
 
 class SessionStorageIOError(SessionStorageError):
-    """未能完成文件系统操作。"""
+    """A filesystem operation could not be completed."""
 
     def __init__(self, operation: str) -> None:
         super().__init__(f"session storage operation failed: {operation}")
 
 
 class SessionDeleteStatus(Enum):
-    """非阻塞单会话删除尝试的结果。"""
+    """Outcome of a non-blocking single-session delete attempt."""
 
     DELETED = "deleted"
     LOCKED = "locked"
@@ -70,7 +70,7 @@ class SessionDeleteStatus(Enum):
 
 @dataclass(frozen=True, slots=True)
 class StoredSession:
-    """完整、不可变且已通过跨记录校验的有序会话快照。"""
+    """Complete, immutable, cross-record-validated ordered session snapshot."""
 
     meta: SessionMeta
     entries: tuple[TurnEntry | RunCheckpoint, ...]
@@ -126,7 +126,7 @@ class StoredSession:
 
 @dataclass(frozen=True, slots=True)
 class ScanProblem:
-    """单个损坏或不可读正式文件的安全扫描诊断。"""
+    """Safe scan diagnostic for one corrupt or unreadable canonical file."""
 
     file_id: str
     error_type: str
@@ -135,7 +135,7 @@ class ScanProblem:
 
 @dataclass(frozen=True, slots=True)
 class ScanResult:
-    """扫描返回的健康快照和独立问题集合。"""
+    """Healthy snapshots and the separate problem list returned by a scan."""
 
     sessions: tuple[StoredSession, ...]
     problems: tuple[ScanProblem, ...]
@@ -145,14 +145,14 @@ _SESSION_FILENAME_RE = re.compile(r"[0-9a-f]{64}\.jsonl\Z")
 
 
 def session_filename(session_id: str) -> str:
-    """把任意合法 session ID 映射为安全的固定文件名。"""
+    """Map any valid session id to a safe fixed filename."""
     if not isinstance(session_id, str) or not session_id.strip():
         raise ValueError("session_id must be non-empty")
     return f"{hashlib.sha256(session_id.encode('utf-8')).hexdigest()}.jsonl"
 
 
 class _DuplicateJsonKey(ValueError):
-    """JSON object key 重复的内部解析标记。"""
+    """Internal parse marker for a duplicate JSON object key."""
 
 
 def _strict_object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -189,7 +189,7 @@ def _snapshot_from_records(records: list[object]) -> StoredSession:
 
 
 class JsonlSessionStore:
-    """当前工作区一个会话一个 JSONL 文件的可靠存储。"""
+    """Reliable storage of one JSONL file per session in the current workspace."""
 
     def __init__(
         self,
@@ -445,7 +445,7 @@ class JsonlSessionStore:
         session_id: str,
         transform: Callable[[StoredSession], StoredSession],
     ) -> StoredSession:
-        """在一次 session lock 内读取、变换并原子替换快照。"""
+        """Read, transform, and atomically replace the snapshot under one session lock."""
         if not callable(transform):
             raise TypeError("transform must be callable")
         path = self.path_for_session(session_id)
@@ -506,7 +506,8 @@ class JsonlSessionStore:
         *,
         expected_snapshot: StoredSession | None = None,
     ) -> SessionDeleteStatus:
-        """不等待锁地尝试删除，并可在锁内校验预期快照。"""
+        """Attempt a delete without waiting for the lock, optionally verifying the expected
+        snapshot under it."""
         if expected_snapshot is not None and not isinstance(
             expected_snapshot, StoredSession
         ):

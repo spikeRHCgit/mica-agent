@@ -1,4 +1,4 @@
-"""工作区内文件工具共享的路径边界。"""
+"""Path boundary shared by file tools inside the workspace."""
 
 from __future__ import annotations
 
@@ -20,11 +20,11 @@ _WINDOWS_DEVICE_NAMES = {
 
 
 class WorkspacePathError(ValueError):
-    """工具路径不符合工作区硬性边界。"""
+    """The tool path violates a hard workspace boundary."""
 
 
 def _is_reparse_point(path: Path) -> bool:
-    """在 Windows 上识别 symlink、junction 等重解析点。"""
+    """Detect symlinks, junctions and other reparse points on Windows."""
     try:
         details = path.lstat()
     except OSError:
@@ -36,7 +36,7 @@ def _is_reparse_point(path: Path) -> bool:
 
 
 def is_sensitive_workspace_path(path: Path, workspace: WorkspaceIdentity) -> bool:
-    """返回路径是否命中集中定义的工作区凭据边界。"""
+    """Report whether the path hits the centrally defined workspace credential boundary."""
     try:
         parts = path.relative_to(workspace.workspace_path).parts
     except ValueError:
@@ -45,7 +45,7 @@ def is_sensitive_workspace_path(path: Path, workspace: WorkspaceIdentity) -> boo
 
 
 def is_sensitive_path_text(path: str) -> bool:
-    """纯词法敏感路径分类，供文件授权与命令分析共用。"""
+    """Pure lexical sensitive-path classification shared by file authorization and command analysis."""
     folded = tuple(part.casefold() for part in path.replace("\\", "/").split("/"))
     if ".git" in folded or "credentials" in folded:
         return True
@@ -60,7 +60,7 @@ def is_sensitive_path_text(path: str) -> bool:
 
 
 class WorkspacePathResolver:
-    """把显式相对路径限制在一个已解析的 WorkspaceIdentity 内。"""
+    """Restrict explicit relative paths to one resolved ``WorkspaceIdentity``."""
 
     def __init__(self, workspace: WorkspaceIdentity) -> None:
         if not isinstance(workspace, WorkspaceIdentity):
@@ -68,11 +68,11 @@ class WorkspacePathResolver:
         self._workspace = workspace
 
     def is_sensitive(self, path: Path) -> bool:
-        """判断已解析路径是否命中工作区凭据边界。"""
+        """Report whether a resolved path hits the workspace credential boundary."""
         return is_sensitive_workspace_path(path, self._workspace)
 
     def resolve(self, path: str) -> Path:
-        """解析一个相对工作区路径；拒绝绝对路径和父目录跳转。"""
+        """Resolve one workspace-relative path; reject absolute and ".." paths."""
         if not isinstance(path, str) or not path.strip() or "\x00" in path:
             raise WorkspacePathError("workspace path is not allowed")
         windows_path = ntpath.splitdrive(path)

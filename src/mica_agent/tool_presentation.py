@@ -1,4 +1,4 @@
-"""前端可直接消费的工具展示契约与安全快照生成器。"""
+"""Tool presentation contracts and safe snapshot builders a frontend can consume."""
 
 from __future__ import annotations
 
@@ -82,7 +82,7 @@ def _sanitize_payload(value: object, active: set[int] | None = None) -> object:
 
 
 class ToolPresentationKind(Enum):
-    """工具卡片如何解释展示 payload。"""
+    """How a tool card interprets the presentation payload."""
 
     READ = "read"
     WRITE = "write"
@@ -93,7 +93,7 @@ class ToolPresentationKind(Enum):
 
 
 class ToolPresentationStatus(Enum):
-    """工具卡片的生命周期状态。"""
+    """Lifecycle status of a tool card."""
 
     PENDING = "pending"
     SUCCESS = "success"
@@ -103,7 +103,7 @@ class ToolPresentationStatus(Enum):
 
 @dataclass(frozen=True, slots=True)
 class ToolPresentationSnapshot:
-    """不含运行时资源、可安全写入会话的工具展示快照。"""
+    """Tool presentation snapshot free of runtime resources and safe to persist."""
 
     call_id: str
     tool_name: str

@@ -1,4 +1,4 @@
-"""供应商无关的启动上下文与 AGENTS.md 加载。"""
+"""Provider-agnostic startup context and AGENTS.md loading."""
 
 from __future__ import annotations
 
@@ -22,14 +22,14 @@ _INSTRUCTIONS_TAG_RE = re.compile(
 
 
 class AgentFileSource(Enum):
-    """AGENTS.md 的稳定来源标识。"""
+    """Stable source identifier for AGENTS.md."""
 
     GLOBAL = "global"
     WORKSPACE = "workspace"
 
 
 class ContextDiagnosticKind(Enum):
-    """AGENTS.md 加载失败的稳定诊断类型。"""
+    """Stable diagnostic kinds for AGENTS.md load failures."""
 
     UNREADABLE = "unreadable"
     INVALID_UTF8 = "invalid_utf8"
@@ -38,7 +38,7 @@ class ContextDiagnosticKind(Enum):
 
 @dataclass(frozen=True, slots=True)
 class ContextDiagnostic:
-    """不包含路径、内容或原始异常的安全诊断。"""
+    """Safe diagnostic that carries no path, content, or original exception."""
 
     source: AgentFileSource
     kind: ContextDiagnosticKind
@@ -47,7 +47,7 @@ class ContextDiagnostic:
 
 @dataclass(frozen=True, slots=True)
 class ContextBuildResult:
-    """一次上下文构建产生的新消息序列、诊断与已加载来源。"""
+    """Messages, diagnostics, and loaded sources produced by one context build."""
 
     messages: tuple[Message, ...]
     diagnostics: tuple[ContextDiagnostic, ...]
@@ -72,7 +72,7 @@ class ContextBuildResult:
 
 
 class ContextBuilder:
-    """每次显式调用按固定顺序读取并封装 AGENTS.md。"""
+    """Reads and wraps AGENTS.md in a fixed order on each explicit call."""
 
     def __init__(
         self,
@@ -97,7 +97,7 @@ class ContextBuilder:
         self,
         session_messages: Iterable[Message] = (),
     ) -> ContextBuildResult:
-        """重新读取两个 AGENTS.md，并返回不可变标准上下文。"""
+        """Re-read both AGENTS.md files and return immutable standard context."""
         messages = self._validate_session_messages(session_messages)
         context: list[Message] = []
         diagnostics: list[ContextDiagnostic] = []

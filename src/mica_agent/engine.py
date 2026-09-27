@@ -1,8 +1,9 @@
-"""AgentEngine：单次 Run 的异步编排（P2-03）。
+"""``AgentEngine``: asynchronous orchestration of a single run.
 
-Engine 只依赖 Provider 与可选的 ToolExecutor 公共契约，不读取
-环境变量、配置或 CLI 状态；把 Provider 事件映射为带 ``run_id``
-与严格 ``seq`` 的 Engine 事件，并保证恰好一个终态。
+The engine depends only on the provider and the optional ``ToolExecutor`` public
+contracts; it reads no environment variables, configuration, or CLI state. It maps
+provider events into engine events carrying ``run_id`` and a strict ``seq``, and
+guarantees exactly one terminal event.
 """
 
 from __future__ import annotations
@@ -83,7 +84,7 @@ _RECOVERABLE_ERROR_CATEGORIES = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class RunProgressSnapshot:
-    """一次未完成 Run 的真实进度快照；不表示成功轮次。"""
+    """True progress snapshot of an unfinished run; not a successful turn."""
 
     run_id: str
     progress: tuple[RunCheckpointProgress, ...]
@@ -103,17 +104,17 @@ class _ToolSignal:
 
 
 def _default_run_id() -> str:
-    """默认 Run ID：标准库生成的非空唯一标识。"""
+    """Default run id: a non-empty unique identifier from the standard library."""
     return uuid.uuid4().hex
 
 
 class AgentEngine:
-    """消费 Provider 流并输出有序 Engine 事件。
+    """Consume the provider stream and emit ordered engine events.
 
-    每次 :meth:`run` 产出一个 Run：``RunStarted(seq=0)`` 开头，
-    随后是文本增量与恰好一个终态（``RunCompleted`` /
-    ``RunFailed`` / ``RunCancelled``）；``seq`` 严格递增。
-    终态之后立即停止消费 Provider 流，不产生第二个终态。
+    Each :meth:`run` produces one run: it starts with ``RunStarted(seq=0)``, then text
+    deltas, and exactly one terminal event (``RunCompleted`` / ``RunFailed`` /
+    ``RunCancelled``); ``seq`` increases strictly. Consumption of the provider stream
+    stops immediately after the terminal event, so no second terminal event appears.
     """
 
     def __init__(
@@ -663,7 +664,7 @@ class AgentEngine:
 
     @staticmethod
     def _map_error(error: object) -> ErrorCategory:
-        """ProviderError 到统一错误类别；非 ProviderError 归 UNKNOWN。"""
+        """Map a ``ProviderError`` to a unified error category; anything else is UNKNOWN."""
         if isinstance(error, AuthenticationError):
             return ErrorCategory.AUTHENTICATION
         if isinstance(error, RateLimitError):
@@ -678,10 +679,11 @@ class AgentEngine:
 
     @staticmethod
     def _error_message(error: object) -> str:
-        """面向用户的诊断：只使用 ProviderError 已清洗的公开字符串。
+        """User-facing diagnostic built only from the sanitized public string of a
+        ``ProviderError``.
 
-        空字符串与纯空白字符串统一转换为固定安全文案，保证
-        ``RunFailed.message`` 永远非空；错误类别不受影响。
+        Empty and blank strings become a fixed safe message so that
+        ``RunFailed.message`` is never blank; the error category is unaffected.
         """
         if isinstance(error, ProviderError):
             message = str(error)

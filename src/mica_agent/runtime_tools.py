@@ -1,4 +1,4 @@
-"""P4-04 的 bash 与 ask 工具注册和运行时边界。"""
+"""Bash and ask tool registration and the runtime boundary."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ ToolOutputReporter = Callable[[str, str, str], None]
 
 
 class _OutputReportingError(Exception):
-    """工具输出展示回调失败，不暴露回调内部异常。"""
+    """A tool-output presentation callback failed; its internal exception stays hidden."""
 
 
 class _OutputReporterGate:
@@ -50,7 +50,7 @@ class _OutputReporterGate:
 
 
 class UserInputRequester(Protocol):
-    """向外部请求一次用户文本输入的前端无关协议。"""
+    """Frontend-agnostic protocol to request one user text input from outside."""
 
     def __call__(
         self,
@@ -572,7 +572,7 @@ def register_runtime_tools(
     command_timeout_seconds: float = DEFAULT_COMMAND_TIMEOUT_SECONDS,
     output_reporter: ToolOutputReporter | None = None,
 ) -> None:
-    """显式且原子地注册 bash 与 ask，不执行外部行为。"""
+    """Explicitly and atomically register bash and ask without running anything."""
     if not isinstance(registry, ToolRegistry):
         raise TypeError("registry must be a ToolRegistry")
     if not isinstance(workspace, WorkspaceIdentity):

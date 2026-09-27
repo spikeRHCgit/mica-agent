@@ -1,4 +1,4 @@
-"""MicaApp：Session Service 驱动的最小应用装配入口。"""
+"""``MicaApp``: minimal application assembly entry driven by the session service."""
 
 from __future__ import annotations
 
@@ -49,19 +49,19 @@ _RECOVERABLE_ERROR_CATEGORIES = frozenset(
 
 
 class MicaAppError(Exception):
-    """MicaApp 应用层错误基类。"""
+    """Base class for ``MicaApp`` application-layer errors."""
 
 
 class AppBusyError(MicaAppError):
-    """同一 App 已存在活动 Run 时启动新 Run。"""
+    """Starting a new run while this app already has an active run."""
 
 
 class AppClosedError(MicaAppError):
-    """App 已关闭后再次启动 Run。"""
+    """Starting a run after the app has been closed."""
 
 
 class MicaApp:
-    """连接 Session Service、Context Builder、Engine 与 Provider。"""
+    """Wire the session service, context builder, engine, and provider together."""
 
     def __init__(
         self,
@@ -137,24 +137,24 @@ class MicaApp:
 
     @property
     def session_id(self) -> str:
-        """当前 App 绑定的会话 ID。"""
+        """Session id bound to the current app instance."""
         return self._session_id
 
     @property
     def history(self) -> tuple[Message, ...]:
-        """从 Session Service 重新取得的不可变持久化历史快照。"""
+        """Immutable persisted-history snapshot freshly read from the session service."""
         return self._session_service.context_snapshot(self._session_id)
 
     def respond_interaction(
         self, response: PermissionResponse | UserInputResponse
     ) -> bool:
-        """向当前工具交互提交一次前端无关响应。"""
+        """Submit one frontend-agnostic response to the current tool interaction."""
         if self._tool_executor is None:
             return False
         return self._tool_executor.interaction_broker.respond(response)
 
     async def aclose(self) -> None:
-        """关闭 Provider 并标记 App 不可再运行；重复调用安全。"""
+        """Close the provider and mark the app unusable for runs; repeated calls are safe."""
         if self._closed:
             return
         self._closed = True
@@ -167,7 +167,8 @@ class MicaApp:
         reasoning_effort: ReasoningEffort = ReasoningEffort.OFF,
         cancellation: CancellationToken | None = None,
     ) -> AsyncIterator[EngineEvent]:
-        """启动一次 Run；成功提交 TurnEntry，取消或可恢复失败提交检查点。"""
+        """Start one run; success commits a ``TurnEntry``, cancellation or recoverable
+        failure commits a checkpoint."""
         if self._closed:
             raise AppClosedError("app is closed; cannot start a new run")
         if not isinstance(prompt, str):

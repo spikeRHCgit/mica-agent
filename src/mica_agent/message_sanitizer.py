@@ -1,4 +1,4 @@
-"""工具上下文消息的集中、纯函数凭据清洗边界。"""
+"""Central pure-function credential sanitization boundary for tool context messages."""
 
 from __future__ import annotations
 
@@ -161,7 +161,7 @@ def _redact_text(value: str) -> str:
 
 
 def sanitize_presentation_text(value: str) -> str:
-    """清洗进入工具展示事件或会话的文本副本。"""
+    """Sanitize a text copy that enters tool presentation events or the session."""
     if not isinstance(value, str):
         raise TypeError("value must be a str")
     return _redact_text(value)
@@ -200,7 +200,7 @@ def _redact_tool_content(content: str) -> str:
 
 
 def sanitize_tool_message(message: Message) -> Message:
-    """复制并清洗 assistant tool-call 或 TOOL 消息。"""
+    """Copy and sanitize an assistant tool-call or TOOL message."""
     if not isinstance(message, Message):
         raise TypeError("message must be a Message")
     if message.role is MessageRole.ASSISTANT and message.tool_calls:

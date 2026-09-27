@@ -1,4 +1,4 @@
-"""JSONL Store 使用的最小跨平台独占文件锁。"""
+"""Minimal cross-platform exclusive file lock used by the JSONL store."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ def _thread_lock_for(path: Path) -> threading.Lock:
 
 
 class FileLock:
-    """跨线程、跨进程的会话级独占锁，释放后保留锁文件。"""
+    """Cross-thread, cross-process exclusive lock; the lock file remains after release."""
 
     def __init__(self, path: Path, timeout: float = 5.0, poll_interval: float = 0.01):
         if timeout < 0:
@@ -74,7 +74,7 @@ class FileLock:
             raise
 
     def _initialize_lock_file(self) -> None:
-        """在任何进程尝试锁定前无竞争地建立一个锁字节。"""
+        """Create one lock byte without a race before any process attempts to lock."""
         try:
             descriptor = os.open(
                 self.path,
@@ -120,7 +120,7 @@ class FileLock:
 
 @contextmanager
 def locked_file(path: Path, timeout: float = 5.0) -> Iterator[None]:
-    """供 Store 使用的简洁锁上下文。"""
+    """Concise lock context for the store."""
     with FileLock(path, timeout=timeout):
         yield
 

@@ -1,8 +1,9 @@
-"""OpenAI-compatible Chat Completions 流式 Provider（P2-02）。
+"""OpenAI-compatible Chat Completions streaming provider.
 
-协议适配、SSE 解析、错误分类和有限重试全部限制在本模块内；
-对外只通过 :data:`~mica_agent.providers.base.ProviderEvent` 与调用方
-交互，不暴露 ``httpx.Response`` 或任何供应商私有对象。
+Protocol adaptation, SSE parsing, error classification, and bounded retries all stay
+inside this module; the outside sees only
+:data:`~mica_agent.providers.base.ProviderEvent` and never an ``httpx.Response`` or any
+provider-private object.
 """
 
 from __future__ import annotations
@@ -69,15 +70,17 @@ def _validated_thinking_level_map(
 
 
 def resolve_endpoint(base_url: str) -> str:
-    """把用户提供的 URL 解析为 Chat Completions 端点。
+    """Resolve a user-supplied URL to a Chat Completions endpoint.
 
-    约定：
+    Convention:
 
-    - URL 路径已经以 ``/chat/completions`` 结尾时视为完整端点，
-      原样返回（仅去除结尾斜杠）。
-    - 否则视为 base URL，在路径末尾拼接 ``/chat/completions``。
+    - A URL path already ending in ``/chat/completions`` is a complete endpoint and is
+      returned as-is (only trailing slashes are removed).
+    - Otherwise the URL is treated as a base URL and ``/chat/completions`` is appended
+      to its path.
 
-    该约定保证永远不会产生 ``/chat/completions/chat/completions``。
+    This convention guarantees ``/chat/completions/chat/completions`` is never
+    produced.
     """
     url = httpx.URL(base_url)
     path = url.path.rstrip("/")
@@ -87,18 +90,19 @@ def resolve_endpoint(base_url: str) -> str:
 
 
 class OpenAICompatibleProvider:
-    """基于 OpenAI Chat Completions 流式协议的生产 Provider。
+    """Production provider over the OpenAI Chat Completions streaming protocol.
 
-    ``base_url`` 可以是已包含 ``/chat/completions`` 的完整端点，
-    也可以是 base URL（自动拼接端点）；URL 语义见
-    :func:`resolve_endpoint`。API Key 只进入请求头，永不进入
-    ``repr``、异常消息或事件。
+    ``base_url`` may be a complete endpoint that already includes
+    ``/chat/completions``, or a base URL whose endpoint is appended; see
+    :func:`resolve_endpoint` for the URL rules. The API key enters only the request
+    headers, never ``repr``, exception messages, or events.
 
-    重试：默认只对 ``ProviderTimeoutError`` 与 ``TemporaryServerError``
-    且尚未产出任何文本的事件流重试，最多 ``max_retries`` 次；
-    ``RateLimitError`` 不做自动重试（留给上层决策）。HTTP 响应
-    成功建立后发生的传输中断视为畸形响应
-    （``MalformedResponseError``），不重试、不重复发送请求。
+    Retries: by default only ``ProviderTimeoutError`` and ``TemporaryServerError`` are
+    retried, and only while the event stream has produced no text yet, up to
+    ``max_retries`` times; ``RateLimitError`` is never retried automatically (that
+    decision belongs to the caller). A transport interruption after the HTTP response
+    was established is treated as a malformed response (``MalformedResponseError``): it
+    is not retried and the request is not sent again.
     """
 
     def __init__(
@@ -137,20 +141,18 @@ class OpenAICompatibleProvider:
         )
 
     def __repr__(self) -> str:
-        # 永不包含 API Key。
+        # Never includes the API key.
         return (
             f"OpenAICompatibleProvider(endpoint={self._endpoint!r}, "
             f"max_retries={self._max_retries})"
         )
 
     async def aclose(self) -> None:
-        """关闭内部 HTTP 客户端；幂等，可在不再使用时调用。"""
+        """Close the internal HTTP client; idempotent and safe once no longer needed."""
         await self._client.aclose()
 
-    # -- 请求与响应 --------------------------------------------------------
-
     def _build_payload(self, request: ProviderRequest) -> dict[str, Any]:
-        """把供应商无关请求转换为 Chat Completions JSON 载荷。"""
+        """Convert a provider-agnostic request into a Chat Completions JSON payload."""
         messages: list[dict[str, Any]] = []
         for message in request.messages:
             item: dict[str, Any] = {
@@ -220,7 +222,7 @@ class OpenAICompatibleProvider:
         max_retries: int,
         produced: bool,
     ) -> bool:
-        """只对尚未产出文本的临时失败重试；RateLimit 不自动重试。"""
+        """Retry only transient failures that produced no text yet; never retry rate limits."""
         return (
             attempt < max_retries
             and not produced
@@ -229,7 +231,7 @@ class OpenAICompatibleProvider:
 
     @staticmethod
     def _parse_chat_chunk(data: str) -> dict[str, Any] | None:
-        """解析单个 SSE chunk，返回文本、工具增量和结束原因。"""
+        """Parse one SSE chunk into text, tool-call fragments, and the finish reason."""
         try:
             obj = json.loads(data)
         except json.JSONDecodeError as exc:
@@ -395,7 +397,7 @@ class OpenAICompatibleProvider:
                         return
                     async for line in response.aiter_lines():
                         if not line.startswith("data:"):
-                            # 空行、注释或其他 SSE 字段 → 忽略。
+                            # Blank lines, comments, and other SSE fields are ignored.
                             continue
                         data = line[len("data:") :].lstrip()
                         if data == "[DONE]":
@@ -491,7 +493,7 @@ class OpenAICompatibleProvider:
                             return
                         yield Finish(reason=finish_reason)
                         return
-                    # 流自然耗尽且从未收到结束信号 → 畸形响应。
+                    # The stream drained naturally without a finish signal: malformed response.
                     yield ProviderErrorEvent(
                         error=MalformedResponseError(
                             "stream ended before a finish signal"
@@ -500,8 +502,9 @@ class OpenAICompatibleProvider:
                     return
             except httpx.TimeoutException as exc:
                 if established:
-                    # 响应已建立、SSE 消费中途超时：内容不完整 → 畸形，
-                    # 不重试（保留已产出的文本增量）。
+                    # Timeout while consuming SSE after the response was established:
+                    # incomplete content, so malformed and not retried (emitted text
+                    # deltas are preserved).
                     yield ProviderErrorEvent(
                         error=MalformedResponseError(
                             "SSE stream interrupted", cause=exc
@@ -516,8 +519,9 @@ class OpenAICompatibleProvider:
                 return
             except httpx.TransportError as exc:
                 if established:
-                    # 响应已建立、SSE 消费中途传输中断：内容不完整 →
-                    # 畸形，不重试（保留已产出的文本增量）。
+                    # Transport interruption while consuming SSE after the response was
+                    # established: incomplete content, so malformed and not retried
+                    # (emitted text deltas are preserved).
                     yield ProviderErrorEvent(
                         error=MalformedResponseError(
                             "SSE stream interrupted", cause=exc

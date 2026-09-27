@@ -1,4 +1,4 @@
-"""供应商无关的标准消息模型（阶段计划 4.1）。"""
+"""Provider-agnostic standard message model."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from .tool_contracts import ToolCall
 
 
 class MessageRole(Enum):
-    """标准消息角色；枚举值即对外传输格式的 wire 值。"""
+    """Standard message role; enum values are the wire values on the transport."""
 
     SYSTEM = "system"
     USER = "user"
@@ -19,11 +19,12 @@ class MessageRole(Enum):
 
 @dataclass(frozen=True, slots=True)
 class Message:
-    """一条供应商无关的标准消息。
+    """One provider-agnostic standard message.
 
-    旧纯文本构造保持为 ``Message(role, content)``。助手消息可携带
-    完整工具调用，工具消息通过 ``tool_call_id`` 关联调用；所有集合
-    使用不可变元组，且不保存 Provider 私有对象。
+    Plain-text construction stays ``Message(role, content)``. Assistant messages may
+    carry complete tool calls, tool messages reference the call through
+    ``tool_call_id``; every collection is an immutable tuple and no provider-private
+    object is stored.
     """
 
     role: MessageRole

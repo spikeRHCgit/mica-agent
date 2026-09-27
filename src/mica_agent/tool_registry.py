@@ -1,4 +1,4 @@
-"""工具定义与异步执行入口的内存注册表。"""
+"""In-memory registry of tool definitions and their async execution entry points."""
 
 from __future__ import annotations
 
@@ -22,19 +22,19 @@ __all__ = [
 
 
 class ToolRegistryError(Exception):
-    """ToolRegistry 的稳定基础错误。"""
+    """Stable base error for ``ToolRegistry``."""
 
 
 class DuplicateToolError(ToolRegistryError):
-    """工具名称已经注册。"""
+    """The tool name is already registered."""
 
 
 class ToolNotFoundError(ToolRegistryError):
-    """工具名称未注册。"""
+    """The tool name is not registered."""
 
 
 class ToolHandler(Protocol):
-    """异步工具处理函数的公共调用协议。"""
+    """Public call protocol for an async tool handler."""
 
     def __call__(
         self, request: ToolRequest, cancellation: CancellationToken
@@ -43,20 +43,20 @@ class ToolHandler(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class RegisteredTool:
-    """供未来 ToolExecutor 使用的不可变注册项。"""
+    """Immutable registration entry used by ``ToolExecutor``."""
 
     spec: ToolSpec
     handler: ToolHandler
 
 
 class ToolRegistry:
-    """集中拥有工具定义及其异步处理入口。"""
+    """Owns tool definitions and their async handler entry points."""
 
     def __init__(self) -> None:
         self._tools: dict[str, RegisteredTool] = {}
 
     def register(self, spec: ToolSpec, handler: ToolHandler) -> None:
-        """校验并注册一个工具，但不执行处理函数。"""
+        """Validate and register a tool without invoking its handler."""
         if not isinstance(spec, ToolSpec):
             raise TypeError("spec must be a ToolSpec")
         if not callable(handler):
@@ -67,11 +67,11 @@ class ToolRegistry:
         self._tools[spec.name] = RegisteredTool(spec, handler)
 
     def specs(self) -> tuple[ToolSpec, ...]:
-        """返回仅含公开定义、按名称排序的当前快照。"""
+        """Return the current name-sorted snapshot of public specs only."""
         return tuple(self._tools[name].spec for name in sorted(self._tools))
 
     def resolve(self, name: str) -> RegisteredTool:
-        """返回未来 ToolExecutor 使用的注册项，但不执行处理函数。"""
+        """Return the registered entry without invoking its handler."""
         if not isinstance(name, str):
             raise TypeError("name must be a str")
         try:

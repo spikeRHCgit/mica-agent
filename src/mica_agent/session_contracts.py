@@ -1,4 +1,4 @@
-"""供应商无关的会话数据与单条持久化记录契约。"""
+"""Provider-agnostic session data and per-record persistence contracts."""
 
 from __future__ import annotations
 
@@ -34,15 +34,15 @@ _SUPPORTED_SESSION_FORMAT_VERSIONS = frozenset(
 
 
 class SessionError(Exception):
-    """会话子系统可公开捕获的基础错误。"""
+    """Base error the session subsystem allows callers to catch."""
 
 
 class SessionFormatError(SessionError):
-    """不可信持久化记录不符合当前会话格式。"""
+    """An untrusted persisted record does not match the current session format."""
 
 
 class SessionRecordType(Enum):
-    """持久化记录的显式 wire 类型。"""
+    """Explicit wire record type of persisted records."""
 
     SESSION_META = "session_meta"
     TURN = "turn"
@@ -67,7 +67,7 @@ def _validate_utc_datetime(value: object, field_name: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class SessionMeta:
-    """一个会话的不可变身份与工作区元数据。"""
+    """Immutable identity and workspace metadata of one session."""
 
     session_id: str
     format_version: int
@@ -99,7 +99,7 @@ class SessionMeta:
 
 @dataclass(frozen=True, slots=True)
 class TurnEntry:
-    """一次成功用户指令对应的完整、不可变轮次。"""
+    """Complete, immutable turn produced by one successful user instruction."""
 
     turn_id: str
     run_id: str
@@ -211,7 +211,7 @@ class TurnEntry:
 
     @property
     def context_messages(self) -> tuple[Message, ...]:
-        """按模型上下文顺序返回本轮全部消息。"""
+        """Return every message of this turn in model context order."""
         return (
             self.user_message,
             *self.intermediate_messages,
@@ -710,7 +710,7 @@ def _parse_checkpoint(record: Mapping[object, object]) -> RunCheckpoint:
 
 
 def serialize_session_record(record: SessionRecord) -> dict[str, object]:
-    """把一个强类型会话对象转换为标准 JSON 可表示的单条记录。"""
+    """Convert one strongly typed session object into a plain-JSON record."""
     if isinstance(record, SessionMeta):
         return {
             "record_type": SessionRecordType.SESSION_META.value,
@@ -759,7 +759,7 @@ def serialize_session_record(record: SessionRecord) -> dict[str, object]:
 
 
 def deserialize_session_record(record: object) -> SessionRecord:
-    """把一条不可信 JSON 兼容记录解析为强类型会话对象。"""
+    """Parse one untrusted JSON-compatible record into a strongly typed session object."""
     if not isinstance(record, Mapping):
         raise SessionFormatError("session record must be a JSON object")
     if "record_type" not in record:

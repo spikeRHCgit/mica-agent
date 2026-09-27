@@ -1,7 +1,7 @@
-"""供应商无关的 Provider 公共契约（阶段计划 4.2）。
+"""Provider-agnostic public contract.
 
-本模块只定义契约，不实现任何网络请求；协议适配和重试由
-后续 Provider 实现（P2-02）在传输边界完成。
+This module only defines contracts and performs no network requests; protocol
+adaptation and retries belong to provider implementations at the transport boundary.
 """
 
 from __future__ import annotations
@@ -18,13 +18,13 @@ from ..tool_contracts import ToolCall, ToolSpec
 
 @dataclass(frozen=True, slots=True)
 class ProviderRequest:
-    """一次模型请求的供应商无关输入。
+    """Provider-agnostic input for a single model request.
 
-    ``model`` 必须是非空、非纯空白字符串；``messages`` 必须是非空
-    元组且每项都是 ``Message``；``tools`` 是 ``ToolSpec`` 元组。
-    使用元组承载：Provider 或调用方都无法在创建后篡改消息历史或工具
-    快照。连接信息（URL、Key 等）属于 Provider 装配层，不属于单次请求
-    数据。
+    ``model`` must be a non-empty, non-blank string; ``messages`` must be a non-empty
+    tuple whose items are all ``Message``; ``tools`` is a tuple of ``ToolSpec``. Tuples
+    are used so that neither the provider nor the caller can mutate the message
+    history or the tool snapshot after construction. Connection details (URL, key,
+    ...) belong to provider assembly, not to per-request data.
     """
 
     model: str
@@ -54,17 +54,18 @@ class ProviderRequest:
 
 
 _SENSITIVE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    # Authorization: Bearer <token>（保留头部前缀）
+    # Authorization: Bearer <token> (keeps the header prefix)
     re.compile(r"(authorization\s*:\s*bearer\s+)\S+", re.IGNORECASE),
-    # sk- 前缀的 API Key（OpenAI/Anthropic 风格，整体替换）
+    # sk- prefixed API keys (OpenAI/Anthropic style, replaced entirely)
     re.compile(r"\bsk-[A-Za-z0-9_-]{6,}\b"),
-    # api_key= / api-key: <token>（保留键名前缀）
+    # api_key= / api-key: <token> (keeps the key-name prefix)
     re.compile(r"(api[_-]?key\s*[=:]\s*)\S+", re.IGNORECASE),
 )
 
 
 def _redact(message: str) -> str:
-    """把常见凭据形态替换为 ``[redacted]``；带捕获组的模式保留前缀。"""
+    """Replace common credential shapes with ``[redacted]``; capture-group patterns keep
+    their prefix."""
     redacted = message
     for pattern in _SENSITIVE_PATTERNS:
         redacted = pattern.sub(
@@ -77,11 +78,13 @@ def _redact(message: str) -> str:
 
 
 class ProviderError(Exception):
-    """模型请求错误的供应商无关基类；也是未知错误的兜底类别。
+    """Provider-agnostic base class for model request errors; also the fallback for
+    unknown errors.
 
-    公开诊断安全约束：``str()`` 与 ``repr()`` 只输出脱敏后的
-    面向用户诊断，不包含 API Key、Authorization 头值或原始响应体。
-    原始异常可通过 ``cause`` 保留在内部，但永不进入 ``str``/``repr``。
+    Public diagnostic safety constraint: ``str()`` and ``repr()`` emit only the
+    redacted user-facing diagnostic, never an API key, an Authorization header value,
+    or a raw response body. The original exception may be kept internally through
+    ``cause``, but never enters ``str``/``repr``.
     """
 
     def __init__(self, message: str, *, cause: BaseException | None = None) -> None:
@@ -94,33 +97,34 @@ class ProviderError(Exception):
 
     @property
     def cause(self) -> BaseException | None:
-        """内部保留的原始异常（用于调试），不进入 ``str``/``repr``。"""
+        """Original exception kept internally for debugging; never enters ``str``/``repr``."""
         return self._cause
 
 
 class AuthenticationError(ProviderError):
-    """鉴权失败：凭证缺失、无效或过期。"""
+    """Authentication failed: credentials are missing, invalid, or expired."""
 
 
 class RateLimitError(ProviderError):
-    """限流：请求被服务端频率限制拒绝。"""
+    """Rate limited: the server rejected the request on frequency limits."""
 
 
 class ProviderTimeoutError(ProviderError):
-    """请求超时（区别于内置 TimeoutError，语义限定为模型请求）。"""
+    """Request timed out (distinct from the built-in ``TimeoutError``; scoped to model
+    requests)."""
 
 
 class TemporaryServerError(ProviderError):
-    """临时服务端错误：可安全重试的瞬时故障。"""
+    """Temporary server error: a transient failure that is safe to retry."""
 
 
 class MalformedResponseError(ProviderError):
-    """畸形响应：流式内容无法按协议解析。"""
+    """Malformed response: streaming content cannot be parsed per protocol."""
 
 
 @dataclass(frozen=True, slots=True)
 class ProviderReasoningDelta:
-    """协议适配器识别出的非空思考文本增量。"""
+    """Non-empty reasoning text delta recognized by the protocol adapter."""
 
     text: str
 
@@ -133,16 +137,18 @@ class ProviderReasoningDelta:
 
 @dataclass(frozen=True, slots=True)
 class TextDelta:
-    """流式文本增量片段。"""
+    """Streaming text delta fragment."""
 
     text: str
 
 
 @dataclass(frozen=True, slots=True)
 class Finish:
-    """流正常结束。``reason`` 为供应商结束原因（如 ``stop``），
-    默认 ``None`` 表示无特定原因；完整的工具调用只在结束时通过
-    ``tool_calls`` 暴露，不包含 Provider 私有分片。
+    """The stream finished normally.
+
+    ``reason`` is the provider finish reason (for example ``stop``); the default
+    ``None`` means no specific reason. Complete tool calls are exposed through
+    ``tool_calls`` only at finish and never contain provider-private fragments.
     """
 
     reason: str | None = None
@@ -157,7 +163,8 @@ class Finish:
 
 @dataclass(frozen=True, slots=True)
 class ProviderErrorEvent:
-    """流内错误信号：携带错误对象，供调用方在同一迭代中处理。"""
+    """In-stream error signal carrying the error object for the caller to handle in the
+    same iteration."""
 
     error: ProviderError
 
@@ -168,35 +175,38 @@ ProviderEvent = ProviderReasoningDelta | TextDelta | Finish | ProviderErrorEvent
 
 @runtime_checkable
 class Provider(Protocol):
-    """Provider 能力契约：以异步流消费请求并产出标准化事件。
+    """Provider capability contract: consume a request as an async stream and yield
+    normalized events.
 
-    唯一公共调用方式是 ``async for``：
+    The only public call form is ``async for``:
 
     .. code-block:: python
 
         async for event in provider.stream(request):
             ...
 
-    ``stream`` 是普通方法，返回一次性的异步迭代器（实现类以异步
-    生成器实现，即 ``async def stream(...): yield ...``）；调用返回
-    后即可被 ``async for`` 消费，产出 ``TextDelta`` 文本增量、
-    ``Finish`` 正常结束或 ``ProviderErrorEvent`` 流内错误。
+    ``stream`` is a plain method that returns a one-shot async iterator (implementations
+    use an async generator, i.e. ``async def stream(...): yield ...``); the returned
+    iterator can immediately be consumed with ``async for``, yielding ``TextDelta`` text
+    deltas, ``Finish`` normal completion, or ``ProviderErrorEvent`` in-stream errors.
 
-    唯一错误通道：
+    The only error channel:
 
-    - 已分类、可预期的 Provider 失败（鉴权、限流、超时、临时服务端
-      错误、畸形响应等）必须以 ``ProviderErrorEvent`` 作为流内
-      **最后一个事件** 产出；其后不得再出现 ``TextDelta`` 或
-      ``Finish``。实现不得对同一种已分类错误自由选择产出或抛出。
-    - 只有未预期的程序错误（bug、断言失败等）才允许作为异常从
-      ``stream`` 传播。
+    - A classified, expected provider failure (authentication, rate limit, timeout,
+      temporary server error, malformed response, ...) must be produced as a
+      ``ProviderErrorEvent`` that is the **last event** in the stream; no ``TextDelta``
+      or ``Finish`` may follow. Implementations must not choose freely between
+      yielding and raising the same classified error.
+    - Only unexpected program errors (bugs, assertion failures, ...) may propagate from
+      ``stream`` as exceptions.
 
-    实现类通过鸭子类型符合本协议，无需继承；Engine 只依赖此
-    契约，不接触任何供应商私有对象。
+    Implementations satisfy this protocol by duck typing, without inheriting from it;
+    the engine depends only on this contract and never touches provider-private
+    objects.
     """
 
     def stream(self, request: ProviderRequest) -> AsyncIterator[ProviderEvent]: ...
 
     async def aclose(self) -> None:
-        """关闭 Provider 占用的资源；必须幂等、可重复调用。"""
+        """Close resources held by the provider; must be idempotent and repeatable."""
         ...

@@ -1,4 +1,4 @@
-"""不可变的中断运行进度公共契约。"""
+"""Immutable public contracts for interrupted-run progress."""
 
 from __future__ import annotations
 
@@ -13,14 +13,14 @@ from .tool_presentation import ToolPresentationSnapshot, ToolPresentationStatus
 
 
 class RunCheckpointKind(Enum):
-    """中断检查点的宿主终止类别。"""
+    """Host termination kind that produced an interrupted checkpoint."""
 
     CANCELLED = "cancelled"
     RECOVERABLE_FAILURE = "recoverable_failure"
 
 
 class RunCheckpointToolStatus(Enum):
-    """一次已声明工具调用在检查点时的真实边界。"""
+    """True boundary of a declared tool call at checkpoint time."""
 
     SUCCESS = "success"
     FAILED = "failed"
@@ -37,7 +37,7 @@ def _validate_non_blank(value: object, field: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class RunCheckpointToolProgress:
-    """一个模型工具调用及截至检查点的真实完成状态。"""
+    """One model tool call and its true completion state up to the checkpoint."""
 
     call: ToolCall = field(repr=False)
     status: RunCheckpointToolStatus
@@ -108,7 +108,7 @@ class RunCheckpointToolProgress:
 
 @dataclass(frozen=True, slots=True)
 class RunCheckpointProgress:
-    """一个按发生顺序保存的模型步骤。"""
+    """One model step stored in occurrence order."""
 
     assistant_message: Message | None = field(default=None, repr=False)
     tools: tuple[RunCheckpointToolProgress, ...] = field(default=(), repr=False)
@@ -146,7 +146,8 @@ class RunCheckpointProgress:
 
 @dataclass(frozen=True, slots=True)
 class RunCheckpoint:
-    """一次未完成 Run 的不可变、安全检查点；不代表成功 assistant 回复。"""
+    """Immutable, sanitized checkpoint of an unfinished run; not a successful
+    assistant reply."""
 
     checkpoint_id: str = field(repr=False)
     run_id: str = field(repr=False)

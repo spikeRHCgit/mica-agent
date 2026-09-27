@@ -1,17 +1,17 @@
-"""P4 权限系统共享的基础枚举。"""
+"""Shared base enums for the tool permission system."""
 
 from enum import Enum
 
 
 class PermissionMode(Enum):
-    """当前会话使用的权限模式。"""
+    """Permission mode selected for the current session."""
 
     DEFAULT = "default"
     SOLO = "solo"
 
 
 class PolicyDecision(Enum):
-    """后续策略引擎返回的权限决定。"""
+    """Permission decision returned by the policy engine."""
 
     ALLOW = "allow"
     ASK = "ask"

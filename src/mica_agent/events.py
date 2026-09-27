@@ -1,7 +1,8 @@
-"""Engine 输出的有序公共事件（阶段计划 4.3）。
+"""Ordered public events emitted by the engine.
 
-所有事件携带 ``run_id``（关联 Run）和 ``seq``（Run 内单调递增的
-顺序号），CLI 与前端可以按序消费，无需读取 Provider 私有状态。
+Every event carries ``run_id`` (the associated run) and ``seq`` (a monotonically
+increasing sequence number within the run); the CLI and frontend can consume them in
+order without reading provider-private state.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from .tool_presentation import (
 
 
 def _validate_run_id(run_id: str) -> None:
-    """run_id 必须是非空、非纯空白字符串。"""
+    """``run_id`` must be a non-empty, non-blank string."""
     if not isinstance(run_id, str):
         raise TypeError(f"run_id must be a str, got {type(run_id).__name__}")
     if not run_id.strip():
@@ -26,7 +27,7 @@ def _validate_run_id(run_id: str) -> None:
 
 
 def _validate_seq(seq: int) -> None:
-    """seq 必须是非负整数（排斥 bool）。"""
+    """``seq`` must be a non-negative integer (``bool`` excluded)."""
     if isinstance(seq, bool) or not isinstance(seq, int):
         raise TypeError(f"seq must be an int, got {type(seq).__name__}")
     if seq < 0:
@@ -34,7 +35,7 @@ def _validate_seq(seq: int) -> None:
 
 
 def _validate_message(message: str) -> None:
-    """面向用户的诊断消息必须是非空、非纯空白字符串。"""
+    """The user-facing diagnostic message must be a non-empty, non-blank string."""
     _validate_non_blank_text(message, "message")
 
 
@@ -46,7 +47,7 @@ def _validate_non_blank_text(value: object, field_name: str) -> None:
 
 
 class RunStatus(Enum):
-    """Run 统一终态：正常完成、失败或取消。"""
+    """Unified run terminal status: completed, failed, or cancelled."""
 
     COMPLETED = "completed"
     FAILED = "failed"
@@ -54,9 +55,10 @@ class RunStatus(Enum):
 
 
 class ErrorCategory(Enum):
-    """Run 失败的错误类别，用于面向用户的统一诊断与后续可重试判断。
+    """Error category of a failed run, used for unified user-facing diagnostics and retry
+    decisions.
 
-    ``UNKNOWN`` 为兜底类别，对应未识别错误。
+    ``UNKNOWN`` is the fallback category for unrecognized errors.
     """
 
     AUTHENTICATION = "authentication"
@@ -71,7 +73,7 @@ class ErrorCategory(Enum):
 
 @dataclass(frozen=True, slots=True)
 class RunStarted:
-    """Run 开始；作为 Run 的第一个事件，seq 固定为 0。"""
+    """Run start; the first event of a run, with ``seq`` fixed to 0."""
 
     run_id: str
     seq: int = field(init=False, default=0)
@@ -82,7 +84,7 @@ class RunStarted:
 
 @dataclass(frozen=True, slots=True)
 class ReasoningDelta:
-    """按序排列的模型思考增量，不属于正式助手文本。"""
+    """Ordered model reasoning delta that is not part of the assistant text."""
 
     run_id: str
     text: str
@@ -99,7 +101,7 @@ class ReasoningDelta:
 
 @dataclass(frozen=True, slots=True)
 class TextDelta:
-    """按序排列的文本增量，CLI 将其连续追加即可还原完整回复。"""
+    """Ordered text delta; appending them in order reconstructs the complete reply."""
 
     run_id: str
     text: str
@@ -112,7 +114,7 @@ class TextDelta:
 
 @dataclass(frozen=True, slots=True)
 class ToolOutputDelta:
-    """按序排列、已安全清洗的工具输出增量。"""
+    """Ordered, already sanitized tool output delta."""
 
     run_id: str
     seq: int
@@ -133,7 +135,7 @@ class ToolOutputDelta:
 
 @dataclass(frozen=True, slots=True)
 class ToolPrepared:
-    """工具调用已提出但尚未授权或执行。"""
+    """A tool call has been proposed but is not yet authorized or executed."""
 
     run_id: str
     seq: int
@@ -149,18 +151,18 @@ class ToolPrepared:
 
     @property
     def call_id(self) -> str:
-        """从展示快照读取稳定工具调用 ID。"""
+        """Read the stable tool call id from the presentation snapshot."""
         return self.presentation.call_id
 
     @property
     def tool_name(self) -> str:
-        """从展示快照读取稳定工具名称。"""
+        """Read the stable tool name from the presentation snapshot."""
         return self.presentation.tool_name
 
 
 @dataclass(frozen=True, slots=True)
 class ToolStarted:
-    """一次工具调用开始，不包含工具参数。"""
+    """One tool call started; tool arguments are not included."""
 
     run_id: str
     seq: int
@@ -176,7 +178,7 @@ class ToolStarted:
 
 @dataclass(frozen=True, slots=True)
 class ToolFinished:
-    """一次工具调用结束，只公开状态而不公开完整结果。"""
+    """One tool call finished; only the status is exposed, not the full result."""
 
     run_id: str
     seq: int
@@ -215,7 +217,7 @@ class ToolFinished:
 
 @dataclass(frozen=True, slots=True)
 class PermissionRequested:
-    """Engine 请求前端取得一次工具权限回答。"""
+    """The engine asks the frontend for one tool permission answer."""
 
     run_id: str
     seq: int
@@ -235,7 +237,7 @@ class PermissionRequested:
 
 @dataclass(frozen=True, slots=True)
 class UserInputRequested:
-    """Engine 请求前端取得一个文本回答。"""
+    """The engine asks the frontend for one text answer."""
 
     run_id: str
     seq: int
@@ -258,7 +260,8 @@ class UserInputRequested:
 
 @dataclass(frozen=True, slots=True)
 class RunCompleted:
-    """Run 正常完成；status 固定为 ``COMPLETED``，调用者不能覆盖。"""
+    """Run completed normally; ``status`` is fixed to ``COMPLETED`` and cannot be
+    overridden."""
 
     run_id: str
     seq: int
@@ -271,9 +274,9 @@ class RunCompleted:
 
 @dataclass(frozen=True, slots=True)
 class RunFailed:
-    """Run 失败：携带错误类别和面向用户的诊断消息。
+    """Run failed: carries the error category and a user-facing diagnostic message.
 
-    status 固定为 ``FAILED``，调用者不能覆盖。
+    ``status`` is fixed to ``FAILED`` and cannot be overridden.
     """
 
     run_id: str
@@ -294,7 +297,8 @@ class RunFailed:
 
 @dataclass(frozen=True, slots=True)
 class RunCancelled:
-    """Run 被用户或运行上下文取消；status 固定为 ``CANCELLED``。"""
+    """Run cancelled by the user or the run context; ``status`` is fixed to
+    ``CANCELLED``."""
 
     run_id: str
     seq: int

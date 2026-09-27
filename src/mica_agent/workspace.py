@@ -1,4 +1,4 @@
-"""工作区身份解析与 Mica 数据根目录边界。"""
+"""Workspace identity resolution and the Mica data-root boundary."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 class WorkspaceResolutionError(Exception):
-    """启动目录无法解析为稳定工作区身份。"""
+    """The start directory cannot be resolved to a stable workspace identity."""
 
 
 _WORKSPACE_ID_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -21,7 +21,7 @@ def _is_safe_slug_char(character: str) -> bool:
 
 
 def _identity_path_text(path: Path) -> str:
-    """返回当前平台用于身份计算的规范路径文本。"""
+    """Return the canonical path text used for identity on this platform."""
     value = os.path.normpath(os.path.abspath(os.fspath(path)))
     if os.name == "nt":
         value = os.path.normcase(value)
@@ -33,7 +33,7 @@ def _workspace_id_for_path(path: Path) -> str:
 
 
 def workspace_slug(path: Path | str) -> str:
-    """把工作区目录名转换成安全、可读且稳定的 slug。"""
+    """Turn a workspace directory name into a safe, readable, stable slug."""
     name = Path(path).name
     chunks: list[str] = []
     separator_pending = False
@@ -62,7 +62,7 @@ def workspace_slug(path: Path | str) -> str:
 
 
 def default_data_root() -> Path:
-    """返回默认 Mica 数据根目录；仅在调用时读取 HOME。"""
+    """Return the default Mica data root; HOME is read only when called."""
     return Path.home() / ".mica"
 
 
@@ -85,7 +85,7 @@ def _find_git_root(start: Path) -> Path | None:
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceIdentity:
-    """不可变的规范工作区身份，不包含数据目录职责。"""
+    """Immutable canonical workspace identity; does not own data-directory duties."""
 
     workspace_path: Path
     workspace_id: str
@@ -122,7 +122,8 @@ class WorkspaceIdentity:
 
 
 def resolve_workspace(start_dir: Path | str | os.PathLike[str]) -> WorkspaceIdentity:
-    """从显式启动目录解析最近 Git 根或非 Git 工作区。"""
+    """Resolve the nearest Git root, or a non-Git workspace, from an explicit start
+    directory."""
     try:
         candidate = Path(start_dir)
     except (TypeError, ValueError, OSError):

@@ -1,4 +1,4 @@
-"""供应商无关的公共工具数据契约。"""
+"""Provider-agnostic public tool data contracts."""
 
 from __future__ import annotations
 
@@ -87,7 +87,7 @@ def _freeze_json_object(value: object, field_name: str) -> JsonObject:
 
 
 def to_mutable_json(value: JsonValue) -> MutableJsonValue:
-    """把 P4 不可变 JSON 快照递归复制为标准可变 JSON 值。"""
+    """Recursively copy an immutable JSON snapshot into standard mutable JSON values."""
 
     def copy_snapshot(current: object, active: set[int]) -> MutableJsonValue:
         if current is None or isinstance(current, (bool, str)):
@@ -126,7 +126,7 @@ def to_mutable_json(value: JsonValue) -> MutableJsonValue:
 
 
 class ToolResultStatus(Enum):
-    """工具执行结果的稳定 wire 状态。"""
+    """Stable wire status of a tool execution result."""
 
     SUCCESS = "success"
     INVALID_ARGUMENTS = "invalid_arguments"
@@ -138,7 +138,7 @@ class ToolResultStatus(Enum):
 
 @dataclass(frozen=True, slots=True)
 class ToolSpec:
-    """向模型公开的工具定义快照。"""
+    """Tool definition snapshot exposed to the model."""
 
     name: str
     description: str
@@ -156,7 +156,7 @@ class ToolSpec:
 
 @dataclass(frozen=True, slots=True)
 class ToolCall:
-    """Provider 已完整组装的一次工具调用。"""
+    """One tool call already fully assembled by the provider."""
 
     call_id: str
     name: str
@@ -172,7 +172,7 @@ class ToolCall:
 
 @dataclass(frozen=True, slots=True)
 class ToolRequest:
-    """Engine 交给工具系统的一次已组装请求。"""
+    """One assembled request the engine hands to the tool system."""
 
     call_id: str
     name: str
@@ -188,7 +188,7 @@ class ToolRequest:
 
 @dataclass(frozen=True, slots=True)
 class ToolResult:
-    """工具系统返回的结构化、安全结果。"""
+    """Structured, sanitized result returned by the tool system."""
 
     call_id: str
     tool_name: str

@@ -1,4 +1,4 @@
-"""Engine 与前端之间共享的最小交互响应。"""
+"""Minimal interaction responses shared between the engine and the frontend."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ def _validate_interaction_id(value: object) -> None:
 
 
 class PermissionAnswer(Enum):
-    """权限请求只允许对本次调用作答。"""
+    """Permission requests can only answer for the current call."""
 
     ALLOW_ONCE = "allow_once"
     DENY = "deny"
@@ -27,7 +27,7 @@ class PermissionAnswer(Enum):
 
 @dataclass(frozen=True, slots=True)
 class PermissionResponse:
-    """对一个权限交互的一次性响应。"""
+    """One-shot response to a permission interaction."""
 
     interaction_id: str
     answer: PermissionAnswer
@@ -39,7 +39,7 @@ class PermissionResponse:
 
 
 class InteractionKind(Enum):
-    """前端需要回答的交互类型。"""
+    """Interaction kinds the frontend must answer."""
 
     PERMISSION = "permission"
     USER_INPUT = "user_input"
@@ -54,7 +54,7 @@ def _validate_nonblank_string(name: str, value: object) -> None:
 
 @dataclass(frozen=True, slots=True)
 class AskOption:
-    """前端无关的一个结构化 ask 选项。"""
+    """One frontend-agnostic structured ask option."""
 
     label: str
     description: str | None = None
@@ -70,7 +70,7 @@ class AskOption:
 
 @dataclass(frozen=True, slots=True)
 class AskPrompt:
-    """前端无关的结构化 ask 请求内容。"""
+    """Frontend-agnostic structured ask request content."""
 
     question: str
     title: str | None = None
@@ -97,7 +97,7 @@ class AskPrompt:
 
 @dataclass(frozen=True, slots=True)
 class InteractionRequest:
-    """不含运行时对象的、可供前端展示的交互请求快照。"""
+    """Frontend-renderable interaction request snapshot without runtime objects."""
 
     interaction_id: str
     kind: InteractionKind
@@ -134,7 +134,7 @@ class _PendingInteraction:
 
 
 class InteractionBroker:
-    """前端无关的单次交互等待与响应入口。"""
+    """Frontend-agnostic entry point for waiting on and answering single interactions."""
 
     def __init__(self, interaction_id_factory: Callable[[], str] | None = None) -> None:
         self._interaction_id_factory = interaction_id_factory or (
@@ -146,11 +146,11 @@ class InteractionBroker:
 
     @property
     def pending_count(self) -> int:
-        """当前仍等待响应的交互数，供清理和诊断测试使用。"""
+        """Number of interactions still awaiting a response, used for cleanup and diagnostics."""
         return len(self._pending)
 
     async def next_request(self) -> InteractionRequest:
-        """取得下一个仍然活动的前端交互请求。"""
+        """Get the next still-active frontend interaction request."""
         while True:
             request = await self._requests.get()
             if request.interaction_id in self._pending:
@@ -163,7 +163,7 @@ class InteractionBroker:
         message: str,
         cancellation: CancellationToken,
     ) -> PermissionResponse:
-        """登记权限请求并等待匹配的 PermissionResponse。"""
+        """Register a permission request and await the matching ``PermissionResponse``."""
         interaction_id = self._new_interaction_id()
         response = await self._request(
             InteractionRequest(
@@ -185,7 +185,7 @@ class InteractionBroker:
         prompt: AskPrompt | str,
         cancellation: CancellationToken,
     ) -> UserInputResponse:
-        """实现 UserInputRequester 协议并等待匹配回答。"""
+        """Implement the ``UserInputRequester`` protocol and await the matching answer."""
         if isinstance(prompt, str):
             prompt = AskPrompt(prompt)
         elif not isinstance(prompt, AskPrompt):
@@ -220,7 +220,8 @@ class InteractionBroker:
         return await self.request_user_input(interaction_id, prompt, cancellation)
 
     def respond(self, response: PermissionResponse | UserInputResponse) -> bool:
-        """提交一次响应；错误类型、ID、重复和迟到响应均返回 False。"""
+        """Submit one response; wrong type, unknown id, duplicate, and late responses all
+        return False."""
         if not isinstance(response, (PermissionResponse, UserInputResponse)):
             return False
         pending = self._pending.get(response.interaction_id)
@@ -258,7 +259,7 @@ class InteractionBroker:
         return True
 
     def clear(self) -> None:
-        """取消并移除当前 Run 的所有等待者，迟到响应自动失效。"""
+        """Cancel and remove all waiters of the current run; late responses stop matching."""
         pending = tuple(self._pending.values())
         self._pending.clear()
         for item in pending:
@@ -313,7 +314,7 @@ class InteractionBroker:
 
 @dataclass(frozen=True, slots=True)
 class UserInputResponse:
-    """对一个用户输入交互的文本响应。"""
+    """Text response to one user-input interaction."""
 
     interaction_id: str
     answer: str

@@ -1,4 +1,4 @@
-"""显式加载并组装 Mica 内置系统提示词。"""
+"""Explicitly load and assemble the built-in Mica system prompt."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ _TEMPLATE_PLACEHOLDER = "{{ENVIRONMENT_CONTEXT}}"
 
 
 class SystemPromptError(Exception):
-    """内置系统提示词无法安全加载或组装。"""
+    """The built-in system prompt cannot be loaded or assembled safely."""
 
 
 def _load_template() -> str:
@@ -82,7 +82,7 @@ def build_system_prompt(
     timezone_name: str | None = None,
     template_text: str | None = None,
 ) -> str:
-    """在显式调用时读取资源并返回一次性的不可变提示词字符串。"""
+    """Load resources on each explicit call and return a fresh immutable prompt string."""
     if not isinstance(workspace, WorkspaceIdentity):
         raise TypeError("workspace must be a WorkspaceIdentity")
     try:

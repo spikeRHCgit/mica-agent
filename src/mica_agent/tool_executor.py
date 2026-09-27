@@ -1,4 +1,4 @@
-"""统一的、供应商无关的工具执行入口。"""
+"""Unified, provider-agnostic tool execution entry point."""
 
 from __future__ import annotations
 
@@ -78,7 +78,8 @@ def _result(
 
 
 class ToolExecutor:
-    """工具查找、校验、授权和 handler 调用的唯一公共入口。"""
+    """Single public entry point for tool lookup, validation, authorization, and handler
+    invocation."""
 
     def __init__(
         self,
@@ -111,17 +112,17 @@ class ToolExecutor:
 
     @property
     def output_reporter(self) -> ToolOutputReporter:
-        """返回当前工具调用的同步安全输出路由入口。"""
+        """Return the synchronous safe-output route for the current tool call."""
         return self._report_output
 
     @property
     def tool_specs(self) -> tuple[ToolSpec, ...]:
-        """返回仅含公开工具定义的确定性不可变快照。"""
+        """Return a deterministic immutable snapshot of public tool specs only."""
         return tuple(self._registry.specs())
 
     @property
     def interaction_broker(self) -> InteractionBroker:
-        """Engine 或前端用来观察请求和提交响应的 broker。"""
+        """Broker the engine or frontend uses to observe requests and submit responses."""
         return self._interaction_broker
 
     def _report_output(self, call_id: str, tool_name: str, safe_text: str) -> None:
@@ -143,7 +144,7 @@ class ToolExecutor:
         on_finished: LifecycleCallback | None = None,
         on_output: ToolOutputReporter | None = None,
     ) -> ToolResult:
-        """执行一次 ToolRequest；所有失败均转换为安全 ToolResult。"""
+        """Execute one ``ToolRequest``; every failure becomes a safe ``ToolResult``."""
 
         if not isinstance(request, ToolRequest):
             raise TypeError("request must be a ToolRequest")

@@ -1,4 +1,4 @@
-"""会话业务语义边界，建立在 Workspace 与 JSONL Store 之上。"""
+"""Session business-semantics boundary built on the workspace and the JSONL store."""
 
 from __future__ import annotations
 
@@ -30,11 +30,11 @@ from .session_contracts import (
 
 
 class SessionServiceError(SessionError):
-    """会话业务规则错误。"""
+    """Session business-rule error."""
 
 
 class NoHealthySessionError(SessionServiceError):
-    """当前工作区没有可用的健康会话。"""
+    """No healthy session is available in the current workspace."""
 
     def __init__(self, problems: Iterable[ScanProblem] = ()) -> None:
         super().__init__("no healthy session in the current workspace")
@@ -42,7 +42,7 @@ class NoHealthySessionError(SessionServiceError):
 
 
 class TurnNotFoundError(SessionServiceError):
-    """回退目标轮次不存在。"""
+    """The rewind target turn does not exist."""
 
     def __init__(self, turn_id: str) -> None:
         super().__init__(f"turn not found: {turn_id}")
@@ -51,7 +51,7 @@ class TurnNotFoundError(SessionServiceError):
 
 @dataclass(frozen=True, slots=True)
 class SessionListResult:
-    """当前工作区的健康会话和扫描诊断。"""
+    """Healthy sessions and scan diagnostics for the current workspace."""
 
     sessions: tuple[StoredSession, ...]
     problems: tuple[ScanProblem, ...]
@@ -59,7 +59,7 @@ class SessionListResult:
 
 @dataclass(frozen=True, slots=True)
 class CleanupResult:
-    """一次过期清理的确定性结果。"""
+    """Deterministic outcome of one expiry cleanup pass."""
 
     deleted_session_ids: tuple[str, ...]
     skipped_current_session_ids: tuple[str, ...]
@@ -69,7 +69,7 @@ class CleanupResult:
 
 
 class SessionService:
-    """拥有会话创建、变更、上下文和生命周期清理语义的业务服务。"""
+    """Business service owning session creation, mutation, context, and cleanup semantics."""
 
     CLEANUP_AGE = timedelta(days=30)
 
@@ -137,7 +137,7 @@ class SessionService:
         return max(meta.updated_at, self._current_time(), latest_entry_at)
 
     def create_session(self, title: str = "") -> StoredSession:
-        """创建并持久化一个当前工作区的空会话。"""
+        """Create and persist an empty session in the current workspace."""
         created_at = self._current_time()
         meta = SessionMeta(
             session_id=self._new_session_id(),
@@ -167,13 +167,13 @@ class SessionService:
         return result.sessions[0]
 
     def commit_turn(self, session_id: str, turn: TurnEntry) -> StoredSession:
-        """只提交已经完整构造并通过契约校验的一轮。"""
+        """Commit only a turn that is fully constructed and contract-validated."""
         return self.store.append_turn(session_id, turn)
 
     def commit_checkpoint(
         self, session_id: str, checkpoint: RunCheckpoint
     ) -> StoredSession:
-        """提交一个独立于成功轮次的中断检查点。"""
+        """Commit an interruption checkpoint independent of any successful turn."""
         return self.store.append_checkpoint(session_id, checkpoint)
 
     def rename_session(self, session_id: str, title: str) -> StoredSession:
@@ -350,7 +350,7 @@ class SessionService:
         current_session_id: str | None = None,
         now: datetime | None = None,
     ) -> CleanupResult:
-        """非阻塞清理超过 30 天未活动的健康会话。"""
+        """Non-blocking cleanup of healthy sessions inactive longer than ``CLEANUP_AGE``."""
         protected = self._session_ids(protected_session_ids)
         protected.update(self._session_ids(current_session_ids))
         if current_session_id is not None:
