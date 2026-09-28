@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from contextvars import ContextVar
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import mkdtemp
 
 import httpx
 import pytest
@@ -76,16 +77,16 @@ from mica_agent.tool_presentation import (
 from mica_agent.tool_registry import ToolRegistry
 from mica_agent.workspace import resolve_workspace
 
-_TEST_TEMP_DIRS: list[TemporaryDirectory[str]] = []
+_TEST_TEMP_ROOT: ContextVar[Path] = ContextVar("_TEST_TEMP_ROOT")
 
 
 @pytest.fixture(autouse=True)
-def _cleanup_test_tempdirs():
+def _provide_test_temp_root(tmp_path: Path) -> Iterator[None]:
+    token = _TEST_TEMP_ROOT.set(tmp_path)
     try:
         yield
     finally:
-        while _TEST_TEMP_DIRS:
-            _TEST_TEMP_DIRS.pop().cleanup()
+        _TEST_TEMP_ROOT.reset(token)
 
 
 class _ScriptedProvider:
@@ -106,20 +107,14 @@ class _ScriptedProvider:
         self.aclose_calls += 1
 
 
-def _make_session_components(
-    provider: object,
-) -> tuple[SessionService, str, ContextBuilder]:
-    tempdir = TemporaryDirectory(prefix="mica-app-test-")
-    _TEST_TEMP_DIRS.append(tempdir)
-    root = Path(tempdir.name)
+def _make_session_components() -> tuple[SessionService, str, ContextBuilder]:
+    root = Path(mkdtemp(prefix="app-", dir=_TEST_TEMP_ROOT.get()))
     workspace_path = root / "workspace"
     workspace_path.mkdir()
     data_root = root / "mica-data"
     workspace = resolve_workspace(workspace_path)
     service = SessionService(JsonlSessionStore(workspace, data_root))
     session = service.create_session()
-    # Keep the temporary directory alive for the duration of the provider/app.
-    provider._mica_test_tempdir = tempdir  # type: ignore[attr-defined]
     return (
         service,
         session.meta.session_id,
@@ -139,7 +134,7 @@ def _make_app(
     checkpoint_id_factory=None,
     tool_executor: ToolExecutor | None = None,
 ) -> MicaApp:
-    service, session_id, context_builder = _make_session_components(provider)
+    service, session_id, context_builder = _make_session_components()
     run_number = 0
 
     def run_id_factory() -> str:
@@ -280,7 +275,7 @@ def test_reasoning_is_visible_per_run_but_not_saved_or_restored() -> None:
             ]
         ]
     )
-    service, session_id, builder = _make_session_components(provider)
+    service, session_id, builder = _make_session_components()
     app = MicaApp(
         provider,
         "test-model",
@@ -373,7 +368,7 @@ def test_consumer_closing_app_after_reasoning_cleans_stream_and_history() -> Non
 
     async def scenario() -> tuple[MicaApp, Provider, list[EngineEvent]]:
         provider = Provider()
-        service, session_id, builder = _make_session_components(provider)
+        service, session_id, builder = _make_session_components()
         app = MicaApp(
             provider,
             "test-model",
@@ -437,7 +432,7 @@ def test_tool_run_commits_one_complete_turn_and_restores_full_history() -> None:
             [ProviderTextDelta("final answer"), Finish()],
         ]
     )
-    service, session_id, context_builder = _make_session_components(provider)
+    service, session_id, context_builder = _make_session_components()
     context_builder.data_root.mkdir(exist_ok=True)
     context_builder.data_root.joinpath("AGENTS.md").write_text(
         "global tool rules", encoding="utf-8"
@@ -516,7 +511,7 @@ def test_storage_failure_after_side_effect_warns_and_keeps_session_unchanged(
             [ProviderTextDelta("done"), Finish()],
         ]
     )
-    service, session_id, context_builder = _make_session_components(provider)
+    service, session_id, context_builder = _make_session_components()
     path = service.store.path_for_session(session_id)
     before = path.read_bytes()
     app = MicaApp(
@@ -671,7 +666,7 @@ def test_respond_interaction_forwards_only_current_matching_response() -> None:
             [Finish()],
         ]
     )
-    service, session_id, builder = _make_session_components(provider)
+    service, session_id, builder = _make_session_components()
     app = MicaApp(
         provider,
         "test-model",
@@ -782,7 +777,7 @@ def test_app_freezes_header_once_but_refreshes_history_for_each_run(
             [ProviderTextDelta("answer two"), Finish()],
         ]
     )
-    service, session_id, builder = _make_session_components(provider)
+    service, session_id, builder = _make_session_components()
     builder.data_root.mkdir(exist_ok=True)
     global_path = builder.data_root / "AGENTS.md"
     workspace_path = builder.workspace.workspace_path / "AGENTS.md"
@@ -861,7 +856,7 @@ def test_default_system_prompt_is_built_once_across_midnight(
     import mica_agent.app as app_module
 
     provider = _ScriptedProvider([[Finish()], [Finish()]])
-    service, session_id, builder = _make_session_components(provider)
+    service, session_id, builder = _make_session_components()
     dates = iter(("2026-08-28", "2026-08-29"))
     prompt_calls = 0
 
@@ -906,7 +901,7 @@ def test_prebuilt_context_snapshot_is_used_without_rebuilding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = _ScriptedProvider([[Finish()]])
-    service, session_id, builder = _make_session_components(provider)
+    service, session_id, builder = _make_session_components()
     snapshot = ContextBuildResult(
         messages=(
             Message(
@@ -1495,7 +1490,7 @@ def test_full_stack_via_openai_provider_and_mock_transport() -> None:
         base_url="https://api.example.test/v1",
         transport=httpx.MockTransport(handler),
     )
-    service, session_id, context_builder = _make_session_components(provider)
+    service, session_id, context_builder = _make_session_components()
     run_number = 0
 
     def run_id_factory() -> str:
