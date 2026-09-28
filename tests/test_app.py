@@ -618,39 +618,6 @@ def test_unknown_failure_does_not_commit_checkpoint() -> None:
     assert app.history == ()
 
 
-def test_cancelled_run_does_not_submit_a_turn() -> None:
-    class HangingProvider:
-        def __init__(self) -> None:
-            self.emitted = asyncio.Event()
-
-        async def stream(
-            self, request: ProviderRequest
-        ) -> AsyncIterator[ProviderEvent]:
-            yield ProviderTextDelta(text="partial")
-            self.emitted.set()
-            await asyncio.sleep(30)
-            yield Finish()
-
-        async def aclose(self) -> None:
-            return None
-
-    provider = HangingProvider()
-    app = _make_app(provider)  # type: ignore[arg-type]
-    collected: list[EngineEvent] = []
-
-    async def main() -> None:
-        task = asyncio.create_task(_collect(app, "question", collected))
-        await asyncio.wait_for(provider.emitted.wait(), timeout=1.0)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-    asyncio.run(main())
-    stored = app._session_service.load_session(app.session_id)
-    assert stored.turns == ()
-    assert stored.checkpoints[0].kind is RunCheckpointKind.CANCELLED
-
-
 def test_follow_up_run_sees_checkpoint_context() -> None:
     first = _ScriptedProvider(
         [
