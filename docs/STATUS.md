@@ -8,7 +8,7 @@
 > - 只写当前状态，控制在约 80 行；历史查 Git、任务卡提交记录和构建日志。
 > - 本文与实际文件或 Git 冲突时，以实际文件和 Git 为准，并立即修正本文。
 
-更新：2026-09-28 · `T-008` 待外部 worker 接单 · 下一个任务 ID：`T-009` · 下一个决策 ID：`D-015`
+更新：2026-09-28 · `T-009` 待外部 worker 接单 · 下一个任务 ID：`T-010` · 下一个决策 ID：`D-015`
 
 ## 当前主线
 
@@ -28,7 +28,8 @@ Phase 1～5 已完成，Phase 6 暂不启动（D-006）。代码治理计划见
 
 | ID | 标题 | 负责 | 分支 / worktree | 写入范围 | 状态 |
 |---|---|---|---|---|---|
-| T-008 | Provider transport 测试收口 | 外部 worker | `task/T-008-provider-transport-tests` / `../mica-wt/T-008` | Provider transport 三个测试文件 | 待开始 |
+| T-008 | Provider transport 测试收口 | 外部 worker | `task/T-008-provider-transport-tests` / `../mica-wt/T-008` | Provider transport 三个测试文件 | 实现审查通过，待 T-009 解阻全量验收 |
+| T-009 | CLI 交互持久化偶发失败诊断 | 外部 worker | `task/T-009-cli-storage-flake` / `../mica-wt/T-009` | `tests/test_cli_interactive.py` | 待开始 |
 
 ## 待用户决策
 
@@ -40,8 +41,9 @@ Phase 1～5 已完成，Phase 6 暂不启动（D-006）。代码治理计划见
 
 ## 下一步
 
-外部 worker 按 `docs/tasks/T-008.md` 把旧 Provider transport 测试中的独有边界迁入行为归属文件，
-逐项证明重复覆盖后删除旧测试文件；不得修改 Provider 产品代码或损失资源、安全与重试边界。
+外部 worker 按 `docs/tasks/T-009.md` 先区分 CLI 偶发 `session persistence failed` 来自完成快照不变量
+还是实际存储异常；只有根因已证明位于测试装配时才修改测试。T-009 验收后，再把 T-008 更新到最新
+`main` 并补做一次组合全量验收。
 
 ## 最近完成
 
