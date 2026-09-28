@@ -8,7 +8,7 @@
 > - 只写当前状态，控制在约 80 行；历史查 Git、任务卡提交记录和构建日志。
 > - 本文与实际文件或 Git 冲突时，以实际文件和 Git 为准，并立即修正本文。
 
-更新：2026-09-28 · `T-011` 待外部 worker 接单 · 下一个任务 ID：`T-012` · 下一个决策 ID：`D-015`
+更新：2026-09-28 · `T-011` 迁移完成、验收阻塞于 Windows subprocess transport 创建者定位 · 下一个任务 ID：`T-012` · 下一个决策 ID：`D-015`
 
 ## 当前主线
 
@@ -28,7 +28,7 @@ Phase 1～5 已完成，Phase 6 暂不启动（D-006）。代码治理计划见
 
 | ID | 标题 | 负责 | 分支 / worktree | 写入范围 | 状态 |
 |---|---|---|---|---|---|
-| T-011 | App/checkpoint 生命周期测试收口 | 外部 worker | `task/T-011-app-checkpoint-tests` / `../mica-wt/T-011` | `test_app.py`、旧 P5-10G 测试与新 tool-session 测试 | 待开始 |
+| T-011 | App/checkpoint 生命周期测试收口 | 外部 worker | `task/T-011-app-checkpoint-tests` / `../mica-wt/T-011` | `test_app.py`、旧 P5-10G 测试与新 tool-session 测试 | 阻塞：追踪未关闭 subprocess transport 的创建者 |
 
 ## 待用户决策
 
@@ -36,12 +36,14 @@ Phase 1～5 已完成，Phase 6 暂不启动（D-006）。代码治理计划见
 
 ## 阻塞
 
-无。
+- `T-011` 首次全量出现 `_WindowsSubprocessTransport ... running`；当前只确认三个失败 node 是警告观察点，
+  尚未确认真实创建者。已允许一次带 PID / pytest node / transport 生命周期追踪的全量诊断，禁止原样重跑碰运气。
 
 ## 下一步
 
-外部 worker 按 `docs/tasks/T-011.md` 收口 App/checkpoint 生命周期测试：区分运行中 token 取消与外部
-task 取消，把重复的恢复和可恢复失败证据并入完整场景，并把独有的工具批次 checkpoint 迁入行为命名模块。
+外部 worker 继续 `docs/tasks/T-011.md` 的 L1 诊断调整：在当前 T-011 worktree 运行一次带仓库外诊断钩子的
+全量测试，以 PID 反查未关闭 Windows subprocess transport 的创建 node。定位前不修改范围外代码或测试，
+也不新开修复任务。
 
 T-008 首次全量中曾出现一次 `session persistence failed`，但当次缺少足以确定完成快照、`TurnEntry` 或
 store 分支的现场。T-009 已证明另一条 Provider cleanup `WinError 145` 与它无因果关系；若前者再次出现，
