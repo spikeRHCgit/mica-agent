@@ -15,9 +15,10 @@ import json
 import os
 import subprocess
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from contextvars import ContextVar
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import mkdtemp
 
 import pytest
 
@@ -44,6 +45,16 @@ from mica_agent.workspace import resolve_workspace
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC = PROJECT_ROOT / "src"
 SECRET_KEY = "sk-test-secret-123456"
+_TEST_TEMP_ROOT: ContextVar[Path] = ContextVar("_TEST_TEMP_ROOT")
+
+
+@pytest.fixture(autouse=True)
+def _provide_test_temp_root(tmp_path: Path) -> Iterator[None]:
+    token = _TEST_TEMP_ROOT.set(tmp_path)
+    try:
+        yield
+    finally:
+        _TEST_TEMP_ROOT.reset(token)
 
 
 def clean_environment() -> dict[str, str]:
@@ -81,9 +92,6 @@ class ScriptedProvider:
 
     async def aclose(self) -> None:
         self.aclose_calls += 1
-        tempdir = getattr(self, "_mica_test_tempdir", None)
-        if tempdir is not None:
-            tempdir.cleanup()
 
 
 class HangingProvider:
@@ -103,9 +111,6 @@ class HangingProvider:
 
     async def aclose(self) -> None:
         self.aclose_calls += 1
-        tempdir = getattr(self, "_mica_test_tempdir", None)
-        if tempdir is not None:
-            tempdir.cleanup()
 
 
 class InputScript:
@@ -137,17 +142,13 @@ class Recorder:
         return "".join(self.calls)
 
 
-def make_session_dependencies(
-    provider: object,
-) -> tuple[SessionService, ContextBuilder]:
-    tempdir = TemporaryDirectory(prefix="mica-cli-test-")
-    root = Path(tempdir.name)
+def make_session_dependencies() -> tuple[SessionService, ContextBuilder]:
+    root = Path(mkdtemp(prefix="cli-", dir=_TEST_TEMP_ROOT.get()))
     workspace_path = root / "workspace"
     workspace_path.mkdir()
     data_root = root / "mica-data"
     workspace = resolve_workspace(workspace_path)
     service = SessionService(JsonlSessionStore(workspace, data_root))
-    provider._mica_test_tempdir = tempdir  # type: ignore[attr-defined]
     return service, ContextBuilder(data_root=data_root, workspace=workspace)
 
 
@@ -157,7 +158,7 @@ async def run_core(
 ) -> tuple[int, Recorder, Recorder]:
     out = Recorder()
     err = Recorder()
-    service, context_builder = make_session_dependencies(provider)
+    service, context_builder = make_session_dependencies()
     code = await run_interactive(
         "https://api.example.test/v1",
         SECRET_KEY,
@@ -582,7 +583,7 @@ def test_ctrl_c_during_active_run_cancels_stream_and_exits() -> None:
     provider = HangingProvider()
     out = Recorder()
     err = Recorder()
-    service, context_builder = make_session_dependencies(provider)
+    service, context_builder = make_session_dependencies()
 
     async def main() -> int:
         partial_written = asyncio.Event()
@@ -733,7 +734,7 @@ def test_cancelled_run_without_text_keeps_stdout_empty() -> None:
     provider = HangingProvider(emit_delta=False)
     out = Recorder()
     err = Recorder()
-    service, context_builder = make_session_dependencies(provider)
+    service, context_builder = make_session_dependencies()
 
     async def main() -> int:
         task = asyncio.create_task(
