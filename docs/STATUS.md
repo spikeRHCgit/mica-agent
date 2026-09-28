@@ -8,7 +8,7 @@
 > - 只写当前状态，控制在约 80 行；历史查 Git、任务卡提交记录和构建日志。
 > - 本文与实际文件或 Git 冲突时，以实际文件和 Git 为准，并立即修正本文。
 
-更新：2026-09-28 · `T-005` 实现审查通过、等待 `T-006` 解除验收阻塞 · 下一个任务 ID：`T-007` · 下一个决策 ID：`D-015`
+更新：2026-09-28 · `T-007` 待外部 worker 接单 · 下一个任务 ID：`T-008` · 下一个决策 ID：`D-015`
 
 ## 当前主线
 
@@ -28,8 +28,7 @@ Phase 1～5 已完成，Phase 6 暂不启动（D-006）。代码治理计划见
 
 | ID | 标题 | 负责 | 分支 / worktree | 写入范围 | 状态 |
 |---|---|---|---|---|---|
-| T-005 | App 取消检查点测试去重 | 外部 worker | `task/T-005-app-test-dedup` / `../mica-wt/T-005` | `tests/test_app.py` | 阻塞：待 T-006 后补齐全量验收 |
-| T-006 | 包资源 LF 检出契约 | 外部 worker | `task/T-006-package-resource-eol` / `../mica-wt/T-006` | `.gitattributes`、`src/mica_agent/prompts/system.md` 物理换行 | 待开始 |
+| T-007 | App 测试临时目录清理竞态 | 外部 worker | `task/T-007-app-tempdir-cleanup` / `../mica-wt/T-007` | `tests/test_app.py` | 待开始 |
 
 ## 待用户决策
 
@@ -37,17 +36,19 @@ Phase 1～5 已完成，Phase 6 暂不启动（D-006）。代码治理计划见
 
 ## 阻塞
 
-- T-005 的目标删除、AST、收集项和聚焦测试已通过审查；新建 Windows worktree 在全量测试中暴露
-  `system.md` 被 `core.autocrlf=true` 检出为 CRLF，而测试和包资源要求精确 LF。T-006 先建立仓库级
-  检出契约，完成后再收口 T-005。
+无。
 
 ## 下一步
 
-外部 worker 按 `docs/tasks/T-006.md` 建立包资源的 LF 检出契约；完成后由 master 审查工作树字节、
-构建产物和全量验证，再依次收口 T-006 与 T-005。Provider transport 合并顺延为 T-007。
+外部 worker 按 `docs/tasks/T-007.md` 先定位并修复 App 测试临时目录清理竞态；不得用重试、固定等待或
+吞错掩盖。Provider transport 合并顺延为 T-008。
 
 ## 最近完成
 
+- 2026-09-28：T-006 为系统提示词包资源建立路径级 LF 检出契约，新 Windows worktree 与构建产物
+  字节验收通过（`7cfcbfe`）。
+- 2026-09-28：T-005 删除一处被严格超集覆盖的 App 取消测试；组合主线全量验证为
+  `1775 passed, 2 skipped`（`c7751ce`、`a538040`）。
 - 2026-09-28：T-004 测试资产重编目与精简批次设计通过审查并合并（`3b158a9`）。
 - 2026-09-27：T-003 源码非正式说明字符串清理通过审查并合并（`d3ed7ee`）。
 - 2026-09-27：T-002 TUI 产品源码注释与 docstring 修整通过审查并合并（`7355588`）。
