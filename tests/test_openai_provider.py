@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator, Callable
 
 import httpx
 import pytest
+from sse_transport_helpers import RecordingTransport, sse_response
 
 from mica_agent.models import Message, MessageRole
 from mica_agent.providers import (
@@ -148,20 +149,35 @@ def test_provider_conforms_to_extended_protocol_with_aclose() -> None:
     asyncio.run(provider.aclose())  # 幂等
 
 
-def test_request_uses_post_with_resolved_endpoint() -> None:
+@pytest.mark.parametrize(
+    ("base_url", "expected_url"),
+    [
+        (
+            "https://api.example.com/v1",
+            "https://api.example.com/v1/chat/completions",
+        ),
+        (
+            "https://api.example.com/v1/chat/completions",
+            "https://api.example.com/v1/chat/completions",
+        ),
+    ],
+)
+def test_request_uses_post_with_resolved_endpoint(
+    base_url: str, expected_url: str
+) -> None:
     captured: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["request"] = request
         return httpx.Response(200, text="data: [DONE]\n\n", request=request)
 
-    provider = make_provider(handler)
+    provider = make_provider(handler, base_url=base_url)
     _run_collect(provider, _make_request())
 
     request = captured["request"]
     assert isinstance(request, httpx.Request)
     assert request.method == "POST"
-    assert request.url == "https://api.example.com/v1/chat/completions"
+    assert str(request.url) == expected_url
 
 
 def test_request_carries_auth_and_json_headers() -> None:
@@ -188,11 +204,19 @@ def test_request_body_uses_wire_roles_and_stream_flag() -> None:
         return httpx.Response(200, text="data: [DONE]\n\n", request=request)
 
     provider = make_provider(handler)
-    _run_collect(provider, _make_request())
+    request = ProviderRequest(
+        model="gpt-test",
+        messages=(
+            Message(MessageRole.SYSTEM, "你是助手"),
+            Message(MessageRole.USER, "line1\nline2 😀"),
+            Message(MessageRole.ASSISTANT, 'say "hi"'),
+        ),
+    )
+    _run_collect(provider, request)
 
-    request = captured["request"]
-    assert isinstance(request, httpx.Request)
-    body = request.read()
+    http_request = captured["request"]
+    assert isinstance(http_request, httpx.Request)
+    body = http_request.read()
     payload = json.loads(body)
     assert set(payload) == {"model", "messages", "stream"}
     assert payload["model"] == "gpt-test"
@@ -203,9 +227,9 @@ def test_request_body_uses_wire_roles_and_stream_flag() -> None:
     assert "tools" not in payload
     assert "tool_choice" not in payload
     assert payload["messages"] == [
-        {"role": "system", "content": "be brief"},
-        {"role": "user", "content": "hello"},
-        {"role": "assistant", "content": "hi there"},
+        {"role": "system", "content": "你是助手"},
+        {"role": "user", "content": "line1\nline2 😀"},
+        {"role": "assistant", "content": 'say "hi"'},
     ]
 
 
@@ -1326,7 +1350,6 @@ def test_finish_reason_then_done_yields_single_finish() -> None:
     [
         (401, AuthenticationError),
         (403, AuthenticationError),
-        (408, ProviderTimeoutError),
         (429, RateLimitError),
         (500, TemporaryServerError),
         (502, TemporaryServerError),
@@ -1346,7 +1369,37 @@ def test_http_status_error_mapping(
     assert isinstance(events[0].error, error_type)
 
 
-@pytest.mark.parametrize("status", [400, 404, 422])
+def test_http_408_timeout_is_retried_and_preserves_classification() -> None:
+    calls = 0
+    sleep_calls: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(408, request=request)
+
+    async def recorded_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    provider = OpenAICompatibleProvider(
+        api_key="test-api-key",
+        base_url="https://api.example.com/v1",
+        transport=httpx.MockTransport(handler),
+        max_retries=1,
+        retry_backoff=0.5,
+        sleep=recorded_sleep,
+    )
+
+    events = _run_collect(provider, _make_request())
+
+    assert calls == 2
+    assert sleep_calls == [0.5]
+    assert len(events) == 1
+    assert isinstance(events[0], ProviderErrorEvent)
+    assert isinstance(events[0].error, ProviderTimeoutError)
+
+
+@pytest.mark.parametrize("status", [400, 404, 418, 422])
 def test_other_http_errors_map_to_unknown_provider_error(status: int) -> None:
     provider = make_provider(lambda request: httpx.Response(status, request=request))
 
@@ -1357,11 +1410,19 @@ def test_other_http_errors_map_to_unknown_provider_error(status: int) -> None:
     assert type(events[0].error) is ProviderError
 
 
-def test_error_message_is_short_and_never_echoes_response_body() -> None:
+def test_error_diagnostics_never_echo_nested_sensitive_response_body() -> None:
     provider = make_provider(
         lambda request: httpx.Response(
             500,
-            text='{"error": "boom with secret sk-server-secret-999"}',
+            json={
+                "error": {
+                    "message": (
+                        "invalid api_key=sk-live-secret-123456 "
+                        "Authorization: Bearer sk-top-secret-123456"
+                    )
+                },
+                "trace": {"internal": "full-sensitive-json-payload"},
+            },
             request=request,
         )
     )
@@ -1370,10 +1431,16 @@ def test_error_message_is_short_and_never_echoes_response_body() -> None:
 
     assert len(events) == 1
     assert isinstance(events[0], ProviderErrorEvent)
-    message = str(events[0].error)
-    assert "sk-server-secret-999" not in message
-    assert "boom" not in message
-    assert len(message) < 100
+    rendered = f"{events[0].error!s} {events[0].error!r} {events[0]!r}"
+    for sensitive in (
+        "sk-live-secret-123456",
+        "sk-top-secret-123456",
+        "full-sensitive-json-payload",
+        "Authorization",
+        "trace",
+    ):
+        assert sensitive not in rendered
+    assert len(str(events[0].error)) < 100
 
 
 def test_error_event_is_terminal_and_stream_ends_immediately() -> None:
@@ -1389,16 +1456,22 @@ def test_error_event_is_terminal_and_stream_ends_immediately() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_invalid_json_data_is_malformed_error() -> None:
-    provider = make_provider(
-        lambda request: _sse_response(
+def test_invalid_json_data_is_malformed_error_without_retry() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return _sse_response(
             "data: not-json-at-all\n\n",
             DONE_SSE,
         )
-    )
+
+    provider = make_provider(handler, max_retries=5)
 
     events = _run_collect(provider, _make_request())
 
+    assert calls == 1
     assert [type(event).__name__ for event in events] == ["ProviderErrorEvent"]
     assert isinstance(events[0], ProviderErrorEvent)
     assert isinstance(events[0].error, MalformedResponseError)
@@ -1407,6 +1480,7 @@ def test_invalid_json_data_is_malformed_error() -> None:
 @pytest.mark.parametrize(
     "chunk",
     [
+        'data: {"choices":{}}\n\n',
         'data: {"choices":"nope"}\n\n',
         'data: {"choices":[42]}\n\n',
         'data: {"choices":[{"delta":"nope"}]}\n\n',
@@ -1517,15 +1591,15 @@ def test_retry_count_is_capped() -> None:
         return httpx.Response(500, request=request)
 
     sleep_calls: list[float] = []
-    provider = _make_flaky_provider(handler, max_retries=1, sleep_calls=sleep_calls)
+    provider = _make_flaky_provider(handler, max_retries=2, sleep_calls=sleep_calls)
 
     events = _run_collect(provider, _make_request())
 
-    assert calls["n"] == 2  # 初始尝试 + 1 次重试
+    assert calls["n"] == 3
     assert len(events) == 1
     assert isinstance(events[0], ProviderErrorEvent)
     assert isinstance(events[0].error, TemporaryServerError)
-    assert sleep_calls == [0.5]
+    assert sleep_calls == [0.5, 0.5]
 
 
 def test_auth_error_is_not_retried() -> None:
@@ -1535,7 +1609,7 @@ def test_auth_error_is_not_retried() -> None:
         calls["n"] += 1
         return httpx.Response(401, request=request)
 
-    provider = make_provider(handler, max_retries=3)
+    provider = make_provider(handler, max_retries=5)
 
     events = _run_collect(provider, _make_request())
 
@@ -1571,11 +1645,13 @@ def test_connect_timeout_is_retried_then_succeeds() -> None:
             raise httpx.ConnectTimeout("connection timed out")
         return httpx.Response(200, text=DONE_SSE, request=request)
 
-    provider = make_provider(handler, max_retries=2)
+    sleep_calls: list[float] = []
+    provider = _make_flaky_provider(handler, max_retries=2, sleep_calls=sleep_calls)
 
     events = _run_collect(provider, _make_request())
 
     assert calls["n"] == 2
+    assert sleep_calls == [0.5]
     assert events == [Finish()]
 
 
@@ -1649,7 +1725,7 @@ def test_stream_interrupted_after_response_is_malformed_without_retry() -> None:
         )
 
     sleep_calls: list[float] = []
-    provider = _make_flaky_provider(handler, max_retries=3, sleep_calls=sleep_calls)
+    provider = _make_flaky_provider(handler, max_retries=2, sleep_calls=sleep_calls)
 
     events = _run_collect(provider, _make_request())
 
@@ -1687,19 +1763,24 @@ def test_stream_interrupted_before_any_text_is_malformed_error() -> None:
     assert isinstance(events[0].error, MalformedResponseError)
 
 
-def test_connect_timeout_exhausts_retries_with_timeout_error() -> None:
+@pytest.mark.parametrize(
+    ("max_retries", "expected_requests"),
+    [(1, 2), (2, 3)],
+)
+def test_connect_timeout_exhausts_retries_with_timeout_error(
+    max_retries: int, expected_requests: int
+) -> None:
     calls = {"n": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls["n"] += 1
         raise httpx.ConnectTimeout("connection timed out")
 
-    provider = make_provider(handler, max_retries=2)
+    provider = make_provider(handler, max_retries=max_retries)
 
     events = _run_collect(provider, _make_request())
 
-    # 响应建立前的超时保持原分类并遵守重试上限。
-    assert calls["n"] == 3  # 初始尝试 + 2 次重试
+    assert calls["n"] == expected_requests
     assert len(events) == 1
     assert isinstance(events[0], ProviderErrorEvent)
     assert isinstance(events[0].error, ProviderTimeoutError)
@@ -1745,31 +1826,135 @@ def test_transport_error_before_response_exhausts_retries() -> None:
 # ---------------------------------------------------------------------------
 
 
-class _SlowStream(httpx.AsyncByteStream):
-    """产出第一个事件后挂起的响应流，用于测试取消传播。"""
+class _BlockingStream(httpx.AsyncByteStream):
+    """Yield one event, then expose a deterministic cancellation point."""
+
+    def __init__(self) -> None:
+        self.blocked = asyncio.Event()
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         yield b'data: {"choices":[{"delta":{"content":"a"}}]}\n\n'
-        await asyncio.sleep(30)
-        yield b"data: [DONE]\n\n"
+        self.blocked.set()
+        await asyncio.Event().wait()
+
+
+def _make_recording_provider(
+    transport: RecordingTransport,
+    *,
+    max_retries: int = 0,
+) -> OpenAICompatibleProvider:
+    return OpenAICompatibleProvider(
+        api_key="test-api-key",
+        base_url="https://api.example.com/v1",
+        transport=transport,
+        max_retries=max_retries,
+        sleep=_noop_sleep,
+    )
 
 
 def test_cancellation_propagates_and_is_not_wrapped_as_error_event() -> None:
+    stream = _BlockingStream()
     provider = make_provider(
-        lambda request: httpx.Response(200, stream=_SlowStream(), request=request)
+        lambda request: httpx.Response(200, stream=stream, request=request)
     )
 
     async def main() -> None:
         collected: list[ProviderEvent] = []
         task = asyncio.create_task(_collect(provider, _make_request(), collected))
-        await asyncio.sleep(0.05)
+        await stream.blocked.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+        assert collected == [TextDelta("a")]
         assert not any(isinstance(event, ProviderErrorEvent) for event in collected)
         await provider.aclose()
 
     asyncio.run(main())
+
+
+def test_success_closes_response_and_explicit_aclose_closes_transport() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return sse_response(content=DONE_SSE.encode())
+
+    transport = RecordingTransport(handler)
+    provider = _make_recording_provider(transport)
+
+    async def scenario() -> None:
+        events = await _collect(provider, _make_request())
+
+        assert events == [Finish()]
+        assert transport.responses[0].is_closed
+        assert transport.aclose_count == 0
+        assert all(
+            isinstance(event, (TextDelta, Finish, ProviderErrorEvent))
+            for event in events
+        )
+        assert not any(isinstance(event, httpx.Response) for event in events)
+
+        await provider.aclose()
+        assert transport.aclose_count >= 1
+
+    asyncio.run(scenario())
+
+
+def test_error_closes_response_and_explicit_aclose_closes_transport() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return sse_response(status=500, content=b'{"error":"sensitive"}')
+
+    transport = RecordingTransport(handler)
+    provider = _make_recording_provider(transport, max_retries=1)
+
+    async def scenario() -> None:
+        events = await _collect(provider, _make_request())
+
+        assert len(events) == 1
+        assert isinstance(events[0], ProviderErrorEvent)
+        assert isinstance(events[0].error, TemporaryServerError)
+        assert len(transport.responses) == 2
+        assert all(response.is_closed for response in transport.responses)
+        assert transport.aclose_count == 0
+        assert all(
+            isinstance(event, (TextDelta, Finish, ProviderErrorEvent))
+            for event in events
+        )
+        assert not any(isinstance(event, httpx.Response) for event in events)
+
+        await provider.aclose()
+        assert transport.aclose_count >= 1
+
+    asyncio.run(scenario())
+
+
+def test_cancellation_closes_response_and_explicit_aclose_closes_transport() -> None:
+    stream = _BlockingStream()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return sse_response(content=stream)
+
+    transport = RecordingTransport(handler)
+    provider = _make_recording_provider(transport)
+
+    async def scenario() -> None:
+        collected: list[ProviderEvent] = []
+        task = asyncio.create_task(_collect(provider, _make_request(), collected))
+        await stream.blocked.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert collected == [TextDelta("a")]
+        assert transport.responses[0].is_closed
+        assert transport.aclose_count == 0
+        assert all(
+            isinstance(event, (TextDelta, Finish, ProviderErrorEvent))
+            for event in collected
+        )
+        assert not any(isinstance(event, httpx.Response) for event in collected)
+
+        await provider.aclose()
+        assert transport.aclose_count >= 1
+
+    asyncio.run(scenario())
 
 
 def test_stream_can_be_consumed_multiple_times_with_reused_client() -> None:
