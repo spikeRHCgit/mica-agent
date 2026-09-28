@@ -8,7 +8,7 @@
 > - 只写当前状态，控制在约 80 行；历史查 Git、任务卡提交记录和构建日志。
 > - 本文与实际文件或 Git 冲突时，以实际文件和 Git 为准，并立即修正本文。
 
-更新：2026-09-28 · `T-007` 待外部 worker 接单 · 下一个任务 ID：`T-008` · 下一个决策 ID：`D-015`
+更新：2026-09-28 · `T-008` 待外部 worker 接单 · 下一个任务 ID：`T-009` · 下一个决策 ID：`D-015`
 
 ## 当前主线
 
@@ -28,7 +28,7 @@ Phase 1～5 已完成，Phase 6 暂不启动（D-006）。代码治理计划见
 
 | ID | 标题 | 负责 | 分支 / worktree | 写入范围 | 状态 |
 |---|---|---|---|---|---|
-| T-007 | App 测试临时目录清理竞态 | 外部 worker | `task/T-007-app-tempdir-cleanup` / `../mica-wt/T-007` | `tests/test_app.py` | 待开始 |
+| T-008 | Provider transport 测试收口 | 外部 worker | `task/T-008-provider-transport-tests` / `../mica-wt/T-008` | Provider transport 三个测试文件 | 待开始 |
 
 ## 待用户决策
 
@@ -40,11 +40,13 @@ Phase 1～5 已完成，Phase 6 暂不启动（D-006）。代码治理计划见
 
 ## 下一步
 
-外部 worker 按 `docs/tasks/T-007.md` 先定位并修复 App 测试临时目录清理竞态；不得用重试、固定等待或
-吞错掩盖。Provider transport 合并顺延为 T-008。
+外部 worker 按 `docs/tasks/T-008.md` 把旧 Provider transport 测试中的独有边界迁入行为归属文件，
+逐项证明重复覆盖后删除旧测试文件；不得修改 Provider 产品代码或损失资源、安全与重试边界。
 
 ## 最近完成
 
+- 2026-09-28：T-007 统一 App 测试临时目录所有权，主分支聚焦验证为 `45 passed`，全量一次通过
+  `1775 passed, 2 skipped`（`e73f0f4`）。
 - 2026-09-28：T-006 为系统提示词包资源建立路径级 LF 检出契约，新 Windows worktree 与构建产物
   字节验收通过（`7cfcbfe`）。
 - 2026-09-28：T-005 删除一处被严格超集覆盖的 App 取消测试；组合主线全量验证为

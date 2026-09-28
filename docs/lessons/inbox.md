@@ -19,6 +19,10 @@
 
 <!-- 格式：- YYYY-MM-DD · 来源（任务 ID / 角色 / 日志条目）· 现象与证据 → 建议去向 -->
 
+- 2026-09-28 · T-007 worker · 并行 worktree 中一次结构化替换因使用相对路径误改主工作区，虽已精确
+  恢复且确认主线干净；结构化搜索和替换必须显式绑定目标 worktree 的绝对路径，并在执行后核对变更归属
+  → `docs/ata/worker_practices.md`。
+
 - 2026-09-28 · T-004 测试资产审计 · token cancel、外部 task cancel、consumer `aclose()` 和 UI cancel
   即使产生相同终态，也承担不同的清理与持久化责任；合并测试前必须逐入口确认仍有独立证据 →
   `docs/code_spec.md` §5。
