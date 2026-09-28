@@ -8,7 +8,7 @@
 > - 只写当前状态，控制在约 80 行；历史查 Git、任务卡提交记录和构建日志。
 > - 本文与实际文件或 Git 冲突时，以实际文件和 Git 为准，并立即修正本文。
 
-更新：2026-09-28 · `T-008`、`T-009` 已验收 · 下一个任务 ID：`T-010` · 下一个决策 ID：`D-015`
+更新：2026-09-28 · `T-010` 待外部 worker 接单 · 下一个任务 ID：`T-011` · 下一个决策 ID：`D-015`
 
 ## 当前主线
 
@@ -26,7 +26,9 @@ Phase 1～5 已完成，Phase 6 暂不启动（D-006）。代码治理计划见
 
 ## 进行中任务
 
-无。
+| ID | 标题 | 负责 | 分支 / worktree | 写入范围 | 状态 |
+|---|---|---|---|---|---|
+| T-010 | TUI CLI 路由测试收口 | 外部 worker | `task/T-010-tui-cli-test-consolidation` / `../mica-wt/T-010` | 两个 TUI CLI 测试文件 | 待开始 |
 
 ## 待用户决策
 
@@ -38,8 +40,8 @@ Phase 1～5 已完成，Phase 6 暂不启动（D-006）。代码治理计划见
 
 ## 下一步
 
-按 T-004 审计批次继续测试资产精简。下一项为 T-010：把 `test_p5_09_integration.py` 的 TUI CLI 路由行为
-迁入 `test_tui_main_buffer_cli.py`，完整保留 session、history、close 与 redaction 边界后删除阶段命名文件。
+外部 worker 按 `docs/tasks/T-010.md` 把 `test_p5_09_integration.py` 的 13 个收集项逐项映射到
+`test_tui_main_buffer_cli.py`；完整保留 session、history、close 与 redaction 边界后删除阶段命名文件。
 
 T-008 首次全量中曾出现一次 `session persistence failed`，但当次缺少足以确定完成快照、`TurnEntry` 或
 store 分支的现场。T-009 已证明另一条 Provider cleanup `WinError 145` 与它无因果关系；若前者再次出现，
