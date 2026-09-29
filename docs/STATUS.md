@@ -8,7 +8,7 @@
 > - 只写当前状态，控制在约 80 行；历史查 Git、任务卡提交记录和构建日志。
 > - 本文与实际文件或 Git 冲突时，以实际文件和 Git 为准，并立即修正本文。
 
-更新：2026-09-29 · `T-011` 等待 `T-012` 子进程生命周期诊断 · 下一个任务 ID：`T-013` · 下一个决策 ID：`D-015`
+更新：2026-09-29 · `T-012` 受限诊断验收通过，待 Git 收口 · 下一个任务 ID：`T-013` · 下一个决策 ID：`D-015`
 
 ## 当前主线
 
@@ -28,8 +28,8 @@ Phase 1～5 已完成，Phase 6 暂不启动（D-006）。代码治理计划见
 
 | ID | 标题 | 负责 | 分支 / worktree | 写入范围 | 状态 |
 |---|---|---|---|---|---|
-| T-011 | App/checkpoint 生命周期测试收口 | 外部 worker | `task/T-011-app-checkpoint-tests` / `../mica-wt/T-011` | `test_app.py`、旧 P5-10G 测试与新 tool-session 测试 | 阻塞：等待 T-012 |
-| T-012 | Windows subprocess transport 生命周期诊断 | 外部 worker | `task/T-012-subprocess-lifecycle` / `../mica-wt/T-012` | `runtime_tools.py` 及其测试 | 待开始 |
+| T-011 | App/checkpoint 生命周期测试收口 | 外部 worker | `task/T-011-app-checkpoint-tests` / `../mica-wt/T-011` | `test_app.py`、旧 P5-10G 测试与新 tool-session 测试 | 阻塞：等待后续有序追踪 |
+| T-012 | Windows subprocess transport 生命周期诊断 | 外部 worker | `task/T-012-subprocess-lifecycle` / `../mica-wt/T-012` | `runtime_tools.py` 及其测试 | 待收口：受限诊断验收通过 |
 
 ## 待用户决策
 
@@ -37,14 +37,15 @@ Phase 1～5 已完成，Phase 6 暂不启动（D-006）。代码治理计划见
 
 ## 阻塞
 
-- `T-011` 首次全量出现 `_WindowsSubprocessTransport ... running`；三个失败 node 仅确认为观察点，重型全量
-  追踪三次均在到达子进程测试前中止或超时，真实创建者仍未确认。T-012 改用轻量、定向的逐测试生命周期审计。
+- `T-011` 首次全量出现 `_WindowsSubprocessTransport ... running`；三个失败 node 仅确认为观察点，真实创建者
+  仍未确认。T-012 的轻量候选组一次通过 `179 passed`：原始事件顺序中，63 次成功创建及 2 个启动失败对象均出现
+  `close` 和关闭状态的 `__del__`，没有 `is_closing=false`；该受限结论不能证明历史 warning 已消失或已解决。
 
 ## 下一步
 
-外部 worker 执行 `docs/tasks/T-012.md`：不再运行重型全量追踪，只覆盖真正能进入
-`asyncio.create_subprocess_exec` 的候选测试集合，以 create / close / `__del__` 账目定位创建 node；只有根因落在
-授权范围内时才做最小修复。T-012 完成前不继续 T-011 验收，也不派发后续测试精简任务。
+T-012 已按受限诊断结论通过 master 复审，待用户授权 Git 收口。收口后新建 T-013，以修正后的“ID + 创建代次”
+身份模型在保留全量顺序的前提下做一次轻量追踪；不重复当前候选子集，也不启用已经超时的 debug / tracemalloc
+重型追踪。T-013 得到新证据前，T-011 保持阻塞，不派发后续测试精简任务。
 
 T-008 首次全量中曾出现一次 `session persistence failed`，但当次缺少足以确定完成快照、`TurnEntry` 或
 store 分支的现场。T-009 已证明另一条 Provider cleanup `WinError 145` 与它无因果关系；若前者再次出现，
