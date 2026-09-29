@@ -626,6 +626,22 @@ def test_follow_up_run_sees_checkpoint_context() -> None:
     app = _make_app(first)
     first_events = _run_collect(app, "question")
     assert isinstance(first_events[-1], RunFailed)
+    assert first.requests[0].messages[0].role is MessageRole.SYSTEM
+    assert first.requests[0].messages[1:] == (_user("question"),)
+    failure_history = app.history
+    assert failure_history[0] == _user("question")
+    assert failure_history[1].role is MessageRole.SYSTEM
+    assert "verbatim output follows" in failure_history[1].content
+    assert "partial" in failure_history[1].content
+    assert failure_history[2].role is MessageRole.SYSTEM
+    assert "recoverable failure" in failure_history[2].content
+    failure_stored = app._session_service.load_session(app.session_id)
+    assert failure_stored.turns == ()
+    assert len(failure_stored.checkpoints) == 1
+    failure_checkpoint = failure_stored.checkpoints[0]
+    assert isinstance(failure_checkpoint, RunCheckpoint)
+    assert failure_checkpoint.kind is RunCheckpointKind.RECOVERABLE_FAILURE
+    assert failure_checkpoint.partial_assistant_message == _assistant("partial")
     second_events = _run_collect(app, "continue")
     assert isinstance(second_events[-1], RunCompleted)
     follow_up = first.requests[1].messages
@@ -939,79 +955,6 @@ def test_prebuilt_context_snapshot_is_used_without_rebuilding(
 # ---------------------------------------------------------------------------
 
 
-def test_failed_run_commits_recoverable_checkpoint() -> None:
-    provider = _ScriptedProvider(
-        [
-            [
-                ProviderTextDelta(text="partial"),
-                ProviderErrorEvent(error=AuthenticationError("auth")),
-            ]
-        ]
-    )
-    app = _make_app(provider)
-
-    events = _run_collect(app, "question")
-
-    assert isinstance(events[-1], RunFailed)
-    history = app.history
-    assert history[0] == _user("question")
-    assert history[1].role is MessageRole.SYSTEM
-    assert "verbatim output follows" in history[1].content
-    assert "partial" in history[1].content
-    assert history[2].role is MessageRole.SYSTEM
-    assert "recoverable failure" in history[2].content
-    stored = app._session_service.load_session(app.session_id)
-    assert stored.turns == ()
-    assert len(stored.checkpoints) == 1
-    checkpoint = stored.checkpoints[0]
-    assert isinstance(checkpoint, RunCheckpoint)
-    assert checkpoint.kind is RunCheckpointKind.RECOVERABLE_FAILURE
-    assert checkpoint.partial_assistant_message == _assistant("partial")
-    assert provider.requests[0].messages[0].role is MessageRole.SYSTEM
-    assert provider.requests[0].messages[1:] == (_user("question"),)
-
-
-def test_cancelled_run_commits_checkpoint() -> None:
-    class HangingProvider:
-        def __init__(self) -> None:
-            self.requests: list[ProviderRequest] = []
-            self.emitted = asyncio.Event()
-
-        async def stream(
-            self, request: ProviderRequest
-        ) -> AsyncIterator[ProviderEvent]:
-            self.requests.append(request)
-            yield ProviderTextDelta(text="partial")
-            self.emitted.set()
-            await asyncio.sleep(30)
-            yield Finish()
-
-        async def aclose(self) -> None:
-            return None
-
-    hanging = HangingProvider()
-    app = _make_app(hanging)  # type: ignore[arg-type]
-    collected: list[EngineEvent] = []
-
-    async def main() -> None:
-        task = asyncio.create_task(_collect(app, "question", collected))
-        await asyncio.wait_for(hanging.emitted.wait(), timeout=1.0)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-    asyncio.run(main())
-
-    assert isinstance(collected[-1], RunCancelled)
-    history = app.history
-    assert history[0] == _user("question")
-    assert "partial" in history[1].content
-    assert "cancelled" in history[2].content
-    stored = app._session_service.load_session(app.session_id)
-    assert stored.turns == ()
-    assert stored.checkpoints[0].kind is RunCheckpointKind.CANCELLED
-
-
 def test_consumer_closing_stream_commits_checkpoint_once() -> None:
     provider = _ScriptedProvider(
         [
@@ -1145,6 +1088,15 @@ def test_cancelled_checkpoint_restores_under_a_new_model() -> None:
 
     asyncio.run(cancel_run())
     assert isinstance(collected[-1], RunCancelled)
+    history = app.history
+    assert history[0] == _user("interrupt me")
+    assert history[1].role is MessageRole.SYSTEM
+    assert "partial" in history[1].content
+    assert history[2].role is MessageRole.SYSTEM
+    assert "cancelled" in history[2].content
+    stored = app._session_service.load_session(app.session_id)
+    assert stored.turns == ()
+    assert stored.checkpoints[0].kind is RunCheckpointKind.CANCELLED
     service = app._session_service
     session_id = app.session_id
     follow = _ScriptedProvider([[ProviderTextDelta(text="continued"), Finish()]])
@@ -1169,6 +1121,74 @@ def test_cancelled_checkpoint_restores_under_a_new_model() -> None:
     assert "incomplete" in restored_messages[-2].content
     assert not any(
         message.role is MessageRole.ASSISTANT and message.content == "partial"
+        for message in restored_messages
+    )
+
+
+def test_running_token_cancellation_restores_partial_without_forged_assistant() -> None:
+    class HangingProvider:
+        def __init__(self) -> None:
+            self.emitted = asyncio.Event()
+
+        async def stream(
+            self, request: ProviderRequest
+        ) -> AsyncIterator[ProviderEvent]:
+            yield ProviderTextDelta(text="partial answer")
+            self.emitted.set()
+            await asyncio.sleep(30)
+            yield Finish()
+
+        async def aclose(self) -> None:
+            return None
+
+    hanging = HangingProvider()
+    app = _make_app(hanging, system_prompt="stable test system")  # type: ignore[arg-type]
+    collected: list[EngineEvent] = []
+
+    async def cancel_run() -> None:
+        # Running-token cancellation, distinct from an external task.cancel().
+        token = CancellationToken()
+        task = asyncio.create_task(
+            _collect(app, "interrupt me", collected, cancellation=token)
+        )
+        await asyncio.wait_for(hanging.emitted.wait(), timeout=1.0)
+        token.cancel()
+        await task
+
+    asyncio.run(cancel_run())
+    assert isinstance(collected[-1], RunCancelled)
+    service = app._session_service
+    session_id = app.session_id
+    stored = service.load_session(session_id)
+    assert stored.turns == ()
+    assert stored.checkpoints[0].kind is RunCheckpointKind.CANCELLED
+    assert stored.checkpoints[0].partial_assistant_message == _assistant(
+        "partial answer"
+    )
+
+    follow = _ScriptedProvider([[ProviderTextDelta(text="continued"), Finish()]])
+    restored = MicaApp(
+        follow,
+        "test-model",
+        session_service=service,
+        session_id=session_id,
+        context_builder=ContextBuilder(
+            data_root=service.store.data_root,
+            workspace=service.store.workspace,
+        ),
+        system_prompt="stable test system",
+    )
+    events = _run_collect(restored, "continue")
+    assert isinstance(events[-1], RunCompleted)
+    restored_messages = follow.requests[0].messages
+    assert restored_messages[-1] == _user("continue")
+    assert restored_messages[-4] == _user("interrupt me")
+    assert restored_messages[-3].role is MessageRole.SYSTEM
+    assert "partial answer" in restored_messages[-3].content
+    assert restored_messages[-2].role is MessageRole.SYSTEM
+    assert "incomplete" in restored_messages[-2].content
+    assert not any(
+        message.role is MessageRole.ASSISTANT and message.content == "partial answer"
         for message in restored_messages
     )
 
