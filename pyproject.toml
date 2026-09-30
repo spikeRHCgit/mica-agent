@@ -29,3 +29,9 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 mica_agent = ["prompts/system.md"]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: tests with required wall-clock observations",
+    "process_tree: tests using real OS descendant-process cleanup evidence",
+]

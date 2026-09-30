@@ -95,10 +95,11 @@ class ScriptedProvider:
 
 
 class HangingProvider:
-    """挂起的测试替身：可选先产出部分文本，用于活动 Run 取消。"""
+    """Signal entry into the hanging stream, optionally after partial text."""
 
     def __init__(self, emit_delta: bool = True) -> None:
         self._emit_delta = emit_delta
+        self.started = asyncio.Event()
         self.requests: list[ProviderRequest] = []
         self.aclose_calls = 0
 
@@ -106,6 +107,7 @@ class HangingProvider:
         self.requests.append(request)
         if self._emit_delta:
             yield ProviderTextDelta(text="partial")
+        self.started.set()
         await asyncio.sleep(30)
         yield Finish()
 
@@ -750,7 +752,7 @@ def test_cancelled_run_without_text_keeps_stdout_empty() -> None:
                 context_builder=context_builder,
             )
         )
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(provider.started.wait(), timeout=1.0)
         task.cancel()
         return await task
 

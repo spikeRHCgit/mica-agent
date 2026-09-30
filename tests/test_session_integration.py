@@ -267,7 +267,7 @@ def test_non_successful_run_modes_do_not_append_turn(
 
         async def cancel_run() -> None:
             task = asyncio.create_task(collect(app, "cancelled question"))
-            await asyncio.sleep(0.01)
+            await asyncio.wait_for(provider.started.wait(), timeout=1.0)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
@@ -334,8 +334,12 @@ def test_persistence_failure_becomes_safe_storage_failure_without_half_turn(
 
 
 class _HangingProvider:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+
     async def stream(self, request: ProviderRequest) -> AsyncIterator[ProviderEvent]:
         yield ProviderTextDelta(text="partial")
+        self.started.set()
         await asyncio.sleep(30)
 
     async def aclose(self) -> None:
