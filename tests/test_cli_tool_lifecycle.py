@@ -1,4 +1,4 @@
-"""P4-08 基础 CLI 工具集成公开行为测试。"""
+"""CLI tool lifecycle: interactions, safe output, cancellation and session recovery."""
 
 from __future__ import annotations
 
@@ -390,7 +390,7 @@ def test_default_cli_exposes_five_tools_and_recovers_from_unknown_ls(
     assert "permission required" not in err.text.lower()
 
 
-def test_successful_tool_run_persists_complete_v2_history_for_next_run(
+def test_successful_tool_run_persists_complete_history_for_next_run(
     tmp_path: Path,
 ) -> None:
     service, builder, workspace_path = make_dependencies(tmp_path)
@@ -702,3 +702,273 @@ def test_interaction_eof_or_ctrl_c_closes_without_partial_turn(
     assert len(sessions) == 1
     assert sessions[0].turns == ()
     assert not (workspace_path / ".env").exists()
+
+
+class SimpleInputScript:
+    def __init__(self, *items: str) -> None:
+        self._items = list(items)
+
+    async def __call__(self) -> str:
+        if not self._items:
+            raise EOFError
+        return self._items.pop(0)
+
+
+def _dependencies(tmp_path: Path) -> tuple[SessionService, ContextBuilder, Path]:
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    workspace = resolve_workspace(workspace_path)
+    data_root = tmp_path / "data"
+    service = SessionService(JsonlSessionStore(workspace, data_root))
+    return (
+        service,
+        ContextBuilder(data_root=data_root, workspace=workspace),
+        workspace_path,
+    )
+
+
+def _run(
+    tmp_path: Path,
+    command: str,
+    response: str = "final answer",
+    *,
+    confirm: bool = False,
+) -> tuple[int, Recorder, Recorder, ScriptedProvider, Path, SessionService]:
+    service, builder, workspace_path = _dependencies(tmp_path)
+    provider = ScriptedProvider(
+        [
+            [
+                Finish(
+                    tool_calls=(
+                        ToolCall(
+                            "cli-bash-call",
+                            "bash",
+                            {"command": command},
+                        ),
+                    )
+                )
+            ],
+            [ProviderTextDelta(response), Finish()],
+        ]
+    )
+    out = Recorder()
+    err = Recorder()
+    code = asyncio.run(
+        run_interactive(
+            "https://api.example.test/v1",
+            "sk-test-only",
+            "test-model",
+            provider_factory=lambda _url, _key: provider,
+            read_line=SimpleInputScript("run command", *(["y"] if confirm else [])),
+            write_out=out,
+            write_err=err,
+            session_service=service,
+            context_builder=builder,
+        )
+    )
+    return code, out, err, provider, workspace_path, service
+
+
+def test_cli_displays_cleaned_bash_deltas_between_status_lines(
+    tmp_path: Path,
+) -> None:
+    secret = "sk-cli-output-secret-sentinel"
+    code, out, err, provider, _workspace, service = _run(
+        tmp_path,
+        "printf 'first output\\n'; "
+        "printf 'api_key=%s\\n' '" + secret + "'; "
+        "printf 'second output\\n' >&2",
+        confirm=True,
+    )
+
+    assert code == 0
+    assert out.text == "final answer\n"
+    assert err.text == (
+        "permission required for tool bash [y/N]: "
+        "tool bash: started\n"
+        "first output\n"
+        "api_key=[REDACTED]\n"
+        "second output\n"
+        "tool bash: success\n"
+    )
+    assert secret not in out.text + err.text
+    assert provider.aclose_calls == 1
+    assert len(provider.requests) == 2
+    assert tuple(spec.name for spec in provider.requests[0].tools) == (
+        "ask",
+        "bash",
+        "edit",
+        "read",
+        "write",
+    )
+    assert provider.requests[1].messages[-1].role is MessageRole.TOOL
+    tool_result = json.loads(provider.requests[1].messages[-1].content)
+    assert tool_result["data"]["output"] == (
+        "first output\napi_key=[REDACTED]\nsecond output\n"
+    )
+    raw_session = next(service.store.session_directory.glob("*.jsonl")).read_text(
+        encoding="utf-8"
+    )
+    assert secret not in raw_session
+    assert "ToolOutputDelta" not in raw_session
+    assert "Traceback" not in raw_session
+
+
+def test_cli_adds_one_separator_for_unterminated_bash_delta(
+    tmp_path: Path,
+) -> None:
+    code, out, err, _provider, _workspace, _service = _run(
+        tmp_path,
+        "printf 'unterminated output'",
+    )
+
+    assert code == 0
+    assert out.text == "final answer\n"
+    assert err.text == ("tool bash: started\nunterminated output\ntool bash: success\n")
+    assert err.text.count("unterminated output") == 1
+
+
+def test_cli_keeps_no_output_tool_status_without_extra_blank_line(
+    tmp_path: Path,
+) -> None:
+    code, out, err, _provider, _workspace, _service = _run(tmp_path, ":")
+
+    assert code == 0
+    assert out.text == "final answer\n"
+    assert err.text == ("tool bash: started\ntool bash: success\n")
+    assert "started\n\n" not in err.text
+
+
+class TextRecorder:
+    def __init__(self) -> None:
+        self.text = ""
+
+    def __call__(self, text: str) -> None:
+        self.text += text
+
+
+def test_structured_ask_provider_tool_json_and_continue_loop(tmp_path: Path) -> None:
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    workspace = resolve_workspace(workspace_path)
+    service = SessionService(JsonlSessionStore(workspace, tmp_path / "data"))
+    builder = ContextBuilder(data_root=tmp_path / "data", workspace=workspace)
+    provider = ScriptedProvider(
+        [
+            [
+                Finish(
+                    tool_calls=(
+                        ToolCall(
+                            "ask-call",
+                            "ask",
+                            {
+                                "question": "Choose a format",
+                                "title": "Export",
+                                "options": [
+                                    {"label": "JSON", "recommended": True},
+                                    {"label": "YAML", "description": "Human readable"},
+                                ],
+                                "allow_custom": False,
+                            },
+                        ),
+                    )
+                )
+            ],
+            [ProviderTextDelta(text="saved"), Finish()],
+            [ProviderTextDelta(text="continued"), Finish()],
+        ]
+    )
+
+    async def first_run() -> tuple[int, str, str]:
+        out = TextRecorder()
+        err = TextRecorder()
+        code = await run_interactive(
+            "https://api.example.test/v1",
+            "sk-test-only",
+            "test-model",
+            provider_factory=lambda _url, _key: provider,
+            read_line=SimpleInputScript("start", " 2 "),
+            write_out=out,
+            write_err=err,
+            session_service=service,
+            context_builder=builder,
+        )
+        return code, out.text, err.text
+
+    code, output, error = asyncio.run(first_run())
+
+    assert code == 0
+    assert output == "saved\n"
+    assert "1. JSON (recommended)\n" in error
+    assert "2. YAML\n" in error
+    assert "selection: tool ask: success\n" in error
+    assert provider.requests[0].tools[0].name == "ask"
+    assert provider.requests[0].tools[0].input_schema["properties"]["options"] == {
+        "type": "array",
+        "minItems": 2,
+        "maxItems": 4,
+        "items": {
+            "type": "object",
+            "properties": {
+                "label": {"type": "string", "minLength": 1},
+                "description": {"type": "string", "minLength": 1},
+                "recommended": {"type": "boolean"},
+            },
+            "required": ("label",),
+            "additionalProperties": False,
+        },
+    }
+    assert [message.role for message in provider.requests[1].messages] == [
+        MessageRole.SYSTEM,
+        MessageRole.USER,
+        MessageRole.ASSISTANT,
+        MessageRole.TOOL,
+    ]
+    assert json.loads(provider.requests[1].messages[-1].content)["data"] == {
+        "answer": "YAML",
+        "selected_option_index": 1,
+        "notes": None,
+    }
+
+    out = TextRecorder()
+    err = TextRecorder()
+    code = asyncio.run(
+        run_interactive(
+            "https://api.example.test/v1",
+            "sk-test-only",
+            "test-model",
+            session_mode="continue",
+            provider_factory=lambda _url, _key: provider,
+            read_line=SimpleInputScript("next"),
+            write_out=out,
+            write_err=err,
+            session_service=service,
+            context_builder=builder,
+        )
+    )
+
+    assert code == 0
+    assert out.text == "continued\n"
+    assert err.text == ""
+    assert [message.role for message in provider.requests[2].messages] == [
+        MessageRole.SYSTEM,
+        MessageRole.USER,
+        MessageRole.ASSISTANT,
+        MessageRole.TOOL,
+        MessageRole.ASSISTANT,
+        MessageRole.USER,
+    ]
+    assert provider.requests[2].messages[-1].content == "next"
+
+    listed = service.list_sessions()
+    assert listed.problems == ()
+    assert len(listed.sessions) == 1
+    assert len(listed.sessions[0].turns) == 2
+    assert listed.sessions[0].turns[0].context_messages[2].role is MessageRole.TOOL
+    raw = next(service.store.session_directory.glob("*.jsonl")).read_text(
+        encoding="utf-8"
+    )
+    assert '"format_version":4' in raw
+    assert "YAML" in raw
+    assert "sk-test-only" not in raw
+    assert provider.aclose_calls == 2
