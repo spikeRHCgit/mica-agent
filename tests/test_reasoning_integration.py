@@ -1,4 +1,4 @@
-"""P4-11 思考强度与独立思考事件跨层集成测试。"""
+"""Reasoning propagation across transport, engine and App without session persistence."""
 
 from __future__ import annotations
 

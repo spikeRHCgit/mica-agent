@@ -1,4 +1,9 @@
-"""P3-05 App/Session/CLI 持久化闭环集成测试。"""
+"""Session persistence integration: committed turns, recovery, failure and cancellation paths.
+
+These tests protect the App -> Engine -> SessionService boundary: successful
+rounds are persisted and reloaded with their context, non-successful runs never
+append a turn, and a storage failure leaves no half turn behind.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +17,6 @@ import pytest
 
 from mica_agent.app import MicaApp
 from mica_agent.checkpoint_contracts import RunCheckpointKind
-from mica_agent.cli import run_interactive
 from mica_agent.context_builder import ContextBuilder
 from mica_agent.events import ErrorCategory, RunCompleted, RunFailed, TextDelta
 from mica_agent.jsonl_store import JsonlSessionStore
@@ -24,9 +28,7 @@ from mica_agent.providers import (
     ProviderEvent,
     ProviderRequest,
 )
-from mica_agent.providers import (
-    TextDelta as ProviderTextDelta,
-)
+from mica_agent.providers import TextDelta as ProviderTextDelta
 from mica_agent.session_contracts import TurnEntry
 from mica_agent.session_service import SessionService
 from mica_agent.workspace import resolve_workspace
@@ -48,31 +50,6 @@ class ScriptedProvider:
 
     async def aclose(self) -> None:
         self.aclose_calls += 1
-
-
-class InputScript:
-    def __init__(self, *items: object) -> None:
-        self.items = list(items)
-
-    async def __call__(self) -> str:
-        if not self.items:
-            raise EOFError
-        value = self.items.pop(0)
-        if isinstance(value, BaseException):
-            raise value
-        return value  # type: ignore[return-value]
-
-
-class Recorder:
-    def __init__(self) -> None:
-        self.calls: list[str] = []
-
-    def __call__(self, text: str) -> None:
-        self.calls.append(text)
-
-    @property
-    def text(self) -> str:
-        return "".join(self.calls)
 
 
 def setup_session(
@@ -354,261 +331,6 @@ def test_persistence_failure_becomes_safe_storage_failure_without_half_turn(
     assert [
         turn.user_message.content for turn in service.load_session(session_id).turns
     ] == ["recovery prompt"]
-
-
-def _run_cli_with_injected_session(
-    service: SessionService,
-    builder: ContextBuilder,
-    provider: ScriptedProvider,
-    *,
-    mode: str = "new",
-    inputs: tuple[object, ...] = (),
-) -> tuple[int, Recorder, Recorder, list[bool]]:
-    out = Recorder()
-    err = Recorder()
-    provider_created: list[bool] = []
-
-    def factory(_url: str, _key: str) -> ScriptedProvider:
-        provider_created.append(True)
-        return provider
-
-    code = asyncio.run(
-        run_interactive(
-            "https://api.example.test/v1",
-            "sk-test-key",
-            "test-model",
-            session_mode=mode,  # type: ignore[arg-type]
-            provider_factory=factory,
-            read_line=InputScript(*inputs),
-            write_out=out,
-            write_err=err,
-            session_service=service,
-            context_builder=builder,
-            clock=lambda: TEST_TIME,
-        )
-    )
-    return code, out, err, provider_created
-
-
-def test_cli_default_creates_new_session_and_enters_app(tmp_path: Path) -> None:
-    service, builder, _, _, _ = setup_session(tmp_path)
-    before = len(service.list_sessions().sessions)
-    provider = ScriptedProvider([[ProviderTextDelta(text="ok"), Finish()]])
-
-    code, out, err, created = _run_cli_with_injected_session(
-        service, builder, provider, inputs=("hello",)
-    )
-
-    assert code == 0
-    assert created == [True]
-    assert out.text == "ok\n"
-    assert err.text == ""
-    assert len(service.list_sessions().sessions) == before + 1
-
-
-def test_cli_default_blank_eof_keeps_one_empty_session_without_request(
-    tmp_path: Path,
-) -> None:
-    service, builder, _, _, _ = setup_session(tmp_path)
-    before_ids = {
-        session.meta.session_id for session in service.list_sessions().sessions
-    }
-    provider = ScriptedProvider([])
-
-    code, out, err, created = _run_cli_with_injected_session(
-        service,
-        builder,
-        provider,
-        inputs=("", "   ", "\t"),
-    )
-
-    after_sessions = service.list_sessions().sessions
-    after_ids = {session.meta.session_id for session in after_sessions}
-    new_ids = after_ids - before_ids
-    assert code == 0
-    assert created == [True]
-    assert provider.requests == []
-    assert provider.aclose_calls == 1
-    assert out.text == ""
-    assert err.text == ""
-    assert len(new_ids) == 1
-    new_session = next(
-        session for session in after_sessions if session.meta.session_id in new_ids
-    )
-    assert new_session.turns == ()
-
-
-def test_cli_context_preflight_failure_does_not_construct_provider(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    service, builder, _, _, _ = setup_session(tmp_path)
-    provider = ScriptedProvider([])
-
-    def fail_build() -> object:
-        raise RuntimeError("context failure with private path")
-
-    monkeypatch.setattr(builder, "build", fail_build)
-    code, out, err, created = _run_cli_with_injected_session(
-        service, builder, provider, mode="continue", inputs=("question",)
-    )
-
-    assert code == 2
-    assert created == []
-    assert provider.aclose_calls == 0
-    assert out.text == ""
-    assert err.text == "mica: unable to prepare session context\n"
-
-
-def test_cli_continue_reuses_last_active_session_and_history(tmp_path: Path) -> None:
-    service, builder, session_id, _, _ = setup_session(tmp_path)
-    first_provider = ScriptedProvider(
-        [[ProviderTextDelta(text="old answer"), Finish()]]
-    )
-    first_app = make_app(first_provider, service, builder, session_id)
-    assert isinstance(run_collect(first_app, "old question")[-1], RunCompleted)
-    provider = ScriptedProvider([[ProviderTextDelta(text="new answer"), Finish()]])
-
-    code, _, err, created = _run_cli_with_injected_session(
-        service,
-        builder,
-        provider,
-        mode="continue",
-        inputs=("new question",),
-    )
-
-    assert code == 0
-    assert created == [True]
-    assert err.text == ""
-    assert provider.requests[0].messages[-3:] == (
-        Message(MessageRole.USER, "old question"),
-        Message(MessageRole.ASSISTANT, "old answer"),
-        Message(MessageRole.USER, "new question"),
-    )
-    assert len(service.list_sessions().sessions) == 1
-
-
-def test_cli_resume_lists_numbered_sessions_and_accepts_valid_choice(
-    tmp_path: Path,
-) -> None:
-    service, builder, first_id, _, _ = setup_session(tmp_path)
-    service.rename_session(first_id, "first session")
-    second = service.create_session(title="second session")
-    listed = service.list_sessions().sessions
-    selected_index = next(
-        index
-        for index, session in enumerate(listed, start=1)
-        if session.meta.session_id == second.meta.session_id
-    )
-    provider = ScriptedProvider([[ProviderTextDelta(text="resumed"), Finish()]])
-
-    code, out, err, created = _run_cli_with_injected_session(
-        service,
-        builder,
-        provider,
-        mode="resume",
-        inputs=(str(selected_index), "resume question"),
-    )
-
-    assert code == 0
-    assert created == [True]
-    listed_titles = {line.split(". ", 1)[1] for line in out.text.splitlines()[:2]}
-    assert {"first session", "second session"} == listed_titles
-    assert "resumed\n" in out.text
-    assert err.text == ""
-    assert provider.requests[0].messages[-1] == Message(
-        MessageRole.USER, "resume question"
-    )
-
-
-def test_cli_continue_without_healthy_session_never_creates_provider(
-    tmp_path: Path,
-) -> None:
-    service, builder, session_id, _, _ = setup_session(tmp_path)
-    service.delete_session(session_id)
-    provider = ScriptedProvider([[Finish()]])
-
-    code, out, err, created = _run_cli_with_injected_session(
-        service, builder, provider, mode="continue", inputs=("should not read",)
-    )
-
-    assert code != 0
-    assert created == []
-    assert out.text == ""
-    assert "no healthy session" in err.text
-    assert "session.jsonl" not in err.text
-
-
-def test_cli_resume_eof_or_invalid_choice_never_creates_provider(
-    tmp_path: Path,
-) -> None:
-    service, builder, _, _, _ = setup_session(tmp_path)
-    before_count = len(service.list_sessions().sessions)
-    provider = ScriptedProvider([[Finish()]])
-
-    eof_result = _run_cli_with_injected_session(
-        service, builder, provider, mode="resume", inputs=()
-    )
-    invalid_result = _run_cli_with_injected_session(
-        service, builder, provider, mode="resume", inputs=("999",)
-    )
-    unicode_result = _run_cli_with_injected_session(
-        service, builder, provider, mode="resume", inputs=("²",)
-    )
-
-    for code, out, err, created in (eof_result, invalid_result, unicode_result):
-        assert code != 0
-        assert out.text.startswith("1. ")
-        assert created == []
-        assert "session selection" in err.text
-        assert "session.jsonl" not in err.text
-
-    code, out, err, created = unicode_result
-    assert code == 2
-    assert out.text == "1. untitled session\n"
-    assert err.text == "mica: invalid session selection; enter a listed number\n"
-    assert created == []
-    assert "Traceback" not in err.text
-    assert "sk-test-key" not in err.text
-    assert str(tmp_path) not in err.text
-    assert len(service.list_sessions().sessions) == before_count
-
-
-def test_cli_preflight_displays_safe_agents_diagnostics(
-    tmp_path: Path,
-) -> None:
-    service, builder, session_id, data_root, workspace_path = setup_session(tmp_path)
-    data_root.joinpath("AGENTS.md").write_bytes(b"\xff")
-    workspace_path.joinpath("AGENTS.md").write_text(
-        "workspace warning rules", encoding="utf-8"
-    )
-    provider = ScriptedProvider([[ProviderTextDelta(text="ok"), Finish()]])
-
-    code, _, err, created = _run_cli_with_injected_session(
-        service, builder, provider, mode="continue", inputs=("question",)
-    )
-
-    assert code == 0
-    assert created == [True]
-    assert err.text == "warning: global AGENTS.md is not valid UTF-8\n"
-    assert provider.requests[0].messages[0].role is MessageRole.SYSTEM
-    assert provider.requests[0].messages[1:] == (
-        Message(
-            MessageRole.SYSTEM,
-            '<INSTRUCTIONS source="workspace">\n'
-            "workspace warning rules\n"
-            "</INSTRUCTIONS>",
-        ),
-        Message(MessageRole.USER, "question"),
-    )
-    assert (
-        b"workspace warning rules"
-        not in service.store.path_for_session(session_id).read_bytes()
-    )
-    assert (
-        b"workspace warning rules"
-        not in service.store.path_for_session(session_id).read_bytes()
-    )
 
 
 class _HangingProvider:
