@@ -81,6 +81,15 @@ uv run ruff format --check src/mica_agent tests
 uv build --offline
 ```
 
+测试分组：`slow` 标记必须保留墙钟观测的四项后代进程测试；`process_tree` 标记这四项真实 OS
+进程树清理证据，不表示仅限 Windows。默认 `uv run pytest` 仍运行全部测试，不排除任何分组。
+
+```bash
+uv run pytest -m "not slow"                  # 快速反馈，不代替最终全量验收
+uv run pytest -m process_tree                # 单独运行真实进程树证据
+uv run pytest -q -W error --strict-markers    # 最终全量，包含上述四项
+```
+
 `uv run mica` 与 `uv run python -m mica_agent` 使用同一 CLI 逻辑。构建产物写入被 Git 忽略的 `dist/`。
 
 ## 目录与文档入口

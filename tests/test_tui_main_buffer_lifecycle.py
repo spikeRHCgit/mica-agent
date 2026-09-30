@@ -419,20 +419,32 @@ def test_ctrl_d_is_ignored_with_a_draft_or_an_active_run(tmp_path: Path) -> None
             [[ProviderTextDelta("answer"), Finish()]], block_after_text=True
         )
         env = build(tmp_path, provider=provider)
+        handled = asyncio.Event()
+        original_handle_key = env.screen._handle_key
+
+        def handle_key(key: Any) -> bool:
+            result = original_handle_key(key)
+            if key.name == "ctrl_d":
+                # Notify only after the real queued-key handler has returned.
+                handled.set()
+            return result
+
+        env.screen._handle_key = handle_key
         task = asyncio.create_task(env.screen.run())
         await pump(lambda: env.fake.is_attached, message="attach")
 
         env.fake.feed(*typed("draft"))
         await pump(lambda: env.screen.composer_text == "draft")
         env.fake.feed(CTRL_D)
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(handled.wait(), timeout=TIMEOUT)
         assert env.screen.closed is False
         assert env.screen.composer_text == "draft"
 
         env.fake.feed(ENTER)
         await pump(lambda: env.screen.mode == "running", message="running")
+        handled.clear()
         env.fake.feed(CTRL_D)
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(handled.wait(), timeout=TIMEOUT)
         assert env.screen.closed is False
         assert env.screen.mode == "running"
 

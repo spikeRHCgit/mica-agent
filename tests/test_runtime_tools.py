@@ -907,6 +907,8 @@ def test_bash_filters_credentials_but_preserves_normal_environment(
     assert result.data == {"exit_code": 0, "output": "unset:available"}
 
 
+@pytest.mark.slow
+@pytest.mark.process_tree
 def test_bash_output_limit_reaps_real_delayed_descendant(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -948,6 +950,8 @@ def test_bash_output_limit_reaps_real_delayed_descendant(tmp_path: Path) -> None
     assert not (workspace / "alive.marker").exists()
 
 
+@pytest.mark.slow
+@pytest.mark.process_tree
 def test_bash_timeout_reaps_real_delayed_descendant(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -988,6 +992,8 @@ def test_bash_timeout_reaps_real_delayed_descendant(tmp_path: Path) -> None:
     assert not (workspace / "alive.marker").exists()
 
 
+@pytest.mark.slow
+@pytest.mark.process_tree
 def test_bash_token_cancellation_reaps_real_delayed_descendant(
     tmp_path: Path,
 ) -> None:
@@ -1027,6 +1033,8 @@ def test_bash_token_cancellation_reaps_real_delayed_descendant(
     assert not (workspace / "alive.marker").exists()
 
 
+@pytest.mark.slow
+@pytest.mark.process_tree
 def test_bash_handler_task_cancel_reaps_real_delayed_descendant(
     tmp_path: Path,
 ) -> None:
@@ -1067,16 +1075,28 @@ def test_bash_handler_task_cancellation_re_raises_after_cleanup(tmp_path: Path) 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     registry = ToolRegistry()
-    register_runtime_tools(registry, resolve_workspace(workspace), _answer)
+    started = asyncio.Event()
+
+    def reporter(_call_id: str, _tool_name: str, text: str) -> None:
+        if text == "started\n":
+            started.set()
+
+    register_runtime_tools(
+        registry, resolve_workspace(workspace), _answer, output_reporter=reporter
+    )
 
     async def scenario() -> None:
         task = asyncio.create_task(
             registry.resolve("bash").handler(
-                ToolRequest("bash-task-cancel", "bash", {"command": "sleep 5"}),
+                ToolRequest(
+                    "bash-task-cancel",
+                    "bash",
+                    {"command": "printf 'started\\n'; sleep 5"},
+                ),
                 CancellationToken(),
             )
         )
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(started.wait(), timeout=3)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -1108,16 +1128,27 @@ def test_bash_running_cancellation_returns_cancelled(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     registry = ToolRegistry()
-    register_runtime_tools(registry, resolve_workspace(workspace), _answer)
+    started = asyncio.Event()
+
+    def reporter(_call_id: str, _tool_name: str, text: str) -> None:
+        if text == "started\n":
+            started.set()
+
+    register_runtime_tools(
+        registry, resolve_workspace(workspace), _answer, output_reporter=reporter
+    )
 
     async def scenario() -> object:
         cancellation = CancellationToken()
         task = asyncio.create_task(
             registry.resolve("bash").handler(
-                ToolRequest("bash-cancel", "bash", {"command": "sleep 5"}), cancellation
+                ToolRequest(
+                    "bash-cancel", "bash", {"command": "printf 'started\\n'; sleep 5"}
+                ),
+                cancellation,
             )
         )
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(started.wait(), timeout=3)
         cancellation.cancel()
         return await asyncio.wait_for(task, timeout=2.0)
 

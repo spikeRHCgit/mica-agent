@@ -368,6 +368,27 @@ async def pump(predicate: Any, *, message: str = "condition") -> None:
         await asyncio.sleep(0.005)
 
 
+async def feed_and_wait_processed(
+    screen: MainBufferScreen, fake_input: FakeInput, *keypresses: Any
+) -> None:
+    """Wait for each fed key to return from the real queued-key handler."""
+    processed: asyncio.Queue[None] = asyncio.Queue()
+    original_handle_key = screen._handle_key
+
+    def handle_key(key: Any) -> bool:
+        result = original_handle_key(key)
+        processed.put_nowait(None)
+        return result
+
+    screen._handle_key = handle_key
+    try:
+        fake_input.feed(*keypresses)
+        for _ in keypresses:
+            await asyncio.wait_for(processed.get(), timeout=TIMEOUT)
+    finally:
+        screen._handle_key = original_handle_key
+
+
 class ScreenHarness:
     """在后台运行主缓冲区前端，并提供按键与断言辅助。"""
 
@@ -475,8 +496,7 @@ def test_running_state_ignores_composer_input_and_second_submit(
         async with ScreenHarness(screen, fake) as harness:
             fake.feed(*typed("first"), ENTER)
             await asyncio.wait_for(provider.started.wait(), timeout=TIMEOUT)
-            fake.feed(*typed("ignored"))
-            await asyncio.sleep(0.05)
+            await feed_and_wait_processed(screen, fake, *typed("ignored"))
             assert screen.composer_text == ""
             assert provider.requests and len(provider.requests) == 1
             provider.release.set()
@@ -985,14 +1005,12 @@ def test_single_ctrl_c_does_not_exit_and_timeout_rearms(tmp_path: Path) -> None:
         screen, _ = make_screen(app, fake)
         screen._clock = lambda: clock_value[0]
         async with ScreenHarness(screen, fake) as harness:
-            fake.feed(CTRL_C)
-            await asyncio.sleep(0.05)
+            await feed_and_wait_processed(screen, fake, CTRL_C)
             assert screen.mode == "idle"
             assert harness.task.done() is False
 
             clock_value[0] = 10.0
-            fake.feed(CTRL_C)
-            await asyncio.sleep(0.05)
+            await feed_and_wait_processed(screen, fake, CTRL_C)
             assert harness.task.done() is False
 
             clock_value[0] = 11.0
