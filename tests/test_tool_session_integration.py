@@ -1,4 +1,4 @@
-"""Tool execution, safe persistence, recovery and cancelled-batch checkpoints."""
+"""工具执行、安全持久化、恢复与取消批次检查点。"""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ NOW = datetime(2026, 8, 26, 1, 2, 3, tzinfo=UTC)
 
 
 class _ScriptedProvider:
-    """Yield one fixed event script for every request; one run per test."""
+    """为每个请求返回固定事件脚本；每个测试只运行一轮。"""
 
     def __init__(self, events: list[ProviderEvent]) -> None:
         self._events = events
@@ -353,7 +353,7 @@ def test_real_write_tool_emits_safe_snapshots_and_persists_v3(tmp_path: Path) ->
             [ProviderTextDelta("saved"), Finish()],
         ]
     )
-    # The real handler is used; only the policy is automated for this test.
+    # 使用真实 handler；本测试只自动化处理策略。
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
     registry = ToolRegistry()

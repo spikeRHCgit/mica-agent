@@ -1,8 +1,7 @@
-"""CLI startup integration: session selection, header order, preflight and short-circuit.
+"""CLI 启动集成：会话选择、标题顺序、预检查与短路。
 
-These tests protect the CLI activation path: new/continue/resume selection,
-safe preflight diagnostics, single header construction, and the ordering rule
-that a failed session selection or system prompt precedes provider creation.
+这些测试保护 CLI 激活路径：new/continue/resume 选择、安全预检查诊断、
+单次标题构造，以及会话选择或系统提示词失败必须先于 Provider 创建的顺序规则。
 """
 
 from __future__ import annotations
@@ -47,7 +46,7 @@ class ScriptedProvider:
 
 
 class ProviderStub:
-    """Answer every request with a single Finish event."""
+    """对每个请求返回一个 Finish 事件。"""
 
     def __init__(self) -> None:
         self.requests: list[ProviderRequest] = []
@@ -62,7 +61,7 @@ class ProviderStub:
 
 
 class InputScript:
-    """Replay scripted lines; a BaseException item is raised instead of returned."""
+    """回放脚本化输入行；BaseException 元素会被抛出，而不是作为返回值。"""
 
     def __init__(self, *items: object) -> None:
         self.items = list(items)

@@ -245,7 +245,7 @@ def test_completed_tool_presentations_sink_receives_only_final_snapshots() -> No
     )
     received: list[tuple[object, ...]] = []
 
-    # Observe the public completion sink at the same boundary as RunCompleted.
+    # 在与 RunCompleted 相同的边界观察公共完成 sink。
     async def collect() -> None:
         async for _ in engine.run(
             ProviderRequest("test-model", (Message(MessageRole.USER, "inspect"),)),

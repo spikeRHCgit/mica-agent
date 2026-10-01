@@ -1,4 +1,4 @@
-"""CLI tool lifecycle: interactions, safe output, cancellation and session recovery."""
+"""CLI 工具生命周期：交互、安全输出、取消与会话恢复。"""
 
 from __future__ import annotations
 

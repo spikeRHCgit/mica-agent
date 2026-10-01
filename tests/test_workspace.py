@@ -163,7 +163,7 @@ def test_importing_workspace_module_does_not_create_default_directory(
         text=True,
         check=False,
     )
-    # The subprocess is only a side-effect check; package import is supplied by uv.
+    # 子进程只用于检查副作用；包导入由 uv 提供。
     if result.returncode != 0 and "No module named" in result.stderr:
         pytest.skip("isolated interpreter cannot import the source package")
     assert result.returncode == 0, result.stderr

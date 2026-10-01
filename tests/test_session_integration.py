@@ -1,8 +1,7 @@
-"""Session persistence integration: committed turns, recovery, failure and cancellation paths.
+"""会话持久化集成：成功提交、恢复、失败与取消路径。
 
-These tests protect the App -> Engine -> SessionService boundary: successful
-rounds are persisted and reloaded with their context, non-successful runs never
-append a turn, and a storage failure leaves no half turn behind.
+这些测试保护 App -> Engine -> SessionService 边界：成功轮次会持久化并连同上下文重新加载，
+非成功运行不会追加 turn，存储失败不会留下半个 turn。
 """
 
 from __future__ import annotations

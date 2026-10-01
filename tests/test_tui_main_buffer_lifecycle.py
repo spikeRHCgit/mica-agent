@@ -425,7 +425,7 @@ def test_ctrl_d_is_ignored_with_a_draft_or_an_active_run(tmp_path: Path) -> None
         def handle_key(key: Any) -> bool:
             result = original_handle_key(key)
             if key.name == "ctrl_d":
-                # Notify only after the real queued-key handler has returned.
+                # 仅在真实排队按键处理器返回后通知。
                 handled.set()
             return result
 

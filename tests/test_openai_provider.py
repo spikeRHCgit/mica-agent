@@ -1827,7 +1827,7 @@ def test_transport_error_before_response_exhausts_retries() -> None:
 
 
 class _BlockingStream(httpx.AsyncByteStream):
-    """Yield one event, then expose a deterministic cancellation point."""
+    """输出一个事件，然后暴露确定的取消点。"""
 
     def __init__(self) -> None:
         self.blocked = asyncio.Event()

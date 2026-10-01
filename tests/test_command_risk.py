@@ -1,4 +1,4 @@
-"""All command strings here are classified only, never executed."""
+"""仅对命令字符串分类，不执行它们。"""
 
 import pytest
 

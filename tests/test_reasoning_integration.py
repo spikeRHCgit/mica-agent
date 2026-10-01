@@ -1,4 +1,4 @@
-"""Reasoning propagation across transport, engine and App without session persistence."""
+"""验证 reasoning 在 transport、engine 与 App 之间传递，但不持久化到 session。"""
 
 from __future__ import annotations
 

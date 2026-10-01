@@ -371,7 +371,7 @@ async def pump(predicate: Any, *, message: str = "condition") -> None:
 async def feed_and_wait_processed(
     screen: MainBufferScreen, fake_input: FakeInput, *keypresses: Any
 ) -> None:
-    """Wait for each fed key to return from the real queued-key handler."""
+    """为真实排队按键处理器中的每个输入等待其返回。"""
     processed: asyncio.Queue[None] = asyncio.Queue()
     original_handle_key = screen._handle_key
 

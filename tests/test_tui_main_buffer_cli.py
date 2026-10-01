@@ -1,4 +1,4 @@
-"""Test default ``mica cli`` routing, main-buffer assembly, and resource cleanup."""
+"""测试默认 ``mica cli`` 路由、主缓冲区装配与资源清理。"""
 
 from __future__ import annotations
 

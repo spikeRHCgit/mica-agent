@@ -1,4 +1,4 @@
-"""Two-mode authorization through the public tool executor; no destructive commands run."""
+"""通过公共工具执行器验证双模式授权；不执行破坏性命令。"""
 
 import asyncio
 from pathlib import Path

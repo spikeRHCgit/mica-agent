@@ -95,7 +95,7 @@ class ScriptedProvider:
 
 
 class HangingProvider:
-    """Signal entry into the hanging stream, optionally after partial text."""
+    """在挂起的 stream 中标记进入状态，可选择先输出部分文本。"""
 
     def __init__(self, emit_delta: bool = True) -> None:
         self._emit_delta = emit_delta

@@ -1232,7 +1232,7 @@ def test_installed_wheel_write_and_continue_restore_complete_tool_history(
 def test_installed_wheel_default_tui_tool_dialog_and_continue_restore(
     full_distribution: InstalledDistribution,
 ) -> None:
-    """Installed wheel: fake Screen drives the default frontend and continue."""
+    """已安装 wheel：由 fake Screen 驱动默认前端并继续会话。"""
     dist = full_distribution
     case_root = dist.outside_repository / "P5-09 TUI 工作区"
     home = case_root / "隔离 HOME"

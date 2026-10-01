@@ -1146,7 +1146,7 @@ def test_running_token_cancellation_restores_partial_without_forged_assistant() 
     collected: list[EngineEvent] = []
 
     async def cancel_run() -> None:
-        # Running-token cancellation, distinct from an external task.cancel().
+        # 运行中的 cancellation token 取消，与外部 task.cancel() 不同。
         token = CancellationToken()
         task = asyncio.create_task(
             _collect(app, "interrupt me", collected, cancellation=token)

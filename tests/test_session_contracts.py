@@ -117,7 +117,7 @@ def test_session_meta_rejects_naive_datetimes(field: str) -> None:
     with pytest.raises(ValueError, match=field):
         make_session_meta(
             **{
-                field: datetime(  # noqa: DTZ001 - intentional invalid input
+                field: datetime(  # noqa: DTZ001 - 刻意构造无效输入
                     2026, 8, 21, 3, 4, 5
                 )
             }
@@ -328,8 +328,8 @@ def test_v4_reader_rejects_invalid_edit_line_numbers_and_kinds() -> None:
     presentation["payload"] = payload
     call = record["messages"][1] if isinstance(record["messages"], list) else None
     assert call is not None
-    # The read ToolCall remains deliberately mismatched, so the identity check
-    # is also exercised without exposing the invalid payload.
+    # read ToolCall 保持刻意不匹配，以同时验证身份校验。
+    # 校验不得暴露无效 payload。
     with pytest.raises(SessionFormatError):
         deserialize_session_record(record)
 
@@ -469,7 +469,7 @@ def test_turn_entry_allows_an_empty_complete_assistant_message() -> None:
 def test_turn_entry_rejects_naive_completion_time() -> None:
     with pytest.raises(ValueError, match="completed_at"):
         make_turn_entry(
-            completed_at=datetime(  # noqa: DTZ001 - intentional invalid input
+            completed_at=datetime(  # noqa: DTZ001 - 刻意构造无效输入
                 2026, 8, 21, 3, 4, 5
             )
         )
