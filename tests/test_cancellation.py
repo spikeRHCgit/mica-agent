@@ -1,4 +1,4 @@
-"""P4-01 统一取消信号测试。"""
+"""统一取消信号测试。"""
 
 from __future__ import annotations
 

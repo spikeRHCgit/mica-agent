@@ -1,9 +1,8 @@
-"""Engine Event 公共契约测试（阶段计划 4.3）。
+"""Engine Event 公共契约测试。
 
-验证：五类事件（run_started / text_delta / run_completed /
-run_failed / run_cancelled）都能关联 Run 并保留顺序语义；
-终态带统一 RunStatus；run_failed 带错误类别和面向用户的诊断；
-事件对象不可变。
+验证运行、思考与文本增量、工具及交互事件的身份、顺序、字段校验和不可变性；
+终态带统一 RunStatus，run_failed 带错误类别和面向用户的安全诊断；
+工具展示与输出增量遵守数据和安全边界。
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""P3-01 会话公共数据契约测试。"""
+"""会话公共数据契约测试。"""
 
 from __future__ import annotations
 

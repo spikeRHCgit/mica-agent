@@ -1,10 +1,10 @@
-"""Minimal command-line entry package for Mica.
+"""Public contracts, services, helpers, and runtime entry points for Mica.
 
-The top level exposes only cross-module public contract objects: standard messages,
-engine events, and the ``AgentEngine`` / ``MicaApp`` assembly entry points.
-``AgentEngine`` and ``MicaApp`` are loaded lazily through the module-level
-``__getattr__`` so that importing a lightweight submodule such as
-``mica_agent.models`` does not pull in the provider network stack.
+Exports include messages and events, session storage and services, workspace and
+tool helpers, and runtime assembly entry points. ``AgentEngine``, ``MicaApp``, and
+selected dependency-heavy boundaries are loaded lazily through ``__getattr__``
+so lightweight imports such as ``mica_agent.models`` do not load the provider
+network stack.
 """
 
 from .cancellation import CancellationRequested, CancellationToken

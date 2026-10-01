@@ -1,6 +1,6 @@
-"""OpenAI-compatible Provider 生产实现测试（P2-02 Worker A）。
+"""OpenAI-compatible Provider 生产实现测试。
 
-所有测试使用 ``httpx.MockTransport`` 固定 HTTP 传输响应，
+测试在 HTTP 传输边界提供固定响应并观测资源生命周期，
 不访问真实网络、不使用真实 API Key。
 """
 
@@ -140,7 +140,7 @@ def test_provider_conforms_to_public_contract() -> None:
 
 
 def test_provider_conforms_to_extended_protocol_with_aclose() -> None:
-    # P2-03：Provider Protocol 增加 aclose 后，生产实现必须继续符合。
+    # 生产实现必须符合包含 stream 与 aclose 的 Provider 协议。
     provider = make_provider(lambda request: httpx.Response(200, request=request))
 
     assert isinstance(provider, Provider)

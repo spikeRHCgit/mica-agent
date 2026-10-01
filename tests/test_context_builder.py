@@ -1,4 +1,4 @@
-"""P3-04 Context Builder 与 AGENTS.md 加载测试。"""
+"""Context Builder 与 AGENTS.md 加载测试。"""
 
 from __future__ import annotations
 

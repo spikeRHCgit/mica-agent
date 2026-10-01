@@ -1,4 +1,4 @@
-"""P4-03 工作区路径边界的公共行为测试。"""
+"""工作区路径边界的公共行为测试。"""
 
 from __future__ import annotations
 

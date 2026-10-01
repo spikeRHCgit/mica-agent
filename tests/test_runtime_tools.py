@@ -1,4 +1,4 @@
-"""P4-04 bash 与 ask 的公共行为测试。"""
+"""bash 与 ask 的公共行为测试。"""
 
 from __future__ import annotations
 

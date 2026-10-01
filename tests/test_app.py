@@ -1,4 +1,4 @@
-"""MicaApp 公共行为测试（P2-03）。
+"""MicaApp 公共行为测试。
 
 最小 Provider 与 httpx.MockTransport 均只存在于测试文件内；
 跨层链路（MockTransport → OpenAICompatibleProvider → AgentEngine

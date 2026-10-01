@@ -1,4 +1,4 @@
-"""P3-02 JSONL Store、故障与并发测试。"""
+"""JSONL Store、故障与并发测试。"""
 
 from __future__ import annotations
 

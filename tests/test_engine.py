@@ -1,7 +1,7 @@
-"""AgentEngine 公共行为测试（P2-03）。
+"""AgentEngine 公共行为测试。
 
 最小 Provider 只存在于本测试文件内，用于固定事件序列、
-错误映射和精确取消时机；真实跨层链路在 test_app.py 验证。
+错误映射和精确取消时机；HTTP Provider 到 App 的跨层链路在 test_app.py 验证。
 """
 
 from __future__ import annotations

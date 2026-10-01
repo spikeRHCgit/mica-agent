@@ -1,4 +1,4 @@
-"""P3-03 Session Service 业务语义测试。"""
+"""Session Service 业务语义测试。"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""P3-02 工作区身份测试。"""
+"""工作区身份测试。"""
 
 from __future__ import annotations
 

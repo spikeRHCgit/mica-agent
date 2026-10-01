@@ -1,4 +1,4 @@
-"""P4-02 公共 JSON Schema 校验入口测试。"""
+"""公共 JSON Schema 校验入口测试。"""
 
 from __future__ import annotations
 

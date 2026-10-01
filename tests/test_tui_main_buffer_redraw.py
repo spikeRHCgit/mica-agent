@@ -1,9 +1,9 @@
-"""物理重绘状态机的回放测试（P5-11A-MR1 §2）。
+"""物理重绘状态机的回放测试。
 
 这些测试把渲染器**实际发出的字节流**回放到最小的虚拟终端上，因此断言的
 是物理结果：启动前的 shell 内容是否还在、帧的行数增减是否留下旧尾巴、
-光标最后落在哪个单元格。只在旧实现上才成立的「按新帧行数向上移动光标」
-假设会立刻破坏 sentinel，从而真实失败。
+光标最后落在哪个单元格。帧高变化时，旧帧擦除和光标复位不能仅按新帧行数
+计算，否则会破坏 sentinel。
 """
 
 from __future__ import annotations
@@ -296,7 +296,7 @@ def test_renderer_never_emits_forbidden_effects_at_any_step() -> None:
     harness.assert_safe()
 
 
-# -- 短帧后 pending 超高（P5-11A-MR1-2 §1）-------------------------------------
+# 短帧后 pending 超高
 
 OVERFLOW_BODY = [f"row-{index}" for index in range(20)]
 BODY_PATTERN = re.compile(r"row-\d+")
@@ -422,7 +422,7 @@ def test_overlong_pending_with_changing_chrome_height() -> None:
     harness.assert_safe()
 
 
-# -- 全局 Ctrl+O 的物理重排（P5-11B §4.6）------------------------------------
+# 全局 Ctrl+O 的物理重排
 
 
 def _write_view(lines: int):
@@ -478,7 +478,7 @@ def test_global_expansion_reflows_earlier_rows_in_the_main_buffer() -> None:
     harness.assert_safe()
 
 
-# -- cursor-only 帧（P5-11C-MR3）----------------------------------------------
+# cursor-only 帧
 
 
 def _cursor_only_chunk(

@@ -1,4 +1,4 @@
-"""Provider contract package: exposes only provider-agnostic interfaces and data objects."""
+"""Provider contracts, data, errors, and ``OpenAICompatibleProvider``."""
 
 from .base import (
     AuthenticationError,

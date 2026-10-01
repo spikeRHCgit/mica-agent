@@ -1,4 +1,4 @@
-"""P4-01 公共工具数据契约测试。"""
+"""公共工具数据契约测试。"""
 
 from __future__ import annotations
 

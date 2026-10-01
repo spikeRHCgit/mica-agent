@@ -1,4 +1,4 @@
-"""主缓冲区内容层级、思考模式、全局 Ctrl+O 与历史复用测试（P5-11B §4.2/4.3/4.6/4.7）。"""
+"""主缓冲区内容层级、思考模式、全局 Ctrl+O 与历史复用测试。"""
 
 from __future__ import annotations
 
@@ -534,7 +534,7 @@ def test_repr_never_contains_body_text() -> None:
     assert ENTER is not None
 
 
-# -- P5-11B-MR3 视觉层级 -----------------------------------------------------
+# 视觉层级
 
 
 @pytest.mark.parametrize("width", [10, 40, 80, 110])

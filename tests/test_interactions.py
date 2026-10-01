@@ -1,4 +1,4 @@
-"""P4-01 前端无关的交互响应契约测试。"""
+"""前端无关的交互响应契约测试。"""
 
 from __future__ import annotations
 
