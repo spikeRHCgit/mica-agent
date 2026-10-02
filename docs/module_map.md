@@ -1,5 +1,7 @@
 # Mica 源码技术地图
 
+核对：2026-10-02。治理期冻结已按 D-014、D-016 结束；本文按现行源码维护，不意味着既有架构已重构。
+
 ## 使用方式
 
 本文用于按文件快速定位 Mica 当前源码。每个词条只说明一个实际存在的源码或包资源文件；
@@ -12,7 +14,7 @@
 
 | 文件 | 具体作用 |
 |---|---|
-| `src/mica_agent/__init__.py` | Mica 顶层公共 API 出口；集中导出稳定契约，并通过懒加载避免普通导入触发 CLI、Provider、文件系统或运行时装配。 |
+| `src/mica_agent/__init__.py` | Mica 顶层公共 API 出口；导出消息、事件、会话与工具契约，以及存储、服务、工作区辅助和运行装配入口。Engine、App 和部分依赖较重的边界通过 `__getattr__` 惰性加载，轻量模型导入不拉起 Provider 网络栈；当前导出范围不在本次治理中变更。 |
 | `src/mica_agent/__main__.py` | `python -m mica_agent` 的最小入口；把执行直接交给 `cli.main()`。 |
 | `src/mica_agent/_file_lock.py` | JSONL Store 使用的跨平台独占文件锁；组合进程内线程锁与 Windows/POSIX 文件锁，提供超时和上下文管理。 |
 | `src/mica_agent/app.py` | 应用层装配边界；绑定 SessionService、启动上下文、AgentEngine 和工具执行器。完整成功提交 `TurnEntry`；取消或可恢复 Provider 失败提交一次 `RunCheckpoint`，检查点 ID 由独立 `checkpoint_id_factory` 生成（默认 `uuid4().hex`），不消耗 turn ID。持久化失败只发出安全 `RunFailed(STORAGE)`。 |
@@ -54,8 +56,8 @@
 | `src/mica_agent/tui/main_buffer/screen.py` | 主缓冲区前端编排与模式机；维护 `IDLE/RUNNING/ASK/PERMISSION/CLOSED` 唯一活动模式，按 `run_id`／单调 `seq`／`(run_id, call_id, tool_name)` 与最终快照完整身份准入公共事件（名称与 presentation kind 不一致时拒绝投影），把事件投影到语义文档与唯一工作状态：文本增量按模型步骤创建独立片段（`TextDelta` 用流式 Markdown 块、`ReasoningDelta` 只进思考块、工具事件经 `ToolViewFactory` 生成专用视图并原地收口）。`Ctrl+O` 是全局工具详情开关（只影响工具记录，不改变思考、Ask、composer 与 facts），Esc 取消、`Ctrl+D` 最小退出、两次 `Ctrl+C` 退出、resize 重排、唯一刷新任务与 Run 结束后输入区恢复不变；历史恢复按 `StoredSession.entries` 投影 Turn 与检查点（v1/v2 或缺少快照时显示中性 `tool <name> · recorded`；未完成工具只显示名称和状态，部分助手用稳定 Markdown 加 Mica-owned `incomplete` 标记，不保留流式光标），不重放 Run、不恢复未保存的思考。提交顺序是先交运行时、成功才清空草稿；关闭时各步互相隔离并只记固定标签；`RunFailed` 只按 `ErrorCategory` 映射固定文案。输入侧另有两项职责：空 `drain` 时用一次性 `loop.call_later`（`ESCAPE_FLUSH_DELAY`，可注入 `escape_flush_delay` 供测试）安排有界 flush，非空 `drain` 取消待触发句柄，flush 结果与 drain 走同一个 `_enqueue_keys()` 归一化入队路径，关闭时先取消句柄，因此单独 `Esc` 可用而完整方向键不会被拆开；交互面板按 `渲染器高度 - 1` 传入可用行数并接住选中行锚点，业务侧拒绝响应时保留面板与状态并让交互显示固定提示（同时只记一条 `interaction response rejected` 诊断）。 |
 | `src/mica_agent/workspace.py` | 工作区身份与数据根边界；优先识别 Git 根目录，否则使用启动目录，并生成规范路径、slug、SHA-256 ID 和会话目录。 |
 | `src/mica_agent/workspace_paths.py` | 文件工具共享的工作区路径解析器；拒绝绝对/越界路径、重解析点、Windows 别名和 ADS；另提供文件授权与命令分析共用的敏感路径分类，不自行授权。 |
-| `src/mica_agent/providers/__init__.py` | Provider 子包的公共出口；只重导出供应商无关契约和错误，不执行网络请求。 |
+| `src/mica_agent/providers/__init__.py` | Provider 子包的公共出口；重导出 Provider 协议、请求与事件、错误类型及具体 `OpenAICompatibleProvider`。导入该子包会加载具体适配器模块，但不执行网络请求；契约与实现的导出分层仍按 D-014 留待后续评估。 |
 | `src/mica_agent/providers/base.py` | Provider 公共协议；定义 ProviderRequest、思考/文本/结束/错误事件、错误分类和 Provider 生命周期接口。 |
 | `src/mica_agent/providers/openai_compatible.py` | OpenAI-compatible Chat Completions 适配器；构造含可选思考强度的 HTTP 请求、解析 SSE 思考/文本增量、组装工具调用、分类错误并执行有限网络重试。 |
-| `src/mica_agent/prompts/system.md` | 随 wheel 分发的 UTF-8 内置系统提示词模板；只保存稳定正文和环境上下文占位符，不含会话动态状态或 `AGENTS.md` 内容。 |
+| `src/mica_agent/prompts/system.md` | 随 wheel 分发的 UTF-8 内置系统提示词模板；只保存稳定正文和环境上下文占位符，不含会话动态状态或 `AGENTS.md` 内容。该资源由 `.gitattributes` 指定 LF 检出，保护工作树与构建产物的精确字节契约。 |
 | `src/mica_agent/reasoning.py` | 供应商无关的 `ReasoningEffort` 思考强度枚举；定义稳定的小写 wire value，不读取配置或执行运行时装配。 |
