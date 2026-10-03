@@ -17,7 +17,7 @@ Phase 6：配置与模型 · 施工中 · 计划：`docs/phase6_plan.md`
 
 ## 进行中任务
 
-T-021 · 执行中 · A1 配置启动与选择恢复；第一关通过，允许原 worker 按最新白名单编码。任务分支 `task/T-021-config-model-selection`，工作区 `../mica-wt/T-021`。
+T-021 · 返工中 · A1 实现复审发现父目录凭据保护、权限失败来源隔离及直接调用思考映射兼容缺口；原卡原 worker 修复。任务分支 `task/T-021-config-model-selection`，工作区 `../mica-wt/T-021`；真实 Windows Terminal 验收仍待用户。
 
 ## 待用户决定
 
@@ -26,7 +26,7 @@ Codex 压缩恢复提醒已安装到 `.codex/hooks.json`，模板与命令检查
 
 ## 阻塞
 
-无。T-021 第一关及施工粒度已确认，无需 worker 重写整份方案。
+无外部阻塞。T-021 按原卡返工项继续，A1 未验收合并，不开始 A2。
 
 ## 遗留问题
 
