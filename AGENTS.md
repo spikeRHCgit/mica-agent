@@ -1,53 +1,35 @@
 # Mica 项目开发指导
 
-Mica 是面向个人开发者的轻量、可扩展 Agent 基座：以轻量内核提供可靠的 Agent 闭环（模型调用、工具执行、
-权限、取消、会话保存与恢复）、风格统一的终端体验，并通过公共契约扩展能力而不修改核心 Agent Loop。
+Mica 是面向个人开发者的轻量、可扩展 Agent 基座：以可靠的模型调用、工具执行、权限、取消、会话保存与恢复组成 Agent 闭环，并通过公共契约扩展能力。项目目标、范围和架构边界见 `docs/PROJECT_PLAN.md`。
 
-更进一步的项目定位、范围与架构边界见 `docs/PROJECT_PLAN.md`。
+## 文档入口
 
-本文只放启动步骤、文档路由、红线和定稿经验；其他内容按路由表到对应文档查找，不在这里复制。
+| 需要了解 | 读取 |
+|---|---|
+| 项目目标、路线图、范围、架构和项目验收 | `docs/PROJECT_PLAN.md` |
+| 当前主线、任务和待决策 | `docs/STATUS.md` |
+| 已确认的决定和理由 | `docs/decisions.md` |
+| 讨论中尚未归入正式文档的内容 | `docs/scratchpad.md` |
+| 配置、登录、模型和恢复行为 | `docs/configuration_spec.md` |
+| 终端交互、视觉规则和真实终端验收 | `docs/tui_design.md`、`docs/assets/tui/README.md` |
+| 代码位置与文件职责 | `docs/module_map.md` |
+| 产品代码、测试、验证和注释规范 | `docs/code_spec.md` |
+| 阶段交付与验收（完成后冻结） | `docs/phaseN_plan.md` |
+| 历史施工证据（仅追溯时读取） | `docs/log/` |
+| 任务边界和本地协作约定 | `docs/tasks/<ID>.md`、`docs/tasks/README.md` |
+| 角色实践和候选经验 | `docs/ata/<role>_practices.md`、`docs/ata/inbox.md` |
+| 使用、安装和开发命令 | `README.md` |
 
-## 启动步骤
+`STATUS.md`、计划、决定记录和速记本由 aTa master 维护；角色流程以已配置 aTa 的角色卡为准，项目文档不重复一套通用流程。
 
-接到需要读取、修改、运行或验证本仓库的实质性任务后，依次执行：
-
-1. **确认现场**：只读检查 Git 状态、当前分支或 worktree，读取 `docs/STATUS.md`，确认当前主线、你的任务和未提交改动的归属。发现不明改动、范围重叠、环境不一致或事实冲突时，先向用户（aTa worker 向 master）说明。
-2. **确认角色**：明确自己是 aTa master、aTa worker 还是单 agent。aTa 角色读取对应的 `docs/ata/*_practices.md`；接手已有任务时读取任务卡 `docs/tasks/<ID>.md`，从「进展与交接」继续。
-3. **按需读取**：只读取路由表中与任务相关的文档和章节，不通读 `docs/`。
-4. **动手之前**：修改代码或测试前读取 `docs/code_spec.md` 的对应区块，并核对 §1.3 需要确认的变化和 §2.4 验证安排；整理注释时读取 §3。
-
-## 文档路由
-
-| 需要了解 | 读取 | 维护者 |
-|---|---|---|
-| 当前主线、进行中任务、待决策、下一步 | `docs/STATUS.md` | master |
-| 产品定位、阶段路线、范围、架构边界、项目验收 | `docs/PROJECT_PLAN.md` | master |
-| 代码位置与文件职责 | `docs/module_map.md` | 修改源码的任务 |
-| 产品代码、测试与验证、注释规范 | `docs/code_spec.md` | master，经用户确认 |
-| 某项决定的理由与取代关系 | `docs/decisions.md` | master，经用户确认 |
-| 终端交互、视觉规格与视觉验收 | `docs/tui_design.md`、`docs/assets/tui/README.md` | master |
-| 任务目标、范围、进展与交接 | `docs/tasks/<ID>.md`（规则见 `docs/tasks/README.md`） | 见任务卡规则 |
-| 改方向、调整范围、中断计划或试验想法 | `docs/tasks/README.md` §6 | master |
-| 候选经验 | `docs/lessons/inbox.md` | 任何 agent 追加 |
-| 已完成阶段的交付与实现概况 | `docs/phaseN_plan.md` | 冻结 |
-| 历史施工证据（只在追溯原因时读取） | `docs/log/` | 冻结 |
-| 使用方法与开发命令 | `README.md` | 改变使用行为的任务 |
-
->> 单 agent 模式(即未处于ata工作流)下，由该 agent 承担 master 的文档维护；写入 `AGENTS.md`、`docs/code_spec.md` 和 `docs/decisions.md` 仍需用户确认。
-
-## 红线
+## 工程原则
 
 - **Git**：不推送、不改写已共享的历史、不直接在 `main` 上进行并行开发；提交只在用户要求或任务卡明确授权时进行，且任务卡授权仅限该任务分支。
 - **范围**：只修改任务声明的写入范围；需要越界时先停下说明，不顺手扩大到邻近重构。
 - **设计审查**：涉及 `docs/code_spec.md` §1.3 需要确认的变化（例如修改公共 API、持久化格式、事件顺序、取消语义、权限边界，或新增依赖）时，先说明现状、目标边界和备选方案，不直接堆叠实现。
 - **环境隔离**：默认测试不依赖真实 API Key、外部网络或真实 `~/.mica`；凭据不得进入代码、日志、会话或文档。
 - **工具链**：Python、pytest 和 ruff 一律通过 `uv run` 执行。
-
-## 经验沉淀
-
-可复用的教训先写入 `docs/lessons/inbox.md`（aTa worker 写入任务卡的「候选经验」），晋升为正式规则前必须经用户确认。下方定稿经验不超过 10 条；超出时提炼迁入 `docs/code_spec.md` 或删除。
-
-## 定稿经验
-
 - **真实证据**：诊断终端、依赖或异步行为时，以实际输入、输出和可观察事件为依据；不要用模拟结果代替真实环境证据，也不要通过放宽断言、吞错或跳过测试掩盖未定位的问题。
 - **契约同步**：产品路径或公共契约发生变化时，同步核对相关测试和文档；删除旧测试前，确认其独有的公共行为与安全回归价值已迁移或不再适用。
+
+工程原则、`docs/code_spec.md` 与 `docs/decisions.md` 的变更仍须用户确认；候选经验不直接生效，其提炼按 aTa 由 master 处理。

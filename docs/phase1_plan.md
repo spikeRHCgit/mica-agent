@@ -3,11 +3,11 @@
 > 状态：已完成
 > 上位约束：`docs/PROJECT_PLAN.md`
 
-## 1. 阶段目标
+## 1. 目标
 
 建立独立、可安装、可运行、可测试的 Mica Python 包，为后续 Agent 能力提供可靠的工程起点。
 
-## 2. 已交付能力
+## 2. 已交付
 
 - 建立 `src/mica_agent/` 源码包；分发项目名为 `mica-agent`，导入包名为 `mica_agent`。
 - 提供 `mica` 和 `python -m mica_agent` 两个共享 CLI 实现的公共入口，包括帮助、版本与参数错误处理。
@@ -17,7 +17,7 @@
 
 当前的入口用法、依赖和验证命令以 `README.md` 为准；源码位置以 `docs/module_map.md` 为准。
 
-## 3. 具体实现
+## 3. 实现概况
 
 - **包与分发**：`pyproject.toml` 使用 `setuptools.build_meta` 构建，从 `src/` 查找 Python 包；`[project]` 定义 `mica-agent`、版本和 Python 最低版本，`[project.scripts]` 将 `mica` 指向 `mica_agent.cli:main`。源码包与分发项目名分离，因此安装后的代码不依赖仓库工作目录。
 - **两个入口共用一处命令解析**：`src/mica_agent/__main__.py` 只调用 `cli.main()`；控制台脚本也指向同一函数。`cli.main()` 通过 `argparse` 处理帮助和参数错误，`--version` 从已安装的 `mica-agent` 分发元数据读取版本，而不是再维护一份版本常量。

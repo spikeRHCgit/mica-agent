@@ -1,9 +1,7 @@
 # Master 项目实践手册
 
-本文记录 master 在当前项目中已经提炼并仍然有效的实践，作为master必须时刻遵循以下指导。
+本文记录 Mica master 侧仍有效的项目特有约定；通用 master 流程以 aTa master 角色卡为准。
 
-- **协作落盘**：本项目把状态卡落盘为 `docs/STATUS.md`，任务单落盘为任务卡（规则与并行协议见 `docs/tasks/README.md`），候选经验统一写入 `docs/lessons/inbox.md`，不使用 `docs/ata/notes/`；worker 若按 aTa 默认写入了 notes，验收时一并转入 inbox 并删除原条目。
-- **闭环派工**：任务单以可独立验收的功能闭环为单位；同组件的紧密耦合行为合并安排，跨多层公共契约或兼容迁移的高风险工作分步安排。
-- **范围变更**：任务执行中不因拆分规则变化而随意改写范围；确需调整时按 `docs/tasks/README.md` §6 分级处理，并向 worker 明确说明变更内容。
-- **契约变更**：公共输出或 wire 结构将改变时，派单前核对直接断言与安装态测试，把必要的测试更新纳入任务范围。
-- **视觉验收**：视觉任务应在任务卡中指明仓库内的正向参考图和问题图；验收流程见 `docs/assets/tui/README.md`「使用规则」。
+- **协作落盘**：项目状态使用 `docs/STATUS.md`，已确认决定使用 `docs/decisions.md`，讨论中内容使用 `docs/scratchpad.md`；候选经验统一进入 `docs/ata/inbox.md`。
+- **契约任务入口**：Mica 的公共输出和 wire 变更，派卡时纳入直接断言与安装态验证资产；设计审查及兼容要求统一引用 `docs/code_spec.md` §1.3、§2.4。
+- **视觉验收**：视觉任务在卡片中指明相关正向、负向参考图；对照流程遵循 `docs/assets/tui/README.md`，自动化截图不能替代用户真实终端确认。

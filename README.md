@@ -97,15 +97,12 @@ uv run pytest -q -W error --strict-markers    # 最终全量，包含上述四�
 - `src/mica_agent/`：当前 Mica 的唯一 Python 源码包。
 - `tests/`：CLI 契约、Provider/Engine/App 测试与分发隔离验证。
 - `pyproject.toml`：分发元数据、入口与开发依赖。
-- `AGENTS.md`：agent 开发入口，包含启动步骤、文档路由和红线。
+- `AGENTS.md`：所有 agent 会话的项目入口，包含定位、文档路由和通用工程原则。
 - `docs/PROJECT_PLAN.md`：Mica 的正式项目方向和长期架构边界。
 - `docs/STATUS.md`：当前开发主线、进行中任务和待决策。
-- `docs/module_map.md`：按单个源码文件说明职责的技术地图，用于快速定位修改入口。
-- `docs/code_spec.md`：已定稿的产品代码、测试与验证、注释编写规范，后续按实际开发证据修订。
+- `docs/configuration_spec.md`：已确认、待实现的配置与模型行为规格，不是当前使用手册。
+- `docs/module_map.md`：按功能分组定位全部现有源码和测试文件。
+- `docs/code_spec.md`：已定稿的产品代码、测试与验证、注释编写规范。
 - `docs/decisions.md`：已确认的项目决策及其理由。
-- `docs/tui_design.md`：已经确认的终端前端交互、视觉和动态呈现规则。
-- `docs/phase1_plan.md`：第一阶段的工程地基、已交付能力与验收结论。
-- `docs/phase2_plan.md`：第二阶段基础对话闭环的已交付能力与验收结论。
-- `docs/phase3_plan.md`：第三阶段（工作区隔离、JSONL 会话、恢复与上下文）的交付、具体实现与验收结论。
-- `docs/phase4_plan.md`：已完成并通过验收的第四阶段（工具执行、权限控制与统一取消）计划。
-- `docs/phase5_plan.md`：已完成并通过验收的第五阶段（主缓冲区终端交互与中断恢复）计划。
+- `docs/tui_design.md`：已确认的终端前端交互、视觉和动态呈现规则。
+- `docs/phase1_plan.md` 至 `docs/phase5_plan.md`：已完成阶段的交付与验收结论。

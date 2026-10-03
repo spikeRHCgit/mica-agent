@@ -9,6 +9,7 @@
 > **内容边界**：本文只记录跨阶段成立的项目级决定，以及未开始阶段已经确认的需求。其他内容见：
 > - 当前进度、进行中任务和待决策：`docs/STATUS.md`；
 > - 决策理由：`docs/decisions.md`；
+> - 配置、登录、模型和恢复行为：`docs/configuration_spec.md`；
 > - 代码规则：`docs/code_spec.md`；
 > - 代码位置：`docs/module_map.md`；
 > - 终端交互规格：`docs/tui_design.md`；
@@ -159,7 +160,7 @@ Mica 的核心目标是形成以下完整闭环：
 | Phase 4：工具与权限 | 已完成 | 建立内置工具、权限、多步工具循环、思考和工具呈现契约。 | `docs/phase4_plan.md` |
 | Phase 5：终端交互 | 已完成 | 交付主缓冲区终端界面、交互组件、可靠取消和中断恢复。 | `docs/phase5_plan.md`、`docs/tui_design.md` |
 | 阶段间治理与设计对齐 | 已完成 | 完成文档治理、代码规范定稿、注释修整和测试资产整理；既有架构重构按 D-014 延期。 | `docs/code_spec.md`；收口与历史入口见 D-016 |
-| Phase 6：配置与模型 | 计划已编成，待审查；未施工 | 建立分工明确的 JSON 配置、订阅与多供应商登录、三类接口、模型发现与切换、共享设置及恢复。 | `docs/phase6_plan.md` |
+| Phase 6：配置与模型 | 计划已编成，待审查；未施工 | 建立分工明确的 JSON 配置、订阅与多供应商登录、三类接口、模型发现与切换、共享设置及恢复。 | `docs/phase6_plan.md`、`docs/configuration_spec.md` |
 | Phase 7：会话命令与上下文 | 未开始 | 交付会话选择和 `/new`、`/rename`、`/branch`、`/rewind`、`/clear`、`/btw`、`/compact`，以及上下文用量和压缩。 | 需求见 §5.4 |
 | Phase 8：扩展契约 | 未开始 | 建立 ExtensionAPI、显式发现，以及工具、Provider、命令、事件的稳定扩展入口和最小示例。 | 需求见 §5.5 |
 | Phase 9：分发与 MVP 收口 | 未开始 | 完成 npm 启动器与 Python wheel 配套分发、安装态系统验收、公开文档、许可证和 `0.1.0` 发布准备。 | 需求见 §5.6 |
@@ -184,8 +185,7 @@ Mica 的核心目标是形成以下完整闭环：
 
 ### 5.3 Phase 6 实施入口
 
-需求简报已按 D-017 的用户决定收敛并迁入 `docs/phase6_plan.md`。配置、模型、登录、共享设置与
-跨接口恢复的实施和验收以该计划为准；本节不另保留一份详细需求。
+需求简报已按 D-017 的用户决定收敛。阶段闭环、实施顺序和验收边界见 `docs/phase6_plan.md`；配置、模型、登录、共享设置与跨接口恢复的行为规格见 `docs/configuration_spec.md`。本节不另保留一份详细需求。
 
 ### 5.4 Phase 7 需求简报：会话命令与上下文
 

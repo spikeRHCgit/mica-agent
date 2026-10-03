@@ -4,11 +4,11 @@
 > 上位约束：`docs/PROJECT_PLAN.md`
 > 前置阶段：`docs/phase1_plan.md`
 
-## 1. 阶段目标
+## 1. 目标
 
 打通第一条真实对话链路：基础 CLI 接收用户文本，Engine 管理一次运行，OpenAI-compatible Provider 返回流式响应，前端显示文本增量和明确终态。
 
-## 2. 已交付能力
+## 2. 已交付
 
 - 提供供应商无关的标准文本消息、Provider 响应和带 Run 标识及顺序信息的 Engine 事件。
 - 实现 OpenAI-compatible Chat Completions 流式 Provider，包括 SSE 解析、错误分类、超时和请求边界上的有限重试。
@@ -18,7 +18,7 @@
 
 当前 CLI 用法以 `README.md` 为准；现行模块职责和公共入口以 `docs/module_map.md` 及源码为准。
 
-## 3. 具体实现
+## 3. 实现概况
 
 以下记录第二阶段建立、现行代码仍沿用的基础对话链路；涉及后续扩展的地方标明当前实现与阶段交付的区别。
 
