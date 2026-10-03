@@ -1,0 +1,18 @@
+{
+  "description": "ata: after context compaction, remind the ata master to reload its role card, docs/STATUS.md and docs/scratchpad.md.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "^compact$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo \"ata reminder: the context was just compacted. If you are acting as the ata master in this repository, re-read references/master.md of the ata skill, docs/STATUS.md and docs/scratchpad.md before doing anything else, then tell the user in one or two sentences the current mainline, its state and the next step.\"",
+            "timeout": 10,
+            "statusMessage": "ata: reloading master context"
+          }
+        ]
+      }
+    ]
+  }
+}
