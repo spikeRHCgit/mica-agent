@@ -160,7 +160,7 @@ Mica 的核心目标是形成以下完整闭环：
 | Phase 4：工具与权限 | 已完成 | 建立内置工具、权限、多步工具循环、思考和工具呈现契约。 | `docs/phase4_plan.md` |
 | Phase 5：终端交互 | 已完成 | 交付主缓冲区终端界面、交互组件、可靠取消和中断恢复。 | `docs/phase5_plan.md`、`docs/tui_design.md` |
 | 阶段间治理与设计对齐 | 已完成 | 完成文档治理、代码规范定稿、注释修整和测试资产整理；既有架构重构按 D-014 延期。 | `docs/code_spec.md`；收口与历史入口见 D-016 |
-| Phase 6：配置与模型 | 计划已编成，待审查；未施工 | 建立分工明确的 JSON 配置、订阅与多供应商登录、三类接口、模型发现与切换、共享设置及恢复。 | `docs/phase6_plan.md`、`docs/configuration_spec.md` |
+| Phase 6：配置与模型 | 施工中 | 建立分工明确的 JSON 配置、订阅与多供应商登录、三类接口、模型发现与切换、共享设置及恢复。 | `docs/phase6_plan.md`、`docs/configuration_spec.md` |
 | Phase 7：会话命令与上下文 | 未开始 | 交付会话选择和 `/new`、`/rename`、`/branch`、`/rewind`、`/clear`、`/btw`、`/compact`，以及上下文用量和压缩。 | 需求见 §5.4 |
 | Phase 8：扩展契约 | 未开始 | 建立 ExtensionAPI、显式发现，以及工具、Provider、命令、事件的稳定扩展入口和最小示例。 | 需求见 §5.5 |
 | Phase 9：分发与 MVP 收口 | 未开始 | 完成 npm 启动器与 Python wheel 配套分发、安装态系统验收、公开文档、许可证和 `0.1.0` 发布准备。 | 需求见 §5.6 |

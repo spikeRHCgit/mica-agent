@@ -1,6 +1,6 @@
 # Mica 第六阶段：配置与模型
 
-> 状态：计划已编成，待用户审查；尚未施工。
+> 状态：用户已确认计划，进入施工；授权见 D-019，当前任务见 `docs/STATUS.md`。
 > 上位约束：`docs/PROJECT_PLAN.md`；前置阶段：`docs/phase5_plan.md`。
 > 行为规格：`docs/configuration_spec.md`；终端菜单与输入所有权：`docs/tui_design.md` §13.1；工程与验证规范：`docs/code_spec.md`。
 
@@ -56,7 +56,7 @@ A 编码前审配置字段、来源、空闲装配和选择 wire；B 编码前�
 
 并发测试用 Event/队列/实际状态与有界等待；认证和模型服务隔离可控边界，默认不访问真实用户目录、Key、网络。失败保留现场并定位，不跑到绿、不以随后通过宣称历史间歇问题修复。
 
-最终按影响选择 `uv run pytest <范围> -q -W error`、`uv run ruff check <范围>`、`uv run ruff format --check <范围>`；依赖与分发改变时执行 `uv lock --check`、`uv build --offline` 及相关安装验证，选择依据见 code spec。本次文档迁移不执行这些产品验证。
+最终按影响选择 `uv run pytest <范围> -q -W error`、`uv run ruff check <范围>`、`uv run ruff format --check <范围>`；依赖与分发改变时执行 `uv lock --check`、`uv build --offline` 及相关安装验证，选择依据见 code spec。
 
 ### 真实终端与渠道
 
