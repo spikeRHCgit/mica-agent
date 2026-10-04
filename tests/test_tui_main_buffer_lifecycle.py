@@ -524,3 +524,41 @@ assert "mica_agent.app" not in sys.modules
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize("before_iteration", [True, False])
+def test_runtime_reservation_released_on_cancel_and_task_creation_failure(
+    tmp_path, monkeypatch, before_iteration
+):
+    from mica_agent.tui.main_buffer.runtime import MainBufferRuntime
+
+    provider = ScriptedProvider([[Finish()]])
+    app = make_app(tmp_path, provider)
+
+    async def sink(event):
+        return None
+
+    async def scenario():
+        runtime = MainBufferRuntime(app, event_sink=sink)
+        if before_iteration:
+            assert runtime.submit("hello")
+            runtime.active_task.cancel()
+            await runtime.wait_idle()
+        else:
+
+            def fail(*args, **kwargs):
+                raise RuntimeError("injected task creation failure")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(asyncio, "create_task", fail)
+                with pytest.raises(RuntimeError):
+                    runtime.submit("hello")
+        assert not app.is_busy and runtime.active_task is None
+        assert app.history == () and provider.requests == []
+        assert runtime.submit("next")
+        await runtime.wait_idle()
+        assert len(provider.requests) == 1
+        await runtime.aclose()
+
+    asyncio.run(scenario())
+    assert provider.aclose_calls == 1

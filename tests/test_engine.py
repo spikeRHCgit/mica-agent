@@ -1,7 +1,8 @@
 """AgentEngine 公共行为测试。
 
 最小 Provider 只存在于本测试文件内，用于固定事件序列、
-错误映射和精确取消时机；HTTP Provider 到 App 的跨层链路在 test_app.py 验证。
+错误映射和精确取消时机；真实 HTTP 工具往返在本文件验证，
+HTTP Provider 到 App/screen 的跨层链路在对应集成测试验证。
 """
 
 from __future__ import annotations
@@ -195,6 +196,66 @@ def _runtime_bash_executor(workspace: Path) -> ToolExecutor:
         output_reporter=executor.output_reporter,
     )
     return executor
+
+
+def test_http_tool_only_completion_executes_and_returns_final_text() -> None:
+    import json
+
+    import httpx
+    from sse_transport_helpers import RecordingTransport, sse_response
+
+    from mica_agent.providers import OpenAICompatibleProvider
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if len(transport.requests) == 1:
+            return sse_response(
+                [
+                    'data: {"choices":[{"delta":{"role":"assistant","content":""},"finish_reason":""}]}\n\n',
+                    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"lookup","arguments":"{\\"query\\":"}}]},"finish_reason":""}]}\n\n',
+                    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"offline\\"}"}}]},"finish_reason":""}]}\n\n',
+                    'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+                    "data: [DONE]\n\n",
+                ]
+            )
+        return sse_response(
+            [
+                'data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}\n\n',
+                "data: [DONE]\n\n",
+            ]
+        )
+
+    transport = RecordingTransport(handler)
+    provider = OpenAICompatibleProvider(
+        "TEST_ONLY_KEY",
+        "https://example.test/v1",
+        transport=transport,
+    )
+    executor, _ = _lookup_executor()
+    engine = AgentEngine(provider, tool_executor=executor)
+
+    async def scenario() -> None:
+        try:
+            events = await _collect(engine, _request())
+            assert sum(isinstance(e, RunCompleted) for e in events) == 1
+            assert not any(isinstance(e, RunFailed) for e in events)
+            assert [e.text for e in events if isinstance(e, TextDelta)] == ["done"]
+            assert sum(isinstance(e, ToolStarted) for e in events) == 1
+            finished = [e for e in events if isinstance(e, ToolFinished)]
+            assert len(finished) == 1
+            assert finished[0].status is ToolResultStatus.SUCCESS
+            assert len(transport.requests) == 2
+            messages = json.loads(transport.requests[1].read())["messages"]
+            assert [m["role"] for m in messages] == ["user", "assistant", "tool"]
+            call = messages[1]["tool_calls"][0]
+            assert call["id"] == messages[2]["tool_call_id"] == "call-1"
+            assert json.loads(call["function"]["arguments"]) == {"query": "offline"}
+            assert json.loads(messages[2]["content"])["data"] == {"value": "found"}
+            assert all(r.is_closed for r in transport.responses)
+        finally:
+            await provider.aclose()
+        assert transport.aclose_count == 1
+
+    asyncio.run(scenario())
 
 
 def test_engine_emits_prepared_before_started_and_final_presentation() -> None:

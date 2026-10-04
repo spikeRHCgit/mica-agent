@@ -65,7 +65,7 @@ def test_session_meta_carries_validated_session_identity() -> None:
     )
 
     assert meta.session_id == "session-1"
-    assert meta.format_version == 4
+    assert meta.format_version == 5
     assert meta.workspace_id == "workspace-1"
     assert meta.workspace_path == r"C:\work\mica"
     assert meta.title == "Mica session"
@@ -89,7 +89,7 @@ def test_session_meta_rejects_non_integer_format_versions(version: object) -> No
         make_session_meta(format_version=version)
 
 
-@pytest.mark.parametrize("version", [0, 5, -1])
+@pytest.mark.parametrize("version", [0, 6, -1])
 def test_session_meta_rejects_unsupported_format_versions(version: int) -> None:
     with pytest.raises(ValueError, match="format_version"):
         make_session_meta(format_version=version)
@@ -198,7 +198,7 @@ def test_v4_tool_turn_keeps_presentations_separate_from_context_messages() -> No
     wire = serialize_session_record(turn)
     restored = deserialize_session_record(wire)
 
-    assert wire["format_version"] == 4
+    assert wire["format_version"] == 5
     assert wire["tool_presentations"] == [
         {
             "call_id": "call-1",
@@ -487,7 +487,7 @@ def test_session_meta_serializes_to_an_explicit_canonical_record() -> None:
 
     assert record == {
         "record_type": "session_meta",
-        "format_version": 4,
+        "format_version": 5,
         "session_id": "session-1",
         "workspace_id": "workspace-1",
         "workspace_path": r"C:\work\mica",
@@ -504,7 +504,7 @@ def test_turn_entry_serializes_to_an_explicit_canonical_record() -> None:
 
     assert record == {
         "record_type": "turn",
-        "format_version": 4,
+        "format_version": 5,
         "turn_id": "turn-1",
         "run_id": "run-1",
         "messages": [
@@ -542,7 +542,7 @@ def test_turn_record_round_trips_to_a_strong_type() -> None:
         serialize_session_record(make_turn_entry()),
     ],
 )
-@pytest.mark.parametrize("version", [0, 5, -1])
+@pytest.mark.parametrize("version", [0, 6, -1])
 def test_deserializer_rejects_unknown_versions(
     record: dict[str, object], version: int
 ) -> None:
@@ -846,11 +846,11 @@ def test_tool_result_sanitizer_preserves_url_and_redacts_file_path() -> None:
     wire = serialize_session_record(checkpoint)
     restored = deserialize_session_record(wire)
 
-    assert CURRENT_SESSION_FORMAT_VERSION == 4
+    assert CURRENT_SESSION_FORMAT_VERSION == 5
     assert SessionRecordType.RUN_CHECKPOINT.value == "run_checkpoint"
     assert wire == {
         "record_type": "run_checkpoint",
-        "format_version": 4,
+        "format_version": 5,
         "checkpoint_id": "checkpoint-1",
         "run_id": "run-checkpoint",
         "kind": "cancelled",
@@ -1073,3 +1073,24 @@ def test_v4_wire_rejects_incomplete_step_followed_by_progress_without_echo() -> 
 
     assert sensitive_marker not in str(caught.value)
     assert "invalid-time" not in str(caught.value)
+
+
+def test_v5_selection_roundtrip_and_legacy_or_partial_fields_rejected():
+    from dataclasses import replace
+
+    from mica_agent.session_contracts import SessionSelection
+
+    meta = replace(make_session_meta(), selection=SessionSelection("local", "chat"))
+    wire = serialize_session_record(meta)
+    assert wire["provider_id"] == "local" and wire["model_id"] == "chat"
+    assert deserialize_session_record(wire) == meta
+    for change in ({"format_version": 4}, {"provider_id": None}, {"model_id": True}):
+        with pytest.raises(SessionFormatError):
+            deserialize_session_record({**wire, **change})
+    for key in ("provider_id", "model_id"):
+        partial = dict(wire)
+        del partial[key]
+        with pytest.raises(SessionFormatError):
+            deserialize_session_record(partial)
+    plain = serialize_session_record(make_session_meta())
+    assert "provider_id" not in plain and "model_id" not in plain

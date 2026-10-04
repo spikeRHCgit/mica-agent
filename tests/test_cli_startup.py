@@ -563,3 +563,308 @@ def test_system_prompt_failure_is_safe_and_precedes_provider(
     assert err.text == "mica: unable to prepare system prompt\n"
     assert "secret" not in err.text
     assert str(workspace.workspace_path) not in err.text
+
+
+def test_saved_default_initializes_session_and_cli_override_preserves_restore_choice(
+    tmp_path, monkeypatch
+):
+    import json
+
+    from test_config_service import make_service
+
+    from mica_agent.providers import AuthenticationError, ProviderErrorEvent
+    from mica_agent.session_contracts import SessionSelection
+
+    for key in ("MICA_API_URL", "MICA_API_KEY", "MICA_MODEL"):
+        monkeypatch.delenv(key, raising=False)
+    configuration = make_service(tmp_path)
+    root = configuration.store.data_root
+    (root / "config.json").write_text(
+        '{"defaultModel":{"provider":"local","model":"a"}}'
+    )
+    workspace = resolve_workspace(configuration.store.workspace)
+    service = SessionService(JsonlSessionStore(workspace, root))
+    provider = ScriptedProvider(
+        [
+            [ProviderTextDelta("first"), Finish()],
+            [ProviderErrorEvent(AuthenticationError("fixed safe error"))],
+            [ProviderTextDelta("restored"), Finish()],
+        ]
+    )
+    constructed = []
+
+    def factory(url, key):
+        constructed.append((url, key))
+        return provider
+
+    async def scenario():
+        common = {
+            "workspace": workspace,
+            "data_root": root,
+            "session_service": service,
+            "provider_factory": factory,
+            "write_out": lambda text: None,
+            "write_err": lambda text: None,
+        }
+        assert await run_interactive(read_line=InputScript("first"), **common) == 0
+        stored = service.last_active_session()
+        assert stored.meta.selection == SessionSelection("local", "a")
+        (root / "config.json").write_text(
+            '{"defaultModel":{"provider":"local","model":"b"}}'
+        )
+        assert (
+            await run_interactive(
+                session_mode="continue",
+                explicit_selection=SessionSelection("local", "b"),
+                read_line=InputScript("override"),
+                **common,
+            )
+            == 0
+        )
+        assert service.last_active_session().meta.selection == SessionSelection(
+            "local", "a"
+        )
+        assert service.last_active_session().checkpoints
+        assert (
+            await run_interactive(
+                session_mode="continue", read_line=InputScript("restore"), **common
+            )
+            == 0
+        )
+
+    asyncio.run(scenario())
+    assert [request.model for request in provider.requests] == ["a", "b", "a"]
+    assert constructed == [("https://example.test/v1", "TEST_ONLY_SECRET")] * 3
+    raw = service.store.path_for_session(
+        service.last_active_session().meta.session_id
+    ).read_text()
+    assert "TEST_ONLY_SECRET" not in raw and "example.test" not in raw
+    assert provider.aclose_calls == 3
+    assert json.loads(raw.splitlines()[0])["provider_id"] == "local"
+
+
+def test_manual_configuration_reaches_actual_http_payload(tmp_path, monkeypatch):
+    import json
+
+    import httpx
+    from test_config_service import make_service
+
+    from mica_agent.providers import OpenAICompatibleProvider
+
+    for key in ("MICA_API_URL", "MICA_API_KEY", "MICA_MODEL"):
+        monkeypatch.delenv(key, raising=False)
+    configuration = make_service(tmp_path)
+    root = configuration.store.data_root
+    (root / "config.json").write_text(
+        '{"defaultModel":{"provider":"local","model":"a"},"reasoningEffort":"high"}'
+    )
+    directory = json.loads((root / "models.json").read_text())
+    directory["providers"]["local"]["models"][0].update(
+        maxTokens=123, thinkingLevelMap={"high": "vendor-high"}
+    )
+    (root / "models.json").write_text(json.dumps(directory))
+    captured = []
+
+    def handler(request):
+        captured.append(
+            (
+                str(request.url),
+                request.headers["authorization"],
+                json.loads(request.content),
+            )
+        )
+        return httpx.Response(
+            200,
+            text='data: {"choices":[{"delta":{"content":"hello"},"finish_reason":null}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+        )
+
+    provider = OpenAICompatibleProvider(
+        api_key="TEST_ONLY_SECRET",
+        base_url="https://example.test/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    out, err = Recorder(), Recorder()
+    result = asyncio.run(
+        run_interactive(
+            workspace=resolve_workspace(configuration.store.workspace),
+            data_root=root,
+            provider_factory=lambda url, key: provider,
+            read_line=InputScript("question"),
+            write_out=out,
+            write_err=err,
+        )
+    )
+    assert result == 0 and out.text == "hello\n"
+    address, authorization, payload = captured[0]
+    assert address == "https://example.test/v1/chat/completions"
+    assert authorization == "Bearer TEST_ONLY_SECRET"
+    assert payload["max_tokens"] == 123 and payload["reasoning_effort"] == "vendor-high"
+    assert "TEST_ONLY_SECRET" not in err.text
+
+
+def test_plain_preflight_workspace_failure_reports_only_safe_diagnostic(
+    monkeypatch, capsys
+):
+    from mica_agent.workspace import WorkspaceResolutionError
+
+    def fail(*args, **kwargs):
+        raise WorkspaceResolutionError("TEST_ONLY_KEY TEST_ONLY_URL")
+
+    monkeypatch.setattr(cli, "resolve_workspace", fail)
+    assert cli._main_cli(plain=True) == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == "mica: unable to resolve the current workspace\n"
+
+
+@pytest.mark.parametrize("source", ["environment", "direct"])
+@pytest.mark.parametrize("unsafe", ["file", "parent"])
+def test_unprotected_auth_does_not_block_independent_startup_source(
+    tmp_path, monkeypatch, source, unsafe
+):
+    from test_config_service import make_service
+    from test_credential_permissions import protect
+
+    configuration = make_service(tmp_path)
+    root = configuration.store.data_root
+    auth = root / "auth.json"
+    protect(root)
+    if unsafe == "file":
+        protect(auth, shared=True)
+    else:
+        protect(root, shared=True, rights="CreateFiles")
+    values = (
+        "https://independent.example.test/v1",
+        "INDEPENDENT_TEST_KEY",
+        "independent",
+    )
+    for name, value in zip(
+        ("MICA_API_URL", "MICA_API_KEY", "MICA_MODEL"), values, strict=True
+    ):
+        if source == "environment":
+            monkeypatch.setenv(name, value)
+        else:
+            monkeypatch.delenv(name, raising=False)
+    provider = ScriptedProvider([[ProviderTextDelta("independent reply"), Finish()]])
+    connections = []
+
+    def factory(url, key):
+        connections.append((url, key))
+        return provider
+
+    out, err = Recorder(), Recorder()
+    before = auth.read_bytes()
+    try:
+        code = asyncio.run(
+            run_interactive(
+                *(values if source == "direct" else ()),
+                workspace=resolve_workspace(configuration.store.workspace),
+                data_root=root,
+                provider_factory=factory,
+                read_line=InputScript("hello"),
+                write_out=out,
+                write_err=err,
+            )
+        )
+        assert code == 0
+        assert out.text == "independent reply\n"
+        assert connections == [values[:2]]
+        assert "credential" in err.text and "protect" in err.text
+        assert "TEST_ONLY_SECRET" not in out.text + err.text
+        assert "INDEPENDENT_TEST_KEY" not in out.text + err.text
+        assert str(root) not in err.text
+        assert auth.read_bytes() == before
+    finally:
+        protect(root)
+
+
+@pytest.mark.parametrize("damage", ["syntax", "root", "duplicate", "unreadable"])
+def test_auth_file_errors_remain_fatal_with_independent_connection(
+    tmp_path, monkeypatch, damage
+):
+    from test_config_service import make_service
+
+    configuration = make_service(tmp_path)
+    root = configuration.store.data_root
+    auth = root / "auth.json"
+    if damage == "unreadable":
+
+        def fail_read(path):
+            raise PermissionError("TEST_ONLY_SECRET")
+
+        monkeypatch.setattr(
+            "mica_agent._credential_permissions.read_credentials", fail_read
+        )
+    else:
+        auth.write_bytes(
+            {
+                "syntax": b"{ TEST_ONLY_SECRET",
+                "root": b"[]",
+                "duplicate": b'{"providers":{},"providers":{}}',
+            }[damage]
+        )
+    provider = ProviderStub()
+    err = Recorder()
+    result = asyncio.run(
+        run_interactive(
+            "https://independent.example.test/v1",
+            "INDEPENDENT_TEST_KEY",
+            "chat",
+            workspace=resolve_workspace(configuration.store.workspace),
+            data_root=root,
+            provider_factory=lambda url, key: provider,
+            read_line=InputScript("hello"),
+            write_out=Recorder(),
+            write_err=err,
+        )
+    )
+    assert result == 2 and not provider.requests
+    assert "mica:" in err.text
+    assert "source disabled" not in err.text
+    assert "TEST_ONLY_SECRET" not in err.text and "INDEPENDENT_TEST_KEY" not in err.text
+    assert not (root / "sessions").exists()
+
+
+def test_unprotected_saved_credentials_keep_reference_without_environment_fallback(
+    tmp_path, monkeypatch
+):
+    from test_config_service import make_service
+    from test_credential_permissions import protect
+
+    from mica_agent.session_contracts import SessionSelection
+
+    configuration = make_service(tmp_path)
+    root = configuration.store.data_root
+    workspace = resolve_workspace(configuration.store.workspace)
+    service = SessionService(JsonlSessionStore(workspace, root))
+    selected = service.create_session(selection=SessionSelection("local", "a"))
+    path = service.store.path_for_session(selected.meta.session_id)
+    before = path.read_bytes()
+    protect(root / "auth.json", shared=True)
+    for name, value in zip(
+        ("MICA_API_URL", "MICA_API_KEY", "MICA_MODEL"),
+        ("https://independent.example.test/v1", "INDEPENDENT_TEST_KEY", "chat"),
+        strict=True,
+    ):
+        monkeypatch.setenv(name, value)
+    provider = ProviderStub()
+    err = Recorder()
+    result = asyncio.run(
+        run_interactive(
+            workspace=workspace,
+            session_service=service,
+            session_mode="continue",
+            provider_factory=lambda url, key: provider,
+            read_line=InputScript("hello"),
+            write_out=Recorder(),
+            write_err=err,
+        )
+    )
+    assert result == 2 and not provider.requests
+    assert "Selected connection is unavailable" in err.text
+    assert "authentication source disabled" in err.text
+    assert (
+        service.load_session(selected.meta.session_id).meta.selection
+        == selected.meta.selection
+    )
+    assert path.read_bytes() == before

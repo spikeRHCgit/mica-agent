@@ -8,18 +8,10 @@ from __future__ import annotations
 
 import unicodedata
 from dataclasses import dataclass
-from enum import Enum
 from pathlib import PurePosixPath, PureWindowsPath
 
 from mica_agent.context_builder import AgentFileSource
-
-
-class ReasoningDisplayMode(Enum):
-    """TUI display mode for model reasoning text."""
-
-    FULL = "full"
-    COLLAPSED = "collapsed"
-    HIDDEN = "hidden"
+from mica_agent.reasoning import ReasoningDisplayMode
 
 
 @dataclass(frozen=True, slots=True, repr=False)

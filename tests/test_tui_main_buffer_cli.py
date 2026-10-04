@@ -108,7 +108,8 @@ def test_cli_routes_default_main_buffer_and_plain(
     monkeypatch.setenv("MICA_MODEL", "fake-model")
     calls: list[tuple[object, object, object]] = []
 
-    def fake_main_cli(mode, permission, *, plain):
+    def fake_main_cli(mode, permission, *, plain, explicit_selection):
+        assert explicit_selection is None
         calls.append((mode, permission, plain))
         return 0
 
@@ -118,7 +119,13 @@ def test_cli_routes_default_main_buffer_and_plain(
         cli.main()
 
     assert raised.value.code == 0
-    assert calls == [(expected_mode, expected_permission, expected_plain)]
+    assert calls == [
+        (
+            expected_mode,
+            expected_permission if "--permission-mode" in argv else None,
+            expected_plain,
+        )
+    ]
 
 
 def test_preview_flag_is_rejected_as_unknown_argument(
@@ -593,6 +600,217 @@ def test_default_route_drives_the_assembled_app(
         assert out.text == ""
         assert err.text == ""
         assert provider.aclose_calls == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("outcome", ["text", "reasoning-only", "done-only"])
+def test_configured_http_stream_reaches_screen_and_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    import io
+    import json
+
+    import httpx
+    from sse_transport_helpers import RecordingTransport
+    from test_config_service import make_service
+    from test_tui_main_buffer_screen import CTRL_C, ENTER, FakeInput, pump, typed
+    from test_tui_main_buffer_vt import VirtualTerminal
+
+    from mica_agent.checkpoint_contracts import RunCheckpointKind
+    from mica_agent.events import (
+        ErrorCategory,
+        ReasoningDelta,
+        RunCompleted,
+        RunFailed,
+        TextDelta,
+    )
+    from mica_agent.providers import OpenAICompatibleProvider
+    from mica_agent.session_contracts import SessionSelection
+    from mica_agent.tui import main_buffer
+
+    async def scenario() -> None:
+        configuration = make_service(tmp_path)
+        for name in ("MICA_API_URL", "MICA_API_KEY", "MICA_MODEL"):
+            monkeypatch.delenv(name, raising=False)
+        root = configuration.store.data_root
+        (root / "config.json").write_text(
+            '{"defaultModel":{"provider":"local","model":"a"},'
+            '"reasoningDisplay":"hidden"}'
+        )
+        workspace = resolve_workspace(configuration.store.workspace)
+        service = SessionService(JsonlSessionStore(workspace, root))
+        fake = FakeInput()
+        terminal = main_buffer.Terminal(
+            output=io.StringIO(),
+            input_factory=lambda: fake,
+            size=(100, 35),
+            environ={"NO_COLOR": "1"},
+            interactive=True,
+        )
+        blocked = asyncio.Event()
+        release_prefix = asyncio.Event()
+        release_tail = asyncio.Event()
+        progress_seen = asyncio.Event()
+        terminal_seen = asyncio.Event()
+        events: list[object] = []
+        screens = []
+
+        class Stream(httpx.AsyncByteStream):
+            close_count = 0
+
+            async def __aiter__(self) -> AsyncIterator[bytes]:
+                yield b'data: {"choices":[{"delta":{"role":"assistant","content":""},"finish_reason":""}]}\n\n'
+                blocked.set()
+                await release_prefix.wait()
+                if outcome != "done-only":
+                    yield b'data: {"choices":[{"delta":{"reasoning_content":"offline private analysis"},"finish_reason":""}]}\n\n'
+                if outcome == "text":
+                    yield b'data: {"choices":[{"delta":{"content":"Offline reply "},"finish_reason":""}]}\n\n'
+                await release_tail.wait()
+                if outcome == "text":
+                    yield b'data: {"choices":[{"delta":{"content":"is complete."},"finish_reason":"stop"}]}\n\n'
+                elif outcome == "reasoning-only":
+                    yield b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+                yield b"data: [DONE]\n\n"
+
+            async def aclose(self) -> None:
+                self.close_count += 1
+
+        body = Stream()
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, stream=body)
+
+        transport = RecordingTransport(handler)
+
+        def factory(url: str, key: str) -> OpenAICompatibleProvider:
+            return OpenAICompatibleProvider(
+                key, url, transport=transport, max_retries=2
+            )
+
+        class ObservedScreen(main_buffer.MainBufferScreen):
+            def __init__(self, app, **kwargs) -> None:
+                super().__init__(
+                    app, clock=lambda: 0.0, branch_reader=lambda path: None, **kwargs
+                )
+                screens.append(self)
+
+            async def handle_event(self, event: object) -> None:
+                events.append(event)
+                await super().handle_event(event)
+                expected = TextDelta if outcome == "text" else ReasoningDelta
+                if isinstance(event, expected):
+                    progress_seen.set()
+                if isinstance(event, (RunCompleted, RunFailed)):
+                    terminal_seen.set()
+
+        monkeypatch.setattr(main_buffer, "MainBufferScreen", ObservedScreen)
+        monkeypatch.setattr(main_buffer, "Terminal", lambda: terminal)
+        task = asyncio.create_task(
+            cli.run_interactive(
+                None,
+                None,
+                None,
+                data_root=root,
+                plain=False,
+                provider_factory=factory,
+                workspace=workspace,
+                session_service=service,
+                context_builder=ContextBuilder(data_root=root, workspace=workspace),
+            )
+        )
+        try:
+            await pump(lambda: fake.is_attached)
+            screen = screens[0]
+            fake.feed(*typed("hi"), ENTER)
+            await asyncio.wait_for(blocked.wait(), 5)
+            await pump(lambda: screen.mode == "running")
+            selected = service.list_sessions().sessions[0]
+            assert selected.meta.selection == SessionSelection("local", "a")
+            assert selected.turns == selected.checkpoints == ()
+            assert screen.mode == "running" and screen.status == "working"
+            assert not terminal_seen.is_set()
+            release_prefix.set()
+            if outcome != "done-only":
+                await asyncio.wait_for(progress_seen.wait(), 5)
+                assert service.load_session(selected.meta.session_id).turns == ()
+                assert not terminal_seen.is_set()
+            release_tail.set()
+            await asyncio.wait_for(terminal_seen.wait(), 5)
+            await pump(lambda: screen.mode == "idle")
+            stored = service.load_session(selected.meta.session_id)
+            assert "offline private analysis" not in repr(stored)
+            assert "TEST_ONLY_SECRET" not in repr(stored)
+            if outcome == "text":
+                assert sum(isinstance(e, RunCompleted) for e in events) == 1
+                assert not any(isinstance(e, RunFailed) for e in events)
+                assert screen.status == "done"
+                assert len(stored.turns) == 1 and stored.checkpoints == ()
+                assert (
+                    stored.turns[0].assistant_message.content
+                    == "Offline reply is complete."
+                )
+                visible = "Offline reply is complete."
+            else:
+                failures = [e for e in events if isinstance(e, RunFailed)]
+                assert len(failures) == 1
+                assert failures[0].category is ErrorCategory.MALFORMED
+                assert not any(isinstance(e, RunCompleted) for e in events)
+                assert screen.status == "error" and stored.turns == ()
+                assert len(stored.checkpoints) == 1
+                checkpoint = stored.checkpoints[0]
+                assert checkpoint.kind is RunCheckpointKind.RECOVERABLE_FAILURE
+                assert checkpoint.partial_assistant_message is None
+                visible = "The provider returned an unusable response."
+            await pump(lambda: any(visible in line for line in screen.renderer.frame()))
+            ansi = "".join(terminal.emitted)
+            vt = VirtualTerminal(cols=100, rows=35)
+            vt.feed(ansi)
+            assert any(visible in line for line in vt.screen())
+            assert vt.violations == []
+            assert "offline private analysis" not in "\n".join(vt.all_lines())
+            assert "TEST_ONLY_SECRET" not in ansi
+            (tmp_path / "stream-replay.ansi").write_text(ansi, encoding="utf-8")
+            (tmp_path / "stream-frame.json").write_text(
+                json.dumps(
+                    {
+                        "outcome": outcome,
+                        "frame": vt.screen(),
+                        "cursor": vt.cursor_cell(),
+                        "status": screen.status,
+                        "terminal_events": [
+                            type(e).__name__
+                            for e in events
+                            if isinstance(e, (RunCompleted, RunFailed))
+                        ],
+                        "saved_replies": [
+                            t.assistant_message.content for t in stored.turns
+                        ],
+                        "checkpoint_kinds": [c.kind.value for c in stored.checkpoints],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            fake.feed(CTRL_C, CTRL_C)
+            assert await asyncio.wait_for(task, 5) == 0
+            assert body.close_count == transport.aclose_count == 1
+            assert len(transport.requests) == 1
+            assert transport.responses[0].is_closed
+            assert json.loads(transport.requests[0].read())["max_tokens"] == 4096
+            closed_ansi = "".join(terminal.emitted)
+            vt.feed(closed_ansi[len(ansi) :])
+            assert vt.violations == []
+            assert vt.autowrap and vt.cursor_visible
+            assert fake.raw_mode_entries == 1
+            assert screen.cleanup_errors == []
+            (tmp_path / "stream-closed.ansi").write_text(closed_ansi, encoding="utf-8")
+        finally:
+            release_prefix.set()
+            release_tail.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     asyncio.run(scenario())
 

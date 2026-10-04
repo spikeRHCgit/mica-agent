@@ -29,9 +29,10 @@ def run_command(
     )
 
 
-def test_missing_config_precedes_context_prompt_and_provider_setup(
+def test_missing_plain_config_precedes_context_prompt_and_provider_setup(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    tmp_path,
 ) -> None:
     for name in ("MICA_API_URL", "MICA_API_KEY", "MICA_MODEL"):
         monkeypatch.delenv(name, raising=False)
@@ -43,9 +44,9 @@ def test_missing_config_precedes_context_prompt_and_provider_setup(
 
     monkeypatch.setattr(cli.ContextBuilder, "build", forbidden)
     monkeypatch.setattr(cli, "build_system_prompt", forbidden)
-    monkeypatch.setattr(cli, "run_interactive", forbidden)
+    monkeypatch.setattr(cli, "default_data_root", lambda: tmp_path / "missing-config")
 
-    assert cli._main_cli() == 2
+    assert cli._main_cli(plain=True) == 2
     captured = capsys.readouterr()
     assert calls == []
     assert captured.out == ""

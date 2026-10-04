@@ -254,6 +254,8 @@ class AgentEngine:
                     messages=messages,
                     tools=request.tools,
                     reasoning_effort=request.reasoning_effort,
+                    max_tokens=request.max_tokens,
+                    thinking_level_map=request.thinking_level_map,
                 )
                 async with aclosing(
                     self._provider_events(current_request, token)

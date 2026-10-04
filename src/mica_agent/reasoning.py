@@ -17,4 +17,12 @@ class ReasoningEffort(Enum):
     MAX = "max"
 
 
-__all__ = ["ReasoningEffort"]
+class ReasoningDisplayMode(Enum):
+    """Presentation preference independent of provider reasoning content."""
+
+    FULL = "full"
+    COLLAPSED = "collapsed"
+    HIDDEN = "hidden"
+
+
+__all__ = ["ReasoningDisplayMode", "ReasoningEffort"]

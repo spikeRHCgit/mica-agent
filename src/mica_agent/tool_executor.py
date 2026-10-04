@@ -110,6 +110,19 @@ class ToolExecutor:
         self._interaction_broker = interaction_broker or InteractionBroker()
         self._output_routes: dict[tuple[str, str], ToolOutputReporter] = {}
 
+    def bind_policy(self, mode: PermissionMode) -> ToolExecutor:
+        """Freeze only policy; preserve registry, broker and live output routing."""
+        if not isinstance(mode, PermissionMode):
+            raise TypeError("mode must be a PermissionMode")
+        view = ToolExecutor(
+            self._registry,
+            PolicyEngine(mode),
+            policy_input_factory=self._policy_input_factory,
+            interaction_broker=self._interaction_broker,
+        )
+        view._output_routes = self._output_routes
+        return view
+
     @property
     def output_reporter(self) -> ToolOutputReporter:
         """Return the synchronous safe-output route for the current tool call."""

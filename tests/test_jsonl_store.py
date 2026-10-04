@@ -158,10 +158,10 @@ def test_fixed_v2_tool_jsonl_loads_without_reexecuting_tools(tmp_path: Path) -> 
     assert path.read_bytes() == original
     assert any(item.meta.session_id == session_id for item in store.scan().sessions)
     upgraded = store.append_turn(session_id, make_turn(2, NOW + timedelta(seconds=1)))
-    assert upgraded.meta.format_version == 4
+    assert upgraded.meta.format_version == 5
     assert {
         json.loads(line)["format_version"] for line in path.read_bytes().splitlines()
-    } == {4}
+    } == {5}
 
 
 def write_v3_fixture(
@@ -238,11 +238,11 @@ def test_fixed_v3_fixture_loads_without_upgrade_until_business_write(
     upgraded = store.append_checkpoint(
         "legacy-v3", make_checkpoint(3, NOW + timedelta(seconds=1))
     )
-    assert upgraded.meta.format_version == 4
+    assert upgraded.meta.format_version == 5
     assert {
         json.loads(line)["format_version"]
         for line in store.path_for_session("legacy-v3").read_bytes().splitlines()
-    } == {4}
+    } == {5}
 
 
 def test_fixed_v1_jsonl_loads_through_public_store(tmp_path: Path) -> None:
@@ -253,7 +253,7 @@ def test_fixed_v1_jsonl_loads_through_public_store(tmp_path: Path) -> None:
     original = path.read_bytes()
     loaded = store.load("legacy-session")
 
-    assert CURRENT_SESSION_FORMAT_VERSION == 4
+    assert CURRENT_SESSION_FORMAT_VERSION == 5
     assert loaded.meta.format_version == 1
     assert path.read_bytes() == original
     assert any(
@@ -345,7 +345,7 @@ def test_v3_upgrade_replace_failure_preserves_bytes_and_retries(
     retried = store.append_checkpoint(
         "legacy-v3-failure", make_checkpoint(4, NOW + timedelta(seconds=1))
     )
-    assert retried.meta.format_version == 4
+    assert retried.meta.format_version == 5
 
 
 def test_append_checkpoint_upgrades_v1_atomically(tmp_path: Path) -> None:
@@ -355,7 +355,7 @@ def test_append_checkpoint_upgrades_v1_atomically(tmp_path: Path) -> None:
 
     appended = store.append_checkpoint("legacy-checkpoint", checkpoint)
 
-    assert appended.meta.format_version == 4
+    assert appended.meta.format_version == 5
     assert appended.entries[-1] == checkpoint
     records = [
         json.loads(line)
@@ -363,7 +363,7 @@ def test_append_checkpoint_upgrades_v1_atomically(tmp_path: Path) -> None:
         .read_bytes()
         .splitlines()
     ]
-    assert {record["format_version"] for record in records} == {4}
+    assert {record["format_version"] for record in records} == {5}
     assert original != store.path_for_session("legacy-checkpoint").read_bytes()
 
     session_id = r"folder/..\secret:会话"
@@ -391,9 +391,9 @@ def test_append_turn_upgrades_v1_and_business_change_in_one_v3_snapshot(
 
     raw = store.path_for_session("legacy-append").read_bytes()
     records = [json.loads(line) for line in raw.splitlines()]
-    assert upgraded.meta.format_version == 4
+    assert upgraded.meta.format_version == 5
     assert len(upgraded.turns) == 2
-    assert {record["format_version"] for record in records} == {4}
+    assert {record["format_version"] for record in records} == {5}
     assert all("messages" in record for record in records[1:])
     assert all("user_message" not in record for record in records[1:])
 
@@ -422,10 +422,10 @@ def test_v1_upgrade_replace_failure_preserves_bytes_and_allows_retry(
     upgraded = store.append_turn(
         "legacy-failure", make_turn(2, NOW + timedelta(seconds=1))
     )
-    assert upgraded.meta.format_version == 4
+    assert upgraded.meta.format_version == 5
     assert {
         json.loads(line)["format_version"] for line in path.read_bytes().splitlines()
-    } == {4}
+    } == {5}
 
 
 def test_v3_plain_text_turn_has_canonical_messages_wire_bytes(tmp_path: Path) -> None:
@@ -444,7 +444,7 @@ def test_v3_plain_text_turn_has_canonical_messages_wire_bytes(tmp_path: Path) ->
     raw = store.path_for_session("v3-wire").read_bytes()
     expected_meta = (
         '{"created_at":"2026-08-21T03:04:05.000000+00:00",'
-        '"format_version":4,"record_type":"session_meta",'
+        '"format_version":5,"record_type":"session_meta",'
         '"session_id":"v3-wire","title":"title",'
         '"updated_at":"2026-08-21T03:04:05.000000+00:00",'
         f'"workspace_id":{json.dumps(identity.workspace_id)},'
@@ -452,7 +452,7 @@ def test_v3_plain_text_turn_has_canonical_messages_wire_bytes(tmp_path: Path) ->
     ).encode()
     expected_turn = (
         b'{"completed_at":"2026-08-21T03:04:05.000000+00:00",'
-        b'"format_version":4,"messages":['
+        b'"format_version":5,"messages":['
         b'{"content":"question","role":"user"},'
         b'{"content":"answer","role":"assistant"}],'
         b'"record_type":"turn","run_id":"run-v2","tool_presentations":[],'
@@ -902,3 +902,36 @@ def test_delete_only_removes_one_session_and_keeps_lock_file(tmp_path: Path) -> 
     assert second_path.exists()
     assert lock_path.exists()
     assert store.session_directory.exists()
+
+
+def test_fixed_v4_checkpoint_read_preserves_bytes_and_first_write_upgrades_atomically(
+    tmp_path,
+):
+    store, identity = make_store(tmp_path)
+    session_id = "legacy-v4"
+    meta = {
+        "record_type": "session_meta",
+        "format_version": 4,
+        "session_id": session_id,
+        "workspace_id": identity.workspace_id,
+        "workspace_path": str(identity.workspace_path),
+        "title": "legacy",
+        "created_at": "2026-08-21T03:04:05.000000+00:00",
+        "updated_at": "2026-08-21T03:04:05.000000+00:00",
+    }
+    checkpoint = b'{"record_type":"run_checkpoint","format_version":4,"checkpoint_id":"old-checkpoint","run_id":"old-run","kind":"cancelled","user_message":{"role":"user","content":"continue"},"progress":[],"partial_assistant_message":{"role":"assistant","content":"partial"},"recorded_at":"2026-08-21T03:04:05.000000+00:00"}\n'
+    path = store.path_for_session(session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    original = json.dumps(meta).encode() + b"\n" + checkpoint
+    path.write_bytes(original)
+    loaded = store.load(session_id)
+    assert loaded.meta.format_version == 4 and loaded.meta.selection is None
+    assert len(loaded.checkpoints) == 1
+    assert path.read_bytes() == original
+    upgraded = store.append_turn(session_id, make_turn(2, NOW + timedelta(seconds=1)))
+    assert upgraded.meta.format_version == 5
+    assert upgraded.checkpoints == loaded.checkpoints
+    assert upgraded.entries[0] == loaded.entries[0]
+    assert {
+        json.loads(line)["format_version"] for line in path.read_bytes().splitlines()
+    } == {5}

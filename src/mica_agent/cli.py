@@ -27,6 +27,8 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeAlias
 
+from .config_contracts import ConfigError, EffectiveSettings, SelectionResolution
+from .config_store import ConfigStore
 from .context_builder import AgentFileSource, ContextBuilder
 from .events import (
     PermissionRequested,
@@ -47,6 +49,7 @@ from .interactions import (
 )
 from .jsonl_store import JsonlSessionStore, StoredSession
 from .permissions import PermissionMode
+from .session_contracts import SessionSelection
 from .session_service import NoHealthySessionError, SessionService
 from .system_prompt import build_system_prompt
 from .workspace import (
@@ -58,6 +61,7 @@ from .workspace import (
 
 if TYPE_CHECKING:
     from .app import MicaApp
+    from .config_service import ConfigService
     from .providers import Provider
 
 ReadLine: TypeAlias = Callable[[], Awaitable[str]]
@@ -68,6 +72,20 @@ Clock: TypeAlias = Callable[[], datetime]
 SessionMode: TypeAlias = Literal["new", "continue", "resume"]
 
 _ENVIRONMENT_VARIABLES = ("MICA_API_URL", "MICA_API_KEY", "MICA_MODEL")
+
+
+class _SelectionArgument(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        if (
+            getattr(namespace, self.dest, None) is not None
+            or not isinstance(values, str)
+            or not values.strip()
+            or not values.isprintable()
+        ):
+            parser.error(
+                "provider/model selection requires one nonblank value for each option"
+            )
+        setattr(namespace, self.dest, values)
 
 
 def main() -> None:
@@ -113,61 +131,74 @@ def main() -> None:
     cli_parser.add_argument(
         "--permission-mode",
         choices=("default", "solo"),
-        default="default",
+        default=None,
         help="select tool permission behavior",
+    )
+    cli_parser.add_argument(
+        "--provider",
+        action=_SelectionArgument,
+        help="temporary provider identifier override",
+    )
+    cli_parser.add_argument(
+        "--model", action=_SelectionArgument, help="temporary model identifier override"
     )
     cli_parser.set_defaults(session_mode="new")
     args = parser.parse_args()
     if args.command is None:
         parser.print_help()
         return
-    permission_mode = {
-        "default": PermissionMode.DEFAULT,
-        "solo": PermissionMode.SOLO,
-    }[args.permission_mode]
+    if (args.provider is None) != (args.model is None):
+        parser.error("provider and model must be specified together")
+    permission_mode = (
+        None if args.permission_mode is None else PermissionMode(args.permission_mode)
+    )
+    explicit_selection = (
+        None if args.provider is None else SessionSelection(args.provider, args.model)
+    )
     sys.exit(
         _main_cli(
             args.session_mode,
             permission_mode,
             plain=args.plain,
+            explicit_selection=explicit_selection,
         )
     )
 
 
-def _load_config() -> tuple[str, str, str] | None:
-    """Read and validate the three connection settings; print a diagnostic and return None
-    if any are missing."""
-    values = {name: os.environ.get(name, "") for name in _ENVIRONMENT_VARIABLES}
-    missing = [name for name, value in values.items() if not value.strip()]
-    if missing:
-        print(
-            "mica: missing required environment variables: " + ", ".join(missing),
-            file=sys.stderr,
-        )
-        return None
-    return tuple(values[name].strip() for name in _ENVIRONMENT_VARIABLES)  # type: ignore[return-value]
-
-
 def _main_cli(
     session_mode: SessionMode = "new",
-    permission_mode: PermissionMode = PermissionMode.DEFAULT,
+    permission_mode: PermissionMode | None = None,
     *,
     plain: bool = False,
+    explicit_selection: SessionSelection | None = None,
 ) -> int:
     """Synchronous ``mica cli`` entry point: a manual event loop allows graceful Ctrl+C
     exit."""
-    config = _load_config()
-    if config is None:
-        return 2
-    api_url, api_key, model = config
+    if plain and session_mode == "new":
+        from .config_service import ConfigService
+
+        try:
+            workspace = resolve_workspace(Path.cwd())
+            service = ConfigService(
+                ConfigStore(default_data_root(), workspace.workspace_path),
+                permission_override=permission_mode,
+            )
+            resolution = service.resolve(service.load(), explicit=explicit_selection)
+            if resolution.status != "ready":
+                _report_unconfigured(resolution, sys.stderr.write)
+                return 2
+        except ConfigError as error:
+            print("mica: " + str(error), file=sys.stderr)
+            return 2
+        except WorkspaceResolutionError:
+            print("mica: unable to resolve the current workspace", file=sys.stderr)
+            return 2
     loop = asyncio.new_event_loop()
     try:
         asyncio.set_event_loop(loop)
         task = loop.create_task(
             run_interactive(
-                api_url,
-                api_key,
-                model,
+                explicit_selection=explicit_selection,
                 session_mode=session_mode,
                 permission_mode=permission_mode,
                 plain=plain,
@@ -197,12 +228,13 @@ def _main_cli(
 
 
 async def run_interactive(
-    api_url: str,
-    api_key: str,
-    model: str,
+    api_url: str | None = None,
+    api_key: str | None = None,
+    model: str | None = None,
     *,
     session_mode: SessionMode = "new",
-    permission_mode: PermissionMode = PermissionMode.DEFAULT,
+    permission_mode: PermissionMode | None = None,
+    explicit_selection: SessionSelection | None = None,
     plain: bool = True,
     provider_factory: ProviderFactory | None = None,
     read_line: ReadLine | None = None,
@@ -218,13 +250,54 @@ async def run_interactive(
     """Assemble session, context, provider, and app, then enter basic interaction."""
     if session_mode not in {"new", "continue", "resume"}:
         raise ValueError("session_mode must be new, continue, or resume")
-    if not isinstance(permission_mode, PermissionMode):
+    if permission_mode is not None and not isinstance(permission_mode, PermissionMode):
         raise TypeError("permission_mode must be a PermissionMode")
     factory = provider_factory or _default_provider_factory
     read = read_line or _default_read_line
     out = write_out or _default_write
     err = write_err or _default_write_err
 
+    from .config_service import ConfigService
+
+    try:
+        config_workspace = workspace or (
+            session_service.store.workspace
+            if session_service is not None
+            else resolve_workspace(Path.cwd())
+        )
+        config_root = (
+            data_root
+            if data_root is not None
+            else (
+                session_service.store.data_root
+                if session_service is not None
+                else default_data_root()
+            )
+        )
+        configuration = ConfigService(
+            ConfigStore(config_root, config_workspace.workspace_path),
+            permission_override=permission_mode,
+        )
+        snapshot = configuration.load()
+        direct = None
+        if any(value is not None for value in (api_url, api_key, model)):
+            direct = configuration.direct_connection(api_url, api_key, model)
+        initial = (
+            SelectionResolution(direct.selection, "direct", "ready", direct)
+            if direct is not None
+            else configuration.resolve(snapshot, explicit=explicit_selection)
+        )
+    except ConfigError as error:
+        err("mica: " + str(error) + "\n")
+        return 2
+    except WorkspaceResolutionError:
+        err("mica: unable to resolve the current workspace\n")
+        return 2
+    if plain and session_mode == "new" and initial.status != "ready":
+        _report_unconfigured(initial, err)
+        return 2
+    for warning in snapshot.diagnostics:
+        err("warning: " + warning + "\n")
     try:
         resolved_workspace, service, builder = _assemble_session(
             workspace=workspace,
@@ -239,9 +312,35 @@ async def run_interactive(
         err("mica: unable to initialize session storage\n")
         return 2
 
-    selected = await _select_session(service, session_mode, read, out, err)
+    initial_selection = (
+        initial.selection
+        if initial.status == "ready"
+        and initial.source in {"workspace default", "global default"}
+        else None
+    )
+    selected = await _select_session(
+        service, session_mode, read, out, err, initial_selection=initial_selection
+    )
     if selected is None:
         return 2
+    resolution = (
+        SelectionResolution(direct.selection, "direct", "ready", direct)
+        if direct is not None
+        else configuration.resolve(
+            snapshot,
+            explicit=explicit_selection,
+            saved=selected.meta.selection if session_mode != "new" else None,
+        )
+    )
+    if plain and resolution.status != "ready":
+        _report_unconfigured(resolution, err)
+        return 2
+    if direct is None and session_mode != "new" and selected.meta.selection is None:
+        err(
+            "warning: legacy session has no saved selection; using current startup source\n"
+        )
+    if direct is None and resolution.source not in {"environment", "unconfigured"}:
+        err("model source: " + resolution.source + "\n")
     return await _run_selected_session(
         api_url,
         api_key,
@@ -254,11 +353,30 @@ async def run_interactive(
         read,
         out,
         err,
-        permission_mode,
+        snapshot.settings.permission_mode,
         turn_id_factory,
         clock,
         plain=plain,
+        configuration=configuration,
+        resolution=resolution,
+        reasoning_display=snapshot.settings.reasoning_display,
+        startup_settings=snapshot.settings,
     )
+
+
+def _report_unconfigured(resolution: SelectionResolution, err: Write) -> None:
+    if resolution.status == "unconfigured":
+        err(
+            "mica: missing required environment variables: "
+            + ", ".join(_ENVIRONMENT_VARIABLES)
+            + "; or configure a saved connection\n"
+        )
+    else:
+        err(
+            "mica: "
+            + (resolution.diagnostic or "selected connection unavailable")
+            + "\n"
+        )
 
 
 async def _run_selected_session(
@@ -278,6 +396,10 @@ async def _run_selected_session(
     clock: Clock | None,
     *,
     plain: bool,
+    configuration: ConfigService,
+    resolution: SelectionResolution,
+    reasoning_display: object,
+    startup_settings: EffectiveSettings,
 ) -> int:
     from .app import MicaApp
 
@@ -326,7 +448,13 @@ async def _run_selected_session(
         return 2
 
     try:
-        provider = factory(api_url, api_key)
+        connection = resolution.connection
+        provider = (
+            None
+            if connection is None
+            else factory(connection.api_url, connection.api_key)
+        )
+        model = None if connection is None else connection.selection.model_id
     except Exception:  # noqa: BLE001 - provider details may contain secrets
         err("mica: unable to initialize provider\n")
         return 2
@@ -342,13 +470,33 @@ async def _run_selected_session(
             turn_id_factory=turn_id_factory,
             clock=clock,
             tool_executor=executor,
+            config_service=configuration,
+            connection=connection,
+            connection_status=resolution.status,
+            connection_diagnostic=resolution.diagnostic,
+            startup_settings=startup_settings,
+            selection_source=resolution.source,
         )
     except Exception:  # noqa: BLE001 - startup diagnostics must stay safe
-        await provider.aclose()
+        if provider is not None:
+            task = asyncio.create_task(
+                provider.aclose(), name="mica-startup-provider-close"
+            )
+            task.add_done_callback(
+                lambda finished: None if finished.cancelled() else finished.exception()
+            )
+            done, _ = await asyncio.wait({task}, timeout=2.0)
+            if not done:
+                task.cancel()
+                await asyncio.wait({task}, timeout=2.0)
+                err("mica: provider release unconfirmed\n")
+            elif task.cancelled() or task.exception() is not None:
+                err("mica: provider release unconfirmed\n")
         err("mica: unable to initialize application\n")
         return 2
 
     if plain:
+        result = 0
         try:
             await _interact(app, read, out, err)
         except asyncio.CancelledError:
@@ -356,10 +504,11 @@ async def _run_selected_session(
             pass
         except Exception:  # noqa: BLE001 - do not expose session details
             err("error: session unavailable\n")
-            return 2
+            result = 2
         finally:
-            await app.aclose()
-        return 0
+            if not await _close_app(app, err):
+                result = 2
+        return result
 
     try:
         from .tui.models import StartupResourceSnapshot, TuiSessionSnapshot
@@ -384,10 +533,12 @@ async def _run_selected_session(
         session_snapshot = TuiSessionSnapshot(
             workspace=_workspace_display_value(workspace.workspace_path),
             session_label=selected.meta.title.strip() or selected.meta.session_id,
-            model=model,
+            model=(model + " (" + resolution.source + ")")
+            if model is not None and resolution.source not in {"direct", "environment"}
+            else model or "unconfigured",
         )
     except Exception:  # noqa: BLE001 - TUI startup diagnostics stay safe
-        await app.aclose()
+        await _close_app(app, err)
         err("mica: unable to start terminal interface\n")
         return 2
 
@@ -398,7 +549,17 @@ async def _run_selected_session(
         session_snapshot=session_snapshot,
         stored_session=selected,
         workspace=workspace,
+        reasoning_display=reasoning_display,
     )
+
+
+async def _close_app(app: MicaApp, err: Write) -> bool:
+    try:
+        await app.aclose()
+    except Exception:  # noqa: BLE001 - cleanup failures must never expose backend details
+        err("mica: provider release unconfirmed\n")
+        return False
+    return True
 
 
 async def _run_main_buffer(
@@ -409,6 +570,7 @@ async def _run_main_buffer(
     session_snapshot: object,
     stored_session: StoredSession,
     workspace: WorkspaceIdentity,
+    reasoning_display: object = None,
 ) -> int:
     """Run the default main-buffer frontend; failures produce only fixed safe diagnostics."""
     try:
@@ -421,9 +583,10 @@ async def _run_main_buffer(
             session_snapshot=session_snapshot,
             stored_session=stored_session,
             workspace_path=workspace.workspace_path,
+            reasoning_mode=reasoning_display,
         )
     except Exception:  # noqa: BLE001 - frontend startup diagnostics must stay safe
-        await app.aclose()
+        await _close_app(app, err)
         err("mica: unable to start terminal interface\n")
         return 2
     try:
@@ -440,6 +603,9 @@ async def _run_main_buffer(
             with suppress(Exception):  # close diagnostics must stay private
                 await app.aclose()
         err("mica: unable to start terminal interface\n")
+        return 2
+    if getattr(screen, "cleanup_errors", ()):
+        err("mica: terminal cleanup incomplete; provider release may be unconfirmed\n")
         return 2
     return 0
 
@@ -503,10 +669,12 @@ async def _select_session(
     read_line: ReadLine,
     write_out: Write,
     write_err: Write,
+    *,
+    initial_selection: SessionSelection | None = None,
 ) -> StoredSession | None:
     if session_mode == "new":
         try:
-            return service.create_session()
+            return service.create_session(selection=initial_selection)
         except Exception:  # noqa: BLE001 - do not expose storage details
             write_err("mica: unable to create session\n")
             return None
@@ -600,8 +768,12 @@ async def _interact(
                 write_err("\n")
                 pending_tool_output_newline = False
 
+        binding = None
         try:
-            async with aclosing(app.run(line)) as stream:
+            binding = app.prepare_run()
+            if app.reasoning_notice is not None:
+                write_err("warning: " + app.reasoning_notice + "\n")
+            async with aclosing(app.run(line, binding=binding)) as stream:
                 async for event in stream:
                     if isinstance(event, ReasoningDelta):
                         continue
@@ -654,6 +826,9 @@ async def _interact(
             # The active run was cancelled: aclosing has cleaned the event stream, exit
             # the CLI.
             return
+        finally:
+            if binding is not None:
+                app.release_run(binding)
 
 
 async def _read_user_input_response(

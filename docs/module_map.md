@@ -8,6 +8,7 @@
 | 组 | 管什么 |
 |---|---|
 | 应用入口 | CLI、应用装配和取消生命周期 |
+| 配置与选择 | JSON 配置、来源、能力、凭据只读保护 |
 | 公共契约 | 消息、事件、工具、会话和校验边界 |
 | 会话与工作区 | 工作区身份、上下文、JSONL 和会话服务 |
 | 工具与权限 | 工具注册、执行、权限、文件和命令 |
@@ -20,8 +21,8 @@
 
 ## 应用入口
 
-- `src/mica_agent/app.py`：应用装配、一次运行和成功/失败持久化边界。
-- `src/mica_agent/cli.py`：命令行参数、环境连接、工作区会话选择和前端路由。
+- `src/mica_agent/app.py`：未配置/连接装配、每轮冻结和运行持久化边界。
+- `src/mica_agent/cli.py`：命令行覆盖、配置启动、会话选择和前端路由。
 - `src/mica_agent/__main__.py`：`python -m mica_agent` 入口。
 - `src/mica_agent/cancellation.py`：Provider、Engine、工具和交互共用的取消令牌。
 - `tests/test_app.py`：应用装配、运行提交和失败边界。
@@ -31,11 +32,24 @@
 - `tests/test_cli_tool_lifecycle.py`：CLI 工具运行生命周期。
 - `tests/test_cancellation.py`：取消令牌和取消传播。
 
+## 配置与选择
+
+规格：`docs/configuration_spec.md`。
+
+- `src/mica_agent/config_contracts.py`：不可变设置、能力、来源与独立连接绑定。
+- `src/mica_agent/config_store.py`：配置 JSON 读取及默认目标项锁内原子保存。
+- `src/mica_agent/config_service.py`：配置校验合并、启动选择及每轮有效能力。
+- `src/mica_agent/_credential_permissions.py`：凭据文件及父目录的实际权限保护与只读访问。
+- `tests/test_config_contracts.py`：配置类型、预算及映射不可变性。
+- `tests/test_config_store.py`：严格 JSON、并发保存及失败字节保护。
+- `tests/test_config_service.py`：来源选择、能力降级与敏感诊断。
+- `tests/test_credential_permissions.py`：隔离文件/目录真实权限与查询失败验证。
+
 ## 公共契约
 
 - `src/mica_agent/models.py`：供应商无关的消息和角色。
 - `src/mica_agent/events.py`：Engine 向前端公开的有序事件。
-- `src/mica_agent/reasoning.py`：思考强度的稳定枚举。
+- `src/mica_agent/reasoning.py`：思考强度与显示模式的稳定枚举。
 - `src/mica_agent/tool_contracts.py`：工具定义、调用、请求、结果和状态。
 - `src/mica_agent/checkpoint_contracts.py`：中断运行的进度检查点。
 - `src/mica_agent/session_contracts.py`：会话元数据、轮次和 JSON wire 契约。
@@ -142,6 +156,6 @@
 ## 常见改动
 
 - 新增工具：同步工具契约、注册、执行/权限、展示、相关测试和本地图对应组。
-- 新增 Provider：同步 Provider 协议、应用装配、错误/取消边界、测试和本地图；配置与模型功能尚未实现，不在地图预建路径。
+- 新增 Provider：同步 Provider 协议、配置选择、应用装配、错误/取消边界、测试和本地图。
 - 改终端输入或渲染：同步终端规格、相关测试和视觉验收记录。
 - 改会话格式：同步契约、Store、Service、上下文、兼容测试和历史说明。

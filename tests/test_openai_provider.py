@@ -169,7 +169,7 @@ def test_request_uses_post_with_resolved_endpoint(
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["request"] = request
-        return httpx.Response(200, text="data: [DONE]\n\n", request=request)
+        return httpx.Response(200, text=VALID_SSE, request=request)
 
     provider = make_provider(handler, base_url=base_url)
     _run_collect(provider, _make_request())
@@ -185,7 +185,7 @@ def test_request_carries_auth_and_json_headers() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["request"] = request
-        return httpx.Response(200, text="data: [DONE]\n\n", request=request)
+        return httpx.Response(200, text=VALID_SSE, request=request)
 
     provider = make_provider(handler, api_key="sk-test-secret")
     _run_collect(provider, _make_request())
@@ -201,7 +201,7 @@ def test_request_body_uses_wire_roles_and_stream_flag() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["request"] = request
-        return httpx.Response(200, text="data: [DONE]\n\n", request=request)
+        return httpx.Response(200, text=VALID_SSE, request=request)
 
     provider = make_provider(handler)
     request = ProviderRequest(
@@ -218,7 +218,8 @@ def test_request_body_uses_wire_roles_and_stream_flag() -> None:
     assert isinstance(http_request, httpx.Request)
     body = http_request.read()
     payload = json.loads(body)
-    assert set(payload) == {"model", "messages", "stream"}
+    assert set(payload) == {"model", "messages", "stream", "max_tokens"}
+    assert payload["max_tokens"] == 4096
     assert payload["model"] == "gpt-test"
     assert payload["stream"] is True
     assert "reasoning_effort" not in payload
@@ -251,7 +252,7 @@ def test_request_sends_non_off_reasoning_effort(
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["request"] = request
-        return httpx.Response(200, text="data: [DONE]\n\n", request=request)
+        return httpx.Response(200, text=VALID_SSE, request=request)
 
     request = ProviderRequest(
         "gpt-test",
@@ -269,7 +270,7 @@ def test_request_uses_custom_thinking_level_map() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["request"] = request
-        return httpx.Response(200, text="data: [DONE]\n\n", request=request)
+        return httpx.Response(200, text=VALID_SSE, request=request)
 
     request = ProviderRequest(
         "gpt-test",
@@ -287,7 +288,7 @@ def test_request_uses_custom_thinking_level_map() -> None:
 def test_custom_thinking_level_map_is_copied_and_not_mutable() -> None:
     mapping = {ReasoningEffort.HIGH: "balanced"}
     provider = make_provider(
-        lambda request: httpx.Response(200, text=DONE_SSE, request=request),
+        lambda request: httpx.Response(200, text=VALID_SSE, request=request),
         thinking_level_map=mapping,
     )
     mapping[ReasoningEffort.HIGH] = "changed"
@@ -299,7 +300,7 @@ def test_custom_thinking_level_map_is_copied_and_not_mutable() -> None:
     )
     events = _run_collect(provider, request)
 
-    assert events == [Finish()]
+    assert events == [TextDelta("ok"), Finish()]
 
 
 def test_unmapped_custom_reasoning_effort_fails_safely_before_http() -> None:
@@ -308,7 +309,7 @@ def test_unmapped_custom_reasoning_effort_fails_safely_before_http() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal requests
         requests += 1
-        return httpx.Response(200, text=DONE_SSE, request=request)
+        return httpx.Response(200, text=VALID_SSE, request=request)
 
     request = ProviderRequest(
         "gpt-test",
@@ -347,7 +348,7 @@ def test_invalid_thinking_level_map_fails_without_echoing_values(
         OpenAICompatibleProvider(
             api_key="test-api-key",
             transport=httpx.MockTransport(
-                lambda request: httpx.Response(200, text=DONE_SSE, request=request)
+                lambda request: httpx.Response(200, text=VALID_SSE, request=request)
             ),
             thinking_level_map=invalid_map,  # type: ignore[arg-type]
         )
@@ -361,7 +362,7 @@ def test_request_sends_tool_specs_as_standard_tools_payload() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["request"] = request
-        return httpx.Response(200, text=DONE_SSE, request=request)
+        return httpx.Response(200, text=VALID_SSE, request=request)
 
     request = ProviderRequest(
         model="gpt-test",
@@ -416,7 +417,7 @@ def test_request_preserves_order_for_multiple_tool_specs() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["request"] = request
-        return httpx.Response(200, text=DONE_SSE, request=request)
+        return httpx.Response(200, text=VALID_SSE, request=request)
 
     request = ProviderRequest(
         model="gpt-test",
@@ -493,7 +494,7 @@ def test_request_preserves_order_for_multiple_tool_specs() -> None:
 
     def handler(http_request: httpx.Request) -> httpx.Response:
         captured["request"] = http_request
-        return httpx.Response(200, text=DONE_SSE, request=http_request)
+        return httpx.Response(200, text=VALID_SSE, request=http_request)
 
     _run_collect(make_provider(handler), request)
     payload = json.loads(captured["request"].read())  # type: ignore[union-attr]
@@ -549,6 +550,7 @@ def test_negative_max_retries_is_rejected() -> None:
 
 
 DONE_SSE = "data: [DONE]\n\n"
+VALID_SSE = 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n' + DONE_SSE
 
 
 def _sse_response(*lines: str) -> httpx.Response:
@@ -583,7 +585,7 @@ def test_reasoning_only_deltas_preserve_order_unicode_and_ignore_empty_values() 
             'data: {"choices":[{"delta":{"reasoning_content":null}}]}\n\n',
             'data: {"choices":[{"delta":{"reasoning_content":""}}]}\n\n',
             'data: {"choices":[{"delta":{"reasoning_content":"\ud574\uc11d \u2713"}}]}\n\n',
-            DONE_SSE,
+            VALID_SSE,
         )
     )
 
@@ -592,6 +594,7 @@ def test_reasoning_only_deltas_preserve_order_unicode_and_ignore_empty_values() 
     assert events == [
         ProviderReasoningDelta("第一步"),
         ProviderReasoningDelta("해석 ✓"),
+        TextDelta("ok"),
         Finish(),
     ]
 
@@ -668,12 +671,31 @@ def test_invalid_reasoning_content_is_one_safe_terminal_error(invalid: object) -
         assert secret not in rendered
 
 
-def test_stream_assembles_one_fragmented_tool_call() -> None:
+@pytest.mark.parametrize("pending_reason", [None, "", "missing"])
+def test_stream_assembles_one_fragmented_tool_call(pending_reason) -> None:
+    def chunk(delta):
+        choice = {"delta": delta}
+        if pending_reason != "missing":
+            choice["finish_reason"] = pending_reason
+        return f"data: {json.dumps({'choices': [choice]})}\n\n"
+
     provider = make_provider(
         lambda request: _sse_response(
-            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"lookup","arguments":"{\\"q\\":"}}]}}]}\n\n',
-            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"你好\\"}"}}]}}]}\n\n',
+            chunk(
+                {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": '{"q":'},
+                        }
+                    ]
+                }
+            ),
+            chunk({"tool_calls": [{"index": 0, "function": {"arguments": '"你好"}'}}]}),
             'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+            DONE_SSE,
         )
     )
 
@@ -1048,13 +1070,14 @@ def test_malformed_tool_streams_emit_one_safe_terminal_error(
 def test_finish_reason_without_delta_preserves_plain_text_compatibility() -> None:
     provider = make_provider(
         lambda request: _sse_response(
-            'data: {"choices":[{"finish_reason":"stop"}]}\n\n'
+            'data: {"choices":[{"delta":{"content":"answer"}}]}\n\n',
+            'data: {"choices":[{"finish_reason":"stop"}]}\n\n',
         )
     )
 
     events = _run_collect(provider, _make_request())
 
-    assert events == [Finish(reason="stop")]
+    assert events == [TextDelta("answer"), Finish(reason="stop")]
     assert not any(isinstance(event, ProviderErrorEvent) for event in events)
 
 
@@ -1154,18 +1177,29 @@ def test_malformed_tool_arguments_with_sensitive_sentinel_never_leak() -> None:
     ]
 
 
-def test_multiple_deltas_then_finish_reason() -> None:
+@pytest.mark.parametrize("pending_reason", [None, "", "missing"])
+def test_multiple_deltas_then_finish_reason(pending_reason) -> None:
+    def chunk(delta):
+        choice = {"delta": delta}
+        if pending_reason != "missing":
+            choice["finish_reason"] = pending_reason
+        return f"data: {json.dumps({'choices': [choice]})}\n\n"
+
     provider = make_provider(
         lambda request: _sse_response(
-            'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n',
-            'data: {"choices":[{"delta":{"content":" world"}}]}\n\n',
+            chunk({"role": "assistant", "content": ""}),
+            chunk({"reasoning_content": "offline analysis"}),
+            chunk({"content": "hello"}),
+            chunk({"content": " world"}),
             'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+            DONE_SSE,
         )
     )
 
     events = _run_collect(provider, _make_request())
 
     assert events == [
+        ProviderReasoningDelta("offline analysis"),
         _text_delta("hello"),
         _text_delta(" world"),
         Finish(reason="stop"),
@@ -1242,12 +1276,38 @@ def test_network_chunk_boundaries_are_not_message_boundaries() -> None:
     assert events == [_text_delta("hello"), _text_delta(" world"), Finish()]
 
 
-def test_empty_stream_with_only_done_ends_normally() -> None:
-    provider = make_provider(lambda request: _sse_response(DONE_SSE))
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "",
+        'data: {"choices":[{"delta":{"content":""},"finish_reason":"stop"}]}\n\n',
+        'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n',
+        'data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":""}]}\n\n',
+        'data: {"choices":[{"delta":{"reasoning_content":"private offline analysis"},"finish_reason":"stop"}]}\n\n',
+        'data: {"choices":[{"delta":{"content":" \\t"},"finish_reason":"stop"}]}\n\n',
+    ],
+)
+def test_empty_completion_is_one_safe_error_without_retry(prefix) -> None:
+    requests = []
+    responses = []
 
+    def handler(request):
+        requests.append(request)
+        response = _sse_response(prefix, DONE_SSE)
+        responses.append(response)
+        return response
+
+    provider = make_provider(handler, max_retries=3)
     events = _run_collect(provider, _make_request())
-
-    assert events == [Finish()]
+    assert len(requests) == 1
+    assert sum(isinstance(event, ProviderErrorEvent) for event in events) == 1
+    assert isinstance(events[-1], ProviderErrorEvent)
+    assert isinstance(events[-1].error, MalformedResponseError)
+    assert str(events[-1].error) == "completion contained no text or tool calls"
+    assert not any(isinstance(event, Finish) for event in events)
+    assert all(response.is_closed for response in responses)
+    assert "private offline analysis" not in str(events[-1].error)
+    asyncio.run(provider.aclose())
 
 
 def test_missing_or_null_content_is_not_rendered_as_none() -> None:
@@ -1255,14 +1315,14 @@ def test_missing_or_null_content_is_not_rendered_as_none() -> None:
         lambda request: _sse_response(
             'data: {"choices":[{"delta":{}}]}\n\n',
             'data: {"choices":[{"delta":{"content":null}}]}\n\n',
-            DONE_SSE,
+            VALID_SSE,
         )
     )
 
     events = _run_collect(provider, _make_request())
 
-    assert events == [Finish()]
-    assert all(not isinstance(event, TextDelta) for event in events)
+    assert events == [TextDelta("ok"), Finish()]
+    assert all(getattr(event, "text", None) != "None" for event in events)
 
 
 def test_empty_choices_chunk_is_malformed_error() -> None:
@@ -1327,17 +1387,19 @@ def test_data_lines_without_blank_separator_are_handled_line_by_line() -> None:
     assert events == [_text_delta("a"), _text_delta("b"), Finish()]
 
 
-def test_finish_reason_then_done_yields_single_finish() -> None:
+@pytest.mark.parametrize("reason", ["stop", "length", "content_filter"])
+def test_finish_reason_then_done_yields_single_finish(reason) -> None:
     provider = make_provider(
         lambda request: _sse_response(
-            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+            'data: {"choices":[{"delta":{"content":"answer"}}]}\n\n',
+            f'data: {{"choices":[{{"delta":{{}},"finish_reason":"{reason}"}}]}}\n\n',
             DONE_SSE,
         )
     )
 
     events = _run_collect(provider, _make_request())
 
-    assert events == [Finish(reason="stop")]
+    assert events == [TextDelta("answer"), Finish(reason=reason)]
 
 
 # ---------------------------------------------------------------------------
@@ -1571,7 +1633,7 @@ def test_temporary_error_is_retried_then_succeeds() -> None:
         calls["n"] += 1
         if calls["n"] < 2:
             return httpx.Response(503, request=request)
-        return httpx.Response(200, text=DONE_SSE, request=request)
+        return httpx.Response(200, text=VALID_SSE, request=request)
 
     sleep_calls: list[float] = []
     provider = _make_flaky_provider(handler, max_retries=2, sleep_calls=sleep_calls)
@@ -1579,7 +1641,7 @@ def test_temporary_error_is_retried_then_succeeds() -> None:
     events = _run_collect(provider, _make_request())
 
     assert calls["n"] == 2
-    assert events == [Finish()]
+    assert events == [TextDelta("ok"), Finish()]
     assert sleep_calls == [0.5]
 
 
@@ -1643,7 +1705,7 @@ def test_connect_timeout_is_retried_then_succeeds() -> None:
         calls["n"] += 1
         if calls["n"] == 1:
             raise httpx.ConnectTimeout("connection timed out")
-        return httpx.Response(200, text=DONE_SSE, request=request)
+        return httpx.Response(200, text=VALID_SSE, request=request)
 
     sleep_calls: list[float] = []
     provider = _make_flaky_provider(handler, max_retries=2, sleep_calls=sleep_calls)
@@ -1652,7 +1714,7 @@ def test_connect_timeout_is_retried_then_succeeds() -> None:
 
     assert calls["n"] == 2
     assert sleep_calls == [0.5]
-    assert events == [Finish()]
+    assert events == [TextDelta("ok"), Finish()]
 
 
 def test_no_retry_after_tool_call_delta_has_been_produced() -> None:
@@ -1793,14 +1855,14 @@ def test_transport_error_before_response_is_retried_then_succeeds() -> None:
         calls["n"] += 1
         if calls["n"] < 2:
             raise httpx.ConnectError("connection refused")
-        return httpx.Response(200, text=DONE_SSE, request=request)
+        return httpx.Response(200, text=VALID_SSE, request=request)
 
     provider = make_provider(handler, max_retries=2)
 
     events = _run_collect(provider, _make_request())
 
     assert calls["n"] == 2
-    assert events == [Finish()]
+    assert events == [TextDelta("ok"), Finish()]
 
 
 def test_transport_error_before_response_exhausts_retries() -> None:
@@ -1874,7 +1936,7 @@ def test_cancellation_propagates_and_is_not_wrapped_as_error_event() -> None:
 
 def test_success_closes_response_and_explicit_aclose_closes_transport() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
-        return sse_response(content=DONE_SSE.encode())
+        return sse_response(content=VALID_SSE.encode())
 
     transport = RecordingTransport(handler)
     provider = _make_recording_provider(transport)
@@ -1882,7 +1944,7 @@ def test_success_closes_response_and_explicit_aclose_closes_transport() -> None:
     async def scenario() -> None:
         events = await _collect(provider, _make_request())
 
-        assert events == [Finish()]
+        assert events == [TextDelta("ok"), Finish()]
         assert transport.responses[0].is_closed
         assert transport.aclose_count == 0
         assert all(
@@ -1962,22 +2024,22 @@ def test_stream_can_be_consumed_multiple_times_with_reused_client() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls["n"] += 1
-        return httpx.Response(200, text=DONE_SSE, request=request)
+        return httpx.Response(200, text=VALID_SSE, request=request)
 
     provider = make_provider(handler)
 
     first = _run_collect(provider, _make_request())
     second = _run_collect(provider, _make_request())
 
-    assert first == [Finish()]
-    assert second == [Finish()]
+    assert first == [TextDelta("ok"), Finish()]
+    assert second == [TextDelta("ok"), Finish()]
     assert calls["n"] == 2
     asyncio.run(provider.aclose())
 
 
 def test_aclose_is_idempotent() -> None:
     provider = make_provider(
-        lambda request: httpx.Response(200, text=DONE_SSE, request=request)
+        lambda request: httpx.Response(200, text=VALID_SSE, request=request)
     )
 
     asyncio.run(provider.aclose())

@@ -968,7 +968,7 @@ def test_structured_ask_provider_tool_json_and_continue_loop(tmp_path: Path) -> 
     raw = next(service.store.session_directory.glob("*.jsonl")).read_text(
         encoding="utf-8"
     )
-    assert '"format_version":4' in raw
+    assert '"format_version":5' in raw
     assert "YAML" in raw
     assert "sk-test-only" not in raw
     assert provider.aclose_calls == 2

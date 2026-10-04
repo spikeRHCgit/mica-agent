@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import aclosing
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from types import MappingProxyType
 from uuid import uuid4
 
 from .cancellation import CancellationToken
 from .checkpoint_contracts import RunCheckpoint, RunCheckpointKind
+from .config_contracts import (
+    ConfigError,
+    ConnectionBinding,
+    EffectiveSettings,
+    ModelCapabilities,
+)
+from .config_service import ConfigService
 from .context_builder import ContextBuilder, ContextBuildResult
 from .engine import AgentEngine, RunIdFactory, RunProgressSnapshot
 from .events import (
@@ -22,6 +31,7 @@ from .events import (
 from .interactions import PermissionResponse, UserInputResponse
 from .models import Message, MessageRole
 from .providers import Provider, ProviderRequest
+from .providers.openai_compatible import DEFAULT_MAX_TOKENS, DEFAULT_THINKING_LEVEL_MAP
 from .reasoning import ReasoningEffort
 from .session_contracts import TurnEntry
 from .session_service import SessionService
@@ -60,13 +70,28 @@ class AppClosedError(MicaAppError):
     """Starting a run after the app has been closed."""
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class RunBinding:
+    """One App-owned reservation; immutable request settings for this Run."""
+
+    owner: object
+    engine: AgentEngine
+    model: str
+    max_tokens: int
+    thinking_level_map: Mapping[ReasoningEffort, str] | None
+    reasoning_effort: ReasoningEffort
+    settings: EffectiveSettings
+    tools: tuple
+    capabilities: ModelCapabilities | None
+
+
 class MicaApp:
     """Wire the session service, context builder, engine, and provider together."""
 
     def __init__(
         self,
-        provider: Provider,
-        model: str,
+        provider: Provider | None,
+        model: str | None,
         *,
         session_service: SessionService,
         session_id: str,
@@ -78,10 +103,19 @@ class MicaApp:
         checkpoint_id_factory: CheckpointIdFactory | None = None,
         clock: Clock | None = None,
         tool_executor: ToolExecutor | None = None,
+        config_service: ConfigService | None = None,
+        connection: ConnectionBinding | None = None,
+        connection_status: str = "ready",
+        connection_diagnostic: str | None = None,
+        startup_settings: EffectiveSettings | None = None,
+        selection_source: str = "direct",
+        close_timeout: float = 2.0,
     ) -> None:
-        if not isinstance(model, str):
+        if (provider is None) != (model is None):
+            raise ValueError("provider and model must be configured together")
+        if model is not None and not isinstance(model, str):
             raise TypeError(f"model must be a str, got {type(model).__name__}")
-        if not model.strip():
+        if model is not None and not model.strip():
             raise ValueError("model must be a non-empty, non-blank string")
         if not isinstance(session_service, SessionService):
             raise TypeError("session_service must be a SessionService")
@@ -126,11 +160,43 @@ class MicaApp:
         self._checkpoint_id_factory = checkpoint_id_factory or (lambda: uuid4().hex)
         self._clock = clock or (lambda: datetime.now(UTC))
         self._tool_executor = tool_executor
-        self._engine = AgentEngine(
-            provider=provider,
-            run_id_factory=run_id_factory,
-            tool_executor=tool_executor,
-            presentation_workspace=context_builder.workspace,
+        self._run_id_factory = run_id_factory or (lambda: uuid4().hex)
+        self._workspace = context_builder.workspace
+        self._config_service = config_service
+        self._connection = connection
+        self._settings = startup_settings or EffectiveSettings()
+        self._capabilities = (
+            None if connection is None else connection.model.capabilities
+        )
+        self._selection_source = selection_source
+        self._effective_effort = ReasoningEffort.OFF
+        if self._capabilities is not None:
+            available = (
+                self._capabilities.thinking_level_map or DEFAULT_THINKING_LEVEL_MAP
+            )
+            if (
+                self._capabilities.reasoning
+                and self._settings.reasoning_effort in available
+            ):
+                self._effective_effort = self._settings.reasoning_effort
+        self._connection_status = (
+            connection_status
+            if provider is not None
+            else ("unresolved" if connection_status == "unresolved" else "unconfigured")
+        )
+        self._connection_diagnostic = connection_diagnostic
+        self._close_timeout = close_timeout
+        self._close_task: asyncio.Task | None = None
+        self._reservation: RunBinding | None = None
+        self._engine = (
+            None
+            if provider is None
+            else AgentEngine(
+                provider=provider,
+                run_id_factory=self._run_id_factory,
+                tool_executor=tool_executor,
+                presentation_workspace=context_builder.workspace,
+            )
         )
         self._active_run = False
         self._closed = False
@@ -153,18 +219,144 @@ class MicaApp:
             return False
         return self._tool_executor.interaction_broker.respond(response)
 
-    async def aclose(self) -> None:
-        """Close the provider and mark the app unusable for runs; repeated calls are safe."""
+    @property
+    def connection_status(self) -> str:
+        return "closing" if self._closed else self._connection_status
+
+    @property
+    def connection_diagnostic(self) -> str | None:
+        return self._connection_diagnostic
+
+    @property
+    def connection_summary(self) -> str | None:
+        if self._capabilities is None:
+            return None
+        caps = self._capabilities
+        budget = caps.max_tokens if caps.max_tokens is not None else DEFAULT_MAX_TOKENS
+        source = caps.sources.get("maxTokens", "adapter default")
+        context_source = caps.sources.get("contextWindow", "program default; estimated")
+        return f"Source: {self._selection_source}. Output budget: {budget} ({source}). Context: {caps.context_window} ({context_source}). Reasoning: {self._effective_effort.value} (preference {self._settings.reasoning_effort.value}; {self._settings.sources.get('reasoningEffort', 'program default')}). Permissions: {self._settings.permission_mode.value} ({self._settings.sources.get('permissionMode', 'program default')})."
+
+    @property
+    def reasoning_notice(self) -> str | None:
+        if self._settings.reasoning_effort is not self._effective_effort:
+            return "Reasoning preference is unsupported by this model; effective reasoning is off."
+        return None
+
+    @property
+    def is_busy(self) -> bool:
+        return self._reservation is not None
+
+    def prepare_run(
+        self, *, reasoning_effort: ReasoningEffort | None = None
+    ) -> RunBinding:
         if self._closed:
-            return
+            raise AppClosedError("app is closed; cannot start a new run")
+        if self.is_busy:
+            raise AppBusyError("another run is already active")
+        if self._provider is None or self._model is None:
+            raise ConfigError(
+                self._connection_diagnostic
+                or "No model configured. Configure a connection and restart."
+            )
+        settings = EffectiveSettings()
+        capabilities = None
+        budget = DEFAULT_MAX_TOKENS
+        mapping = None
+        effort = ReasoningEffort.OFF if reasoning_effort is None else reasoning_effort
+        executor = self._tool_executor
+        engine = self._engine
+        if self._config_service is not None and self._connection is not None:
+            settings, capabilities, budget, mapping, effort = (
+                self._config_service.for_run(
+                    self._connection.selection, current=self._connection
+                )
+            )
+            if reasoning_effort is not None:
+                effort = (
+                    reasoning_effort
+                    if capabilities.reasoning and reasoning_effort in mapping
+                    else ReasoningEffort.OFF
+                )
+            if executor is not None:
+                executor = executor.bind_policy(settings.permission_mode)
+            engine = AgentEngine(
+                self._provider,
+                run_id_factory=self._run_id_factory,
+                tool_executor=executor,
+                presentation_workspace=self._workspace,
+            )
+        if not isinstance(effort, ReasoningEffort):
+            raise TypeError("reasoning_effort must be a ReasoningEffort")
+        assert engine is not None
+        binding = RunBinding(
+            self,
+            engine,
+            self._model,
+            budget,
+            None if mapping is None else MappingProxyType(dict(mapping)),
+            effort,
+            settings,
+            () if executor is None else executor.tool_specs,
+            capabilities,
+        )
+        self._reservation = binding
+        self._settings = settings
+        self._capabilities = capabilities
+        self._effective_effort = effort
+        return binding
+
+    def release_run(self, binding: RunBinding) -> None:
+        """Release an unconsumed reservation; a running generator releases in finally."""
+        if not isinstance(binding, RunBinding) or binding.owner is not self:
+            raise ValueError("binding belongs to another application")
+        if self._reservation is binding and not self._active_run:
+            self._reservation = None
+
+    async def aclose(self) -> None:
+        """Close the owned Provider once with a bounded, observable result."""
         self._closed = True
-        await self._provider.aclose()
+        if not self._active_run:
+            self._reservation = None
+        if self._provider is None:
+            return
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(
+                self._provider.aclose(), name="mica-provider-close"
+            )
+            self._close_task.add_done_callback(
+                lambda task: None if task.cancelled() else task.exception()
+            )
+        if self._close_task.done():
+            done = {self._close_task}
+        else:
+            try:
+                done, _ = await asyncio.wait(
+                    {self._close_task}, timeout=self._close_timeout
+                )
+            except asyncio.CancelledError:
+                self._close_task.cancel()
+                await asyncio.wait({self._close_task}, timeout=self._close_timeout)
+                raise
+        if not done:
+            self._close_task.cancel()
+            await asyncio.wait({self._close_task}, timeout=self._close_timeout)
+            if self._close_task.done() and not self._close_task.cancelled():
+                self._close_task.exception()
+            raise MicaAppError("provider release is unconfirmed")
+        if self._close_task.cancelled():
+            raise MicaAppError("provider release is unconfirmed")
+        try:
+            self._close_task.result()
+        except Exception:  # noqa: BLE001 - provider details must stay private
+            raise MicaAppError("provider release failed") from None
 
     async def run(
         self,
         prompt: str,
         *,
-        reasoning_effort: ReasoningEffort = ReasoningEffort.OFF,
+        reasoning_effort: ReasoningEffort | None = None,
+        binding: RunBinding | None = None,
         cancellation: CancellationToken | None = None,
     ) -> AsyncIterator[EngineEvent]:
         """Start one run; success commits a ``TurnEntry``, cancellation or recoverable
@@ -175,13 +367,25 @@ class MicaApp:
             raise TypeError(f"prompt must be a str, got {type(prompt).__name__}")
         if not prompt.strip():
             raise ValueError("prompt must be a non-empty, non-blank string")
-        if not isinstance(reasoning_effort, ReasoningEffort):
+        if reasoning_effort is not None and not isinstance(
+            reasoning_effort, ReasoningEffort
+        ):
             raise TypeError("reasoning_effort must be a ReasoningEffort")
         if cancellation is not None and not isinstance(cancellation, CancellationToken):
             raise TypeError("cancellation must be a CancellationToken or None")
         if self._active_run:
             raise AppBusyError("another run is already active")
-
+        binding = (
+            self.prepare_run(reasoning_effort=reasoning_effort)
+            if binding is None
+            else binding
+        )
+        if (
+            not isinstance(binding, RunBinding)
+            or binding.owner is not self
+            or self._reservation is not binding
+        ):
+            raise ValueError("binding is invalid or already consumed")
         self._active_run = True
         user_message = Message(role=MessageRole.USER, content=prompt)
         completed_messages: list[tuple[Message, ...]] = []
@@ -191,17 +395,15 @@ class MicaApp:
         try:
             session_messages = self._session_service.context_snapshot(self._session_id)
             request = ProviderRequest(
-                model=self._model,
+                model=binding.model,
                 messages=self._header_messages + session_messages + (user_message,),
-                tools=(
-                    self._tool_executor.tool_specs
-                    if self._tool_executor is not None
-                    else ()
-                ),
-                reasoning_effort=reasoning_effort,
+                tools=binding.tools,
+                reasoning_effort=binding.reasoning_effort,
+                max_tokens=binding.max_tokens,
+                thinking_level_map=binding.thinking_level_map,
             )
             async with aclosing(
-                self._engine.run(
+                binding.engine.run(
                     request,
                     cancellation=cancellation,
                     completed_messages_sink=completed_messages.append,
@@ -256,6 +458,7 @@ class MicaApp:
             raise
         finally:
             self._active_run = False
+            self._reservation = None
 
     @staticmethod
     def _checkpoint_kind(event: RunCancelled | RunFailed) -> RunCheckpointKind | None:

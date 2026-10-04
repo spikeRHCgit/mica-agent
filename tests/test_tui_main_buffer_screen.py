@@ -1641,3 +1641,99 @@ def test_selection_survives_later_refresh_frames(tmp_path: Path) -> None:
             await asyncio.wait_for(harness.task, timeout=TIMEOUT)
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("size", [(100, 35), (60, 20), (140, 46)])
+def test_unconfigured_input_bytes_preserve_draft_cursor_and_create_no_run(
+    tmp_path, size
+):
+    import json
+    import os
+
+    from test_tui_main_buffer_vt import VirtualTerminal
+
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    workspace = resolve_workspace(workspace_path)
+    service = SessionService(JsonlSessionStore(workspace, tmp_path / "data"))
+    stored = service.create_session()
+    app = MicaApp(
+        None,
+        None,
+        session_service=service,
+        session_id=stored.meta.session_id,
+        context_builder=ContextBuilder(
+            data_root=tmp_path / "data", workspace=workspace
+        ),
+        connection_diagnostic="No model configured. Configure models.json, auth.json and config.json, then restart.",
+    )
+
+    class ByteInput(FakeInput):
+        def __init__(self):
+            super().__init__()
+            self.parser = Vt100Parser(lambda key: self._pending.append(key))
+
+        def send_bytes(self, data):
+            self.parser.feed(data)
+            if self._callback:
+                self._callback()
+
+    async def scenario():
+        fake = ByteInput()
+        screen, _ = make_screen(app, fake, size=size)
+        screen.update_session_snapshot(
+            TuiSessionSnapshot(
+                workspace="~/workspace",
+                session_label="session-title",
+                model="unconfigured",
+            )
+        )
+        frames = []
+
+        def capture(label):
+            vt = VirtualTerminal(rows=size[1], cols=size[0])
+            vt.feed(screen._terminal.emitted_text())
+            assert not vt.violations
+            frames.append(
+                {"label": label, "lines": vt.screen(), "cursor": vt.cursor_cell()}
+            )
+            return vt
+
+        original = service.store.path_for_session(stored.meta.session_id).read_bytes()
+        async with ScreenHarness(screen, fake):
+            startup = capture("startup")
+            assert "Mica is ready." not in "\n".join(startup.all_lines())
+            fake.send_bytes("keep draft")
+            await pump(lambda: screen.submit_text == "keep draft")
+            fake.send_bytes("\x1b[D\x1b[D")
+            await pump(lambda: screen.editor.cursor == 8)
+            before = capture("draft")
+            fake.send_bytes("\r")
+            await pump(lambda: "submit rejected" in screen.diagnostics)
+            after = capture("submit-rejected")
+            assert screen.submit_text == "keep draft" and screen.editor.cursor == 8
+            assert after.cursor_cell() == before.cursor_cell()
+            assert screen.mode == "idle" and screen.run_id is None
+            assert screen._runtime.active_task is None and not app.is_busy
+            assert service.load_session(stored.meta.session_id).entries == ()
+            assert (
+                service.store.path_for_session(stored.meta.session_id).read_bytes()
+                == original
+            )
+            fake.send_bytes("!")
+            await pump(lambda: screen.submit_text == "keep dra!ft")
+            capture("editable-after-rejection")
+            fake.send_bytes("\x03\x03")
+            await pump(lambda: screen.closed)
+        evidence = os.environ.get("MICA_TEST_EVIDENCE_DIR")
+        if evidence:
+            target = Path(evidence)
+            target.mkdir(parents=True, exist_ok=True)
+            (target / f"unconfigured-{size[0]}x{size[1]}.ansi").write_text(
+                screen._terminal.emitted_text(), encoding="utf-8"
+            )
+            (target / f"unconfigured-{size[0]}x{size[1]}.json").write_text(
+                json.dumps(frames, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+
+    asyncio.run(scenario())

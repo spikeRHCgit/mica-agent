@@ -113,13 +113,13 @@ def test_v1_mutations_upgrade_and_branch_keeps_source_unchanged(tmp_path: Path) 
     for session_id in ("rename-v1", "rewind-v1", "clear-v1", "source-v1"):
         write_v1_session(store, session_id)
 
-    assert service.rename_session("rename-v1", "renamed").meta.format_version == 4
-    assert service.rewind_session("rewind-v1", "turn-1").meta.format_version == 4
-    assert service.clear_session("clear-v1").meta.format_version == 4
+    assert service.rename_session("rename-v1", "renamed").meta.format_version == 5
+    assert service.rewind_session("rewind-v1", "turn-1").meta.format_version == 5
+    assert service.clear_session("clear-v1").meta.format_version == 5
 
     source_bytes = store.path_for_session("source-v1").read_bytes()
     branch = service.branch_session("source-v1")
-    assert branch.meta.format_version == 4
+    assert branch.meta.format_version == 5
     assert branch.turns[0].completed_at == NOW
     assert store.path_for_session("source-v1").read_bytes() == source_bytes
     assert store.load("source-v1").meta.format_version == 1
@@ -714,3 +714,17 @@ def test_store_nonblocking_delete_distinguishes_statuses(tmp_path: Path) -> None
     assert store.try_delete("missing") is SessionDeleteStatus.NOT_FOUND
     assert store.try_delete("session") is SessionDeleteStatus.DELETED
     assert store.try_delete("session") is SessionDeleteStatus.NOT_FOUND
+
+
+def test_selection_survives_business_metadata_operations_and_timeline_writes(tmp_path):
+    from mica_agent.session_contracts import SessionSelection
+
+    service, store, _ = make_service(tmp_path, session_ids=["selected", "branch"])
+    selection = SessionSelection("local", "chat")
+    selected = service.create_session(selection=selection)
+    store.append_turn(selected.meta.session_id, make_turn(1))
+    assert service.rename_session("selected", "renamed").meta.selection == selection
+    assert service.branch_session("selected", "turn-1").meta.selection == selection
+    assert service.rewind_session("selected", "turn-1").meta.selection == selection
+    assert service.clear_session("selected").meta.selection == selection
+    assert store.load("selected").entries == ()
