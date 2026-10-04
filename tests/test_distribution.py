@@ -798,7 +798,10 @@ def test_installed_wheel_restores_session_from_unicode_workspace(
 
         assert second.returncode == 0, second.stderr
         assert second.stdout == "second model reply\n"
-        assert second.stderr == ""
+        assert (
+            second.stderr
+            == "warning: legacy session has no saved selection; using current startup source\n"
+        )
         assert "Traceback" not in second.stderr
         assert fake_key not in second.stderr
         assert str(workspace) not in second.stderr
@@ -1063,7 +1066,10 @@ def test_installed_wheel_structured_ask_and_continue_restore_tool_history(
     )
     assert second.returncode == 0, second.stderr
     assert second.stdout == "continued answer\n"
-    assert second.stderr == ""
+    assert (
+        second.stderr
+        == "warning: legacy session has no saved selection; using current startup source\n"
+    )
     assert "sk-ask-loopback-key" not in second.stdout
     assert "sk-ask-loopback-key" not in second.stderr
     assert str(workspace) not in second.stdout
@@ -1138,7 +1144,7 @@ def test_installed_wheel_structured_ask_and_continue_restore_tool_history(
     raw = next(service.store.session_directory.glob("*.jsonl")).read_text(
         encoding="utf-8"
     )
-    assert '"format_version":4' in raw
+    assert '"format_version":5' in raw
     first_turn = listed.sessions[0].turns[0]
     stored_tool = first_turn.context_messages[2]
     assert json.loads(stored_tool.content)["data"] == {
@@ -1187,7 +1193,10 @@ def test_installed_wheel_write_and_continue_restore_complete_tool_history(
     assert first.stderr == ("tool write: started\ntool write: success\n")
     assert second.returncode == 0, second.stderr
     assert second.stdout == "continued answer\n"
-    assert second.stderr == ""
+    assert (
+        second.stderr
+        == "warning: legacy session has no saved selection; using current startup source\n"
+    )
     assert (workspace / "目标文件.txt").read_text(encoding="utf-8") == sensitive
     assert {path.relative_to(workspace) for path in workspace.rglob("*")} == {
         Path("目标文件.txt")
@@ -1225,7 +1234,7 @@ def test_installed_wheel_write_and_continue_restore_complete_tool_history(
     assert fake_key not in observed_output
     assert sensitive not in observed_output
     assert str(workspace) not in observed_output
-    assert '"format_version":4' in raw
+    assert '"format_version":5' in raw
     assert server._thread.is_alive() is False
 
 
@@ -1336,7 +1345,102 @@ def test_installed_wheel_default_tui_tool_dialog_and_continue_restore(
     raw = next(service.store.session_directory.glob("*.jsonl")).read_text(
         encoding="utf-8"
     )
-    assert raw.count('"format_version":4') == 3
+    assert raw.count('"format_version":5') == 3
     assert fake_key not in raw
     assert str(workspace) not in observed
     assert server._thread.is_alive() is False
+
+
+def test_installed_saved_configuration_and_temporary_cli_override(
+    tmp_path, full_distribution
+):
+    from test_credential_permissions import protect
+
+    from mica_agent.session_contracts import SessionSelection
+
+    dist = full_distribution
+    home = tmp_path / "config-home"
+    root = home / ".mica"
+    root.mkdir(parents=True)
+    workspace = tmp_path / "configured-workspace"
+    workspace.mkdir()
+    identity = resolve_workspace(workspace)
+    store = JsonlSessionStore(identity, root)
+    service = SessionService(store)
+    environment = cli_environment(home, fake_credentials=False)
+    auth = root / "auth.json"
+    auth.write_text(
+        '{"providers":{"local":{"type":"api_key","apiKey":"INSTALLED_TEST_ONLY_KEY"}}}'
+    )
+    protect(auth)
+    (root / "config.json").write_text(
+        '{"defaultModel":{"provider":"local","model":"a"}}'
+    )
+    with LoopbackSSEServer(("first", "override", "restore")) as server:
+        (root / "models.json").write_text(
+            json.dumps(
+                {
+                    "providers": {
+                        "local": {
+                            "baseUrl": server.base_url,
+                            "models": [
+                                {"id": "a", "maxTokens": 77},
+                                {"id": "b", "maxTokens": 88},
+                            ],
+                        }
+                    }
+                }
+            )
+        )
+        first = run_command(
+            [dist.mica, "cli", "--plain"],
+            cwd=workspace,
+            environment=environment,
+            input_text="first\n",
+        )
+        assert first.returncode == 0, first.stderr
+        session = service.last_active_session()
+        assert session.meta.selection == SessionSelection("local", "a")
+        second = run_command(
+            [
+                dist.python,
+                "-m",
+                "mica_agent",
+                "cli",
+                "--plain",
+                "--continue",
+                "--provider",
+                "local",
+                "--model",
+                "b",
+            ],
+            cwd=workspace,
+            environment=environment,
+            input_text="second\n",
+        )
+        assert second.returncode == 0, second.stderr
+        assert service.last_active_session().meta.selection == SessionSelection(
+            "local", "a"
+        )
+        third = run_command(
+            [dist.mica, "cli", "--plain", "--continue"],
+            cwd=workspace,
+            environment=environment,
+            input_text="third\n",
+        )
+        assert third.returncode == 0, third.stderr
+    assert [payload["model"] for payload in server.requests] == ["a", "b", "a"]
+    assert [payload["max_tokens"] for payload in server.requests] == [77, 88, 77]
+    observed = (
+        first.stdout
+        + first.stderr
+        + second.stdout
+        + second.stderr
+        + third.stdout
+        + third.stderr
+    )
+    assert "INSTALLED_TEST_ONLY_KEY" not in observed
+    assert (
+        "INSTALLED_TEST_ONLY_KEY"
+        not in store.path_for_session(session.meta.session_id).read_text()
+    )

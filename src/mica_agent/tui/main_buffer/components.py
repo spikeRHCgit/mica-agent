@@ -119,14 +119,18 @@ def _pad(text: str, width: int) -> str:
     return text + " " * max(0, width - cell_len(text))
 
 
-def startup_blocks(snapshot: object, width: int, palette: Palette) -> list[Block]:
+def startup_blocks(
+    snapshot: object, width: int, palette: Palette, *, ready: bool = True
+) -> list[Block]:
     """Build the startup logo, orientation copy, resource panel, and readiness facts."""
 
     blocks: list[Block] = []
     for line in logo_lines(width, palette):
         blocks.append(Block("raw", line, styled=True))
     blocks.append(Block("text", "Mica — lightweight AI coding agent"))
-    blocks.append(Block("brand", "Ready to build."))
+    blocks.append(
+        Block("brand", "Ready to build." if ready else "No model configured.")
+    )
     system_prompt = _safe_line(getattr(snapshot, "system_prompt_name", None))
     global_path = _safe_line(getattr(snapshot, "global_agent_path", None))
     workspace_path = _safe_line(getattr(snapshot, "workspace_agent_path", None))
@@ -153,7 +157,9 @@ def startup_blocks(snapshot: object, width: int, palette: Palette) -> list[Block
     # Panel lines are measured and truncated before styling and fit the terminal width.
     # Mark them trusted and non-wrapping so a second layout pass cannot split ANSI.
     blocks.extend(Block("raw", line, styled=True) for line in panel)
-    blocks.append(Block("brand", "Mica is ready."))
+    blocks.append(
+        Block("brand", "Mica is ready." if ready else "Connection setup required.")
+    )
     return blocks
 
 

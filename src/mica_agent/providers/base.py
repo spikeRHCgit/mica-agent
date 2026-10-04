@@ -7,8 +7,9 @@ adaptation and retries belong to provider implementations at the transport bound
 from __future__ import annotations
 
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Protocol, runtime_checkable
 
 from ..models import Message
@@ -31,8 +32,28 @@ class ProviderRequest:
     messages: tuple[Message, ...]
     tools: tuple[ToolSpec, ...] = ()
     reasoning_effort: ReasoningEffort = ReasoningEffort.OFF
+    max_tokens: int | None = None
+    thinking_level_map: Mapping[ReasoningEffort, str] | None = None
 
     def __post_init__(self) -> None:
+        if self.max_tokens is not None and (
+            type(self.max_tokens) is not int or self.max_tokens <= 0
+        ):
+            raise ValueError("max_tokens must be a positive integer or None")
+        if self.thinking_level_map is not None:
+            if not isinstance(self.thinking_level_map, Mapping):
+                raise TypeError("thinking_level_map must be a mapping or None")
+            mapping = dict(self.thinking_level_map)
+            if any(
+                not isinstance(k, ReasoningEffort)
+                or k is ReasoningEffort.OFF
+                or not isinstance(v, str)
+                or not v.strip()
+                or not v.isprintable()
+                for k, v in mapping.items()
+            ):
+                raise ValueError("thinking_level_map is invalid")
+            object.__setattr__(self, "thinking_level_map", MappingProxyType(mapping))
         if not isinstance(self.model, str):
             raise TypeError(f"model must be a str, got {type(self.model).__name__}")
         if not self.model.strip():

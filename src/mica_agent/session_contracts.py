@@ -26,10 +26,10 @@ from .tool_presentation import (
 )
 
 # Current JSONL format version used for session writes.
-CURRENT_SESSION_FORMAT_VERSION = 4
+CURRENT_SESSION_FORMAT_VERSION = 5
 
 _SUPPORTED_SESSION_FORMAT_VERSIONS = frozenset(
-    {1, 2, 3, CURRENT_SESSION_FORMAT_VERSION}
+    {1, 2, 3, 4, CURRENT_SESSION_FORMAT_VERSION}
 )
 
 
@@ -65,6 +65,24 @@ def _validate_utc_datetime(value: object, field_name: str) -> None:
         raise ValueError(f"{field_name} must use UTC")
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class SessionSelection:
+    """Stable provider and model identity, independent of credentials and settings."""
+
+    provider_id: str
+    model_id: str
+
+    def __post_init__(self) -> None:
+        for name in ("provider_id", "model_id"):
+            value = getattr(self, name)
+            _validate_non_blank_text(value, name)
+            if not value.isprintable():
+                raise ValueError("selection must contain printable identifiers")
+
+    def __repr__(self) -> str:
+        return "SessionSelection(<redacted>)"
+
+
 @dataclass(frozen=True, slots=True)
 class SessionMeta:
     """Immutable identity and workspace metadata of one session."""
@@ -76,6 +94,7 @@ class SessionMeta:
     title: str
     created_at: datetime
     updated_at: datetime
+    selection: SessionSelection | None = None
 
     def __post_init__(self) -> None:
         _validate_non_blank_text(self.session_id, "session_id")
@@ -85,6 +104,11 @@ class SessionMeta:
             raise TypeError("format_version must be an int")
         if self.format_version not in _SUPPORTED_SESSION_FORMAT_VERSIONS:
             raise ValueError("format_version is not supported")
+        if self.selection is not None:
+            if not isinstance(self.selection, SessionSelection):
+                raise TypeError("selection must be a SessionSelection or None")
+            if self.format_version < 5:
+                raise ValueError("selection requires format_version 5")
         _validate_non_blank_text(self.workspace_id, "workspace_id")
         _validate_non_blank_text(self.workspace_path, "workspace_path")
         if not isinstance(self.title, str):
@@ -671,8 +695,8 @@ def _parse_checkpoint(record: Mapping[object, object]) -> RunCheckpoint:
         }
     )
     _require_exact_fields(record, expected, "run_checkpoint")
-    if _require_supported_version(record) != CURRENT_SESSION_FORMAT_VERSION:
-        raise SessionFormatError("run_checkpoint requires current format_version")
+    if _require_supported_version(record) not in {4, 5}:
+        raise SessionFormatError("run_checkpoint requires format_version 4 or 5")
     try:
         kind = RunCheckpointKind(_require_record_text(record, "kind"))
     except ValueError:
@@ -721,6 +745,14 @@ def serialize_session_record(record: SessionRecord) -> dict[str, object]:
             "title": record.title,
             "created_at": _format_utc_datetime(record.created_at),
             "updated_at": _format_utc_datetime(record.updated_at),
+            **(
+                {}
+                if record.selection is None
+                else {
+                    "provider_id": record.selection.provider_id,
+                    "model_id": record.selection.model_id,
+                }
+            ),
         }
     if isinstance(record, TurnEntry):
         return {
@@ -779,6 +811,18 @@ def deserialize_session_record(record: object) -> SessionRecord:
                 "updated_at",
             }
         )
+        version = _require_supported_version(record)
+        selection = None
+        if version == 5 and ("provider_id" in record or "model_id" in record):
+            expected = expected | {"provider_id", "model_id"}
+            _require_exact_fields(record, expected, "session_meta")
+            try:
+                selection = SessionSelection(
+                    _require_non_blank_record_text(record, "provider_id"),
+                    _require_non_blank_record_text(record, "model_id"),
+                )
+            except (TypeError, ValueError):
+                raise SessionFormatError("session selection is invalid") from None
         _require_exact_fields(record, expected, "session_meta")
         try:
             return SessionMeta(
@@ -789,6 +833,7 @@ def deserialize_session_record(record: object) -> SessionRecord:
                 title=_require_record_text(record, "title"),
                 created_at=_parse_utc_datetime(record, "created_at"),
                 updated_at=_parse_utc_datetime(record, "updated_at"),
+                selection=selection,
             )
         except (TypeError, ValueError) as exc:
             raise SessionFormatError(str(exc)) from None

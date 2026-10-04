@@ -179,6 +179,7 @@ class MainBufferScreen:
         self._facts_dirty = False
         self.diagnostics: list[str] = []
         self.cleanup_errors: list[str] = []
+        self._configuration_notice: str | None = app.connection_diagnostic
 
     @property
     def mode(self) -> Mode:
@@ -290,6 +291,8 @@ class MainBufferScreen:
             self._finalize_terminal()
             try:
                 await self._runtime.aclose()
+                if self._runtime.cleanup_error is not None:
+                    self.cleanup_errors.append(self._runtime.cleanup_error)
             except Exception as error:  # noqa: BLE001 - record cleanup failure without raising
                 self.cleanup_errors.append(f"close runtime: {type(error).__name__}")
             finally:
@@ -316,9 +319,14 @@ class MainBufferScreen:
         assert renderer is not None
         if self._startup_resources is not None:
             for block in startup_blocks(
-                self._startup_resources, renderer.width, self._palette
+                self._startup_resources,
+                renderer.width,
+                self._palette,
+                ready=self._app.connection_status == "ready",
             ):
                 renderer.append(block)
+        if self._app.connection_summary is not None:
+            renderer.append(Block("muted", self._app.connection_summary))
         self._append_history()
 
     def _append_history(self) -> None:
@@ -512,7 +520,11 @@ class MainBufferScreen:
         prompt = self._editor.submit_text()
         if not self._runtime.submit(prompt):
             self.diagnostics.append("submit rejected")
+            self._configuration_notice = self._runtime.last_diagnostic
             return
+        self._configuration_notice = self._app.reasoning_notice
+        if self._runtime.settings is not None:
+            self._reasoning_mode = self._runtime.settings.reasoning_display
         self._editor.clear()
         self._begin_run(prompt, display=display)
 
@@ -949,6 +961,11 @@ class MainBufferScreen:
             view = self._permission.panel(width, self._palette, limit=limit)
             return view.lines, (len(view.lines) - 1, 0), view.selected_row
         lines: list[str] = []
+        if self._configuration_notice:
+            from .renderer import wrap_line
+
+            for line in wrap_line(sanitize_text(self._configuration_notice), width):
+                lines.append(self._palette.paint(line, "muted"))
         status = status_line(self._status, elapsed=self._live_elapsed())
         if status is not None:
             kind = "status_cancel" if self._status in {"stop", "error"} else "status"

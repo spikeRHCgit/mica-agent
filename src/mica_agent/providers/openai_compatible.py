@@ -34,7 +34,8 @@ from .base import (
 )
 
 SleepFn = Callable[[float], Awaitable[None]]
-_DEFAULT_THINKING_LEVEL_MAP = MappingProxyType(
+DEFAULT_MAX_TOKENS = 4096
+DEFAULT_THINKING_LEVEL_MAP = MappingProxyType(
     {
         ReasoningEffort.MINIMAL: "minimal",
         ReasoningEffort.LOW: "low",
@@ -50,11 +51,11 @@ def _validated_thinking_level_map(
     value: Mapping[ReasoningEffort, str] | None,
 ) -> Mapping[ReasoningEffort, str]:
     if value is None:
-        return _DEFAULT_THINKING_LEVEL_MAP
+        return DEFAULT_THINKING_LEVEL_MAP
     if not isinstance(value, Mapping):
         raise TypeError("thinking_level_map must be a mapping or None")
     if not value:
-        return _DEFAULT_THINKING_LEVEL_MAP
+        return DEFAULT_THINKING_LEVEL_MAP
     copied: dict[ReasoningEffort, str] = {}
     for effort, target in value.items():
         if not isinstance(effort, ReasoningEffort) or effort is ReasoningEffort.OFF:
@@ -184,11 +185,16 @@ class OpenAICompatibleProvider:
             "model": request.model,
             "messages": messages,
             "stream": True,
+            "max_tokens": request.max_tokens
+            if request.max_tokens is not None
+            else DEFAULT_MAX_TOKENS,
         }
         if request.reasoning_effort is not ReasoningEffort.OFF:
-            payload["reasoning_effort"] = self._thinking_level_map[
-                request.reasoning_effort
-            ]
+            payload["reasoning_effort"] = (
+                self._thinking_level_map
+                if request.thinking_level_map is None
+                else request.thinking_level_map
+            )[request.reasoning_effort]
         if request.tools:
             payload["tools"] = [
                 {
@@ -251,6 +257,8 @@ class OpenAICompatibleProvider:
         finish_reason = choice.get("finish_reason")
         if finish_reason is not None and not isinstance(finish_reason, str):
             raise MalformedResponseError("'finish_reason' must be a string")
+        if finish_reason == "":
+            finish_reason = None
         if "delta" not in choice:
             if finish_reason is None:
                 raise MalformedResponseError("missing 'delta' field in choice")
@@ -364,6 +372,26 @@ class OpenAICompatibleProvider:
                 ) from exc
         return tuple(calls)
 
+    def _finish_completion(
+        self,
+        reason: str | None,
+        accumulators: dict[int, dict[str, Any]],
+        has_text: bool,
+    ) -> Finish:
+        if accumulators:
+            if reason != "tool_calls":
+                raise MalformedResponseError(
+                    "tool calls require a tool_calls finish reason"
+                )
+            return Finish(
+                reason=reason, tool_calls=self._assemble_tool_calls(accumulators)
+            )
+        if reason == "tool_calls":
+            raise MalformedResponseError("tool_calls finish reason requires tool calls")
+        if not has_text:
+            raise MalformedResponseError("completion contained no text or tool calls")
+        return Finish(reason=reason)
+
     async def stream(self, request: ProviderRequest) -> AsyncIterator[ProviderEvent]:
         try:
             payload = self._build_payload(request)
@@ -377,8 +405,8 @@ class OpenAICompatibleProvider:
             "Content-Type": "application/json",
         }
         produced = False
+        has_text = False
         tool_accumulators: dict[int, dict[str, Any]] = {}
-        tool_finish_reason: str | None = None
         for attempt in range(self._max_retries + 1):
             established = False
             try:
@@ -401,20 +429,16 @@ class OpenAICompatibleProvider:
                             continue
                         data = line[len("data:") :].lstrip()
                         if data == "[DONE]":
-                            if tool_accumulators:
-                                try:
-                                    tool_calls = self._assemble_tool_calls(
-                                        tool_accumulators
-                                    )
-                                except MalformedResponseError as exc:
-                                    yield ProviderErrorEvent(error=exc)
-                                    return
-                                yield Finish(
-                                    reason=tool_finish_reason or "tool_calls",
-                                    tool_calls=tool_calls,
+                            try:
+                                finish = self._finish_completion(
+                                    "tool_calls" if tool_accumulators else None,
+                                    tool_accumulators,
+                                    has_text,
                                 )
-                            else:
-                                yield Finish()
+                            except MalformedResponseError as exc:
+                                yield ProviderErrorEvent(error=exc)
+                                return
+                            yield finish
                             return
                         try:
                             parsed = self._parse_chat_chunk(data)
@@ -428,8 +452,9 @@ class OpenAICompatibleProvider:
                             produced = True
                             yield ProviderReasoningDelta(text=reasoning)
                         content = parsed["content"]
-                        if content is not None:
+                        if content:
                             produced = True
+                            has_text = has_text or bool(content.strip())
                             yield TextDelta(text=content)
                         for fragment in parsed["tool_calls"]:
                             produced = True
@@ -466,32 +491,14 @@ class OpenAICompatibleProvider:
                         finish_reason = parsed["finish_reason"]
                         if finish_reason is None:
                             continue
-                        tool_finish_reason = finish_reason
-                        if tool_accumulators and finish_reason != "tool_calls":
-                            yield ProviderErrorEvent(
-                                error=MalformedResponseError(
-                                    "tool calls require a tool_calls finish reason"
-                                )
+                        try:
+                            finish = self._finish_completion(
+                                finish_reason, tool_accumulators, has_text
                             )
+                        except MalformedResponseError as exc:
+                            yield ProviderErrorEvent(error=exc)
                             return
-                        if finish_reason == "tool_calls":
-                            if not tool_accumulators:
-                                yield ProviderErrorEvent(
-                                    error=MalformedResponseError(
-                                        "tool_calls finish reason requires tool calls"
-                                    )
-                                )
-                                return
-                            try:
-                                tool_calls = self._assemble_tool_calls(
-                                    tool_accumulators
-                                )
-                            except MalformedResponseError as exc:
-                                yield ProviderErrorEvent(error=exc)
-                                return
-                            yield Finish(reason=finish_reason, tool_calls=tool_calls)
-                            return
-                        yield Finish(reason=finish_reason)
+                        yield finish
                         return
                     # The stream drained naturally without a finish signal: malformed response.
                     yield ProviderErrorEvent(

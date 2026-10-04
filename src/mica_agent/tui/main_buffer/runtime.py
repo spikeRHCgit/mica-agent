@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from mica_agent.app import MicaApp
+    from mica_agent.app import MicaApp, RunBinding
 
 from mica_agent.cancellation import CancellationToken
 from mica_agent.events import (
@@ -31,6 +31,7 @@ EventSink = Callable[[object], Awaitable[None]]
 @dataclass
 class _ActiveRun:
     token: CancellationToken
+    binding: RunBinding
     task: asyncio.Task[None] | None = None
     run_id: str | None = None
     terminal: bool = False
@@ -40,7 +41,9 @@ class _ActiveRun:
 class MainBufferRuntime:
     """Single-run controller for one assembled ``MicaApp``."""
 
-    def __init__(self, app: MicaApp, *, event_sink: EventSink) -> None:
+    def __init__(
+        self, app: MicaApp, *, event_sink: EventSink, shutdown_timeout: float = 2.0
+    ) -> None:
         from mica_agent.app import MicaApp as App
 
         if not isinstance(app, App):
@@ -48,10 +51,14 @@ class MainBufferRuntime:
         if not callable(event_sink):
             raise TypeError("event_sink must be callable")
         self._app = app
+        self._shutdown_timeout = shutdown_timeout
         self._sink = event_sink
         self._active: _ActiveRun | None = None
         self._closing = False
         self._close_task: asyncio.Task[None] | None = None
+        self.last_diagnostic: str | None = None
+        self.settings = None
+        self.cleanup_error: str | None = None
 
     @property
     def run_id(self) -> str | None:
@@ -74,12 +81,26 @@ class MainBufferRuntime:
             or not prompt.strip()
         ):
             return False
-        state = _ActiveRun(CancellationToken())
+        from mica_agent.config_contracts import ConfigError
+
+        self.last_diagnostic = None
+        try:
+            binding = self._app.prepare_run()
+        except ConfigError as error:
+            self.last_diagnostic = str(error)
+            return False
+        state = _ActiveRun(CancellationToken(), binding)
         self._active = state
-        state.task = asyncio.create_task(
-            self._consume(prompt, state), name="mica-main-buffer-run"
-        )
-        state.task.add_done_callback(lambda task: self._release(state, task))
+        consumer = self._consume(prompt, state)
+        try:
+            state.task = asyncio.create_task(consumer, name="mica-main-buffer-run")
+            state.task.add_done_callback(lambda task: self._release(state, task))
+        except BaseException:
+            consumer.close()
+            self._app.release_run(binding)
+            self._active = None
+            raise
+        self.settings = binding.settings
         return True
 
     def respond_interaction(
@@ -110,7 +131,7 @@ class MainBufferRuntime:
         reason = "stream_ended"
         try:
             async with aclosing(
-                self._app.run(prompt, cancellation=state.token)
+                self._app.run(prompt, cancellation=state.token, binding=state.binding)
             ) as stream:
                 async for event in stream:
                     if self._closing:
@@ -142,6 +163,7 @@ class MainBufferRuntime:
     def _release(self, state: _ActiveRun, task: asyncio.Task[None]) -> None:
         if not task.cancelled():
             task.exception()
+        self._app.release_run(state.binding)
         if self._active is state:
             self._active = None
             state.task = None
@@ -182,17 +204,22 @@ class MainBufferRuntime:
             if state is not None and state.task is not None:
                 task = state.task
                 try:
-                    await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+                    await asyncio.wait_for(
+                        asyncio.shield(task), timeout=self._shutdown_timeout
+                    )
                 except TimeoutError:
                     if not task.done():
                         task.cancel()
-                    await asyncio.gather(task, return_exceptions=True)
-                self._release(state, task)
+                    await asyncio.wait({task}, timeout=self._shutdown_timeout)
+                if task.done():
+                    self._release(state, task)
+                else:
+                    self.cleanup_error = "run cleanup unconfirmed"
         finally:
             try:
                 await self._app.aclose()
-            except Exception:  # noqa: BLE001, S110 - provider close diagnostics stay private
-                pass
+            except Exception:  # noqa: BLE001 - provider close diagnostics stay private
+                self.cleanup_error = "provider release unconfirmed"
 
 
 @dataclass(frozen=True, slots=True)

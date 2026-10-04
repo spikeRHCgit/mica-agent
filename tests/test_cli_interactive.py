@@ -59,9 +59,12 @@ def _provide_test_temp_root(tmp_path: Path) -> Iterator[None]:
 
 def clean_environment() -> dict[str, str]:
     """剔除全部 MICA_* 变量的环境副本，防止测试受本机配置影响。"""
-    return {
+    environment = {
         key: value for key, value in os.environ.items() if not key.startswith("MICA_")
     }
+    root = _TEST_TEMP_ROOT.get() / "isolated-home"
+    environment.update(HOME=str(root), USERPROFILE=str(root))
+    return environment
 
 
 def run_module(
@@ -184,11 +187,13 @@ async def run_core(
     "command",
     [("mica",), (sys.executable, "-m", "mica_agent")],
 )
+@pytest.mark.parametrize("plain", [False, True])
 def test_cli_missing_all_environment_variables(
     command: tuple[str, ...],
+    plain: bool,
 ) -> None:
     result = subprocess.run(
-        [*command, "cli"],
+        [*command, "cli", *(["--plain"] if plain else [])],
         capture_output=True,
         text=True,
         env=clean_environment(),
@@ -196,14 +201,19 @@ def test_cli_missing_all_environment_variables(
     )
 
     assert result.returncode == 2
-    assert "MICA_API_URL" in result.stderr
-    assert "MICA_API_KEY" in result.stderr
-    assert "MICA_MODEL" in result.stderr
+    if plain:
+        assert all(
+            name in result.stderr
+            for name in ("MICA_API_URL", "MICA_API_KEY", "MICA_MODEL")
+        )
+    else:
+        assert result.stderr == "mica: unable to start terminal interface\n"
     assert result.stdout == ""
 
 
 @pytest.mark.parametrize("missing", ["MICA_API_URL", "MICA_API_KEY", "MICA_MODEL"])
-def test_cli_missing_one_environment_variable(missing: str) -> None:
+@pytest.mark.parametrize("plain", [False, True])
+def test_cli_missing_one_environment_variable(missing: str, plain: bool) -> None:
     env = clean_environment()
     env.update(
         MICA_API_URL="https://api.example.test/v1",
@@ -212,13 +222,13 @@ def test_cli_missing_one_environment_variable(missing: str) -> None:
     )
     env.pop(missing)
 
-    result = run_module("cli", env=env)
+    result = run_module("cli", *(["--plain"] if plain else []), env=env)
 
     assert result.returncode == 2
-    assert missing in result.stderr
-    for present in ("MICA_API_URL", "MICA_API_KEY", "MICA_MODEL"):
-        if present != missing:
-            assert present not in result.stderr
+    if plain:
+        assert missing in result.stderr
+    else:
+        assert result.stderr == "mica: unable to start terminal interface\n"
     assert SECRET_KEY not in result.stderr
     assert result.stdout == ""
 
@@ -226,7 +236,7 @@ def test_cli_missing_one_environment_variable(missing: str) -> None:
 def test_cli_missing_variables_fails_before_any_provider_request() -> None:
     # 缺少配置时 CLI 必须在任何网络/Provider 构造前失败；
     # 通过不提供任何配置 + 断言仅输出诊断验证。
-    result = run_module("cli", env=clean_environment())
+    result = run_module("cli", "--plain", env=clean_environment())
 
     assert result.returncode == 2
     assert result.stderr.startswith("mica: missing required environment variables")
@@ -785,7 +795,7 @@ def test_cli_blank_environment_variable_is_rejected(
     # 审计钩子证明：空白配置被拒绝的路径上没有任何网络/子进程副作用。
     code = (
         "import sys\n"
-        "sys.argv = ['mica', 'cli']\n"
+        "sys.argv = ['mica', 'cli', '--plain']\n"
         "def reject(event, arguments):\n"
         "    if event in {'socket.connect', 'socket.getaddrinfo', 'subprocess.Popen'}:\n"
         "        raise RuntimeError('prohibited network access')\n"

@@ -464,7 +464,7 @@ def test_tool_run_commits_one_complete_turn_and_restores_full_history() -> None:
     ]
     assert len(service.load_session(session_id).turns) == 1
     stored = service.load_session(session_id)
-    assert stored.meta.format_version == 4
+    assert stored.meta.format_version == 5
     assert len(stored.turns[0].tool_presentations) == 1
     presentation = stored.turns[0].tool_presentations[0]
     assert presentation.kind is ToolPresentationKind.READ
@@ -1558,3 +1558,121 @@ def test_full_stack_via_openai_provider_and_mock_transport() -> None:
     )
 
     asyncio.run(app.aclose())
+
+
+def test_run_freezes_capabilities_reasoning_policy_and_output_routes(tmp_path):
+    from test_config_service import make_service
+
+    from mica_agent.config_contracts import ConfigError
+    from mica_agent.session_contracts import SessionSelection
+
+    configuration = make_service(tmp_path)
+    root = configuration.store.data_root
+    config_path = root / "config.json"
+    config_path.write_text('{"reasoningEffort":"high","permissionMode":"solo"}')
+    models_path = root / "models.json"
+    directory = json.loads(models_path.read_text())
+    directory["providers"]["local"]["models"][0].update(
+        maxTokens=111, thinkingLevelMap={"high": "vendor-high"}
+    )
+    models_path.write_text(json.dumps(directory))
+    snapshot = configuration.load()
+    connection = configuration.resolve(
+        snapshot, explicit=SessionSelection("local", "a")
+    ).connection
+    service = SessionService(
+        JsonlSessionStore(resolve_workspace(configuration.store.workspace), root)
+    )
+    stored = service.create_session(selection=SessionSelection("local", "a"))
+    builder = ContextBuilder(data_root=root, workspace=service.store.workspace)
+    registry = ToolRegistry()
+    executor = ToolExecutor(registry, PolicyEngine(PermissionMode.DEFAULT))
+    invoked = []
+
+    async def write(request, cancellation):
+        invoked.append(request.call_id)
+        executor.output_reporter(request.call_id, request.name, "safe routed output")
+        config_path.write_text('{"reasoningEffort":"low","permissionMode":"default"}')
+        directory["providers"]["local"]["models"][0]["maxTokens"] = 222
+        models_path.write_text(json.dumps(directory))
+        return ToolResult(
+            request.call_id, request.name, ToolResultStatus.SUCCESS, "done"
+        )
+
+    registry.register(ToolSpec("write", "Write", {"type": "object"}), write)
+    provider = _ScriptedProvider(
+        [
+            [Finish(tool_calls=(ToolCall("write-a", "write", {}),))],
+            [Finish()],
+            [Finish()],
+        ]
+    )
+    app = MicaApp(
+        provider,
+        "a",
+        session_service=service,
+        session_id=stored.meta.session_id,
+        context_builder=builder,
+        config_service=configuration,
+        connection=connection,
+        tool_executor=executor,
+    )
+
+    async def scenario():
+        events = await _collect(app, "first")
+        assert any(
+            getattr(event, "text", None) == "safe routed output" for event in events
+        )
+        assert invoked == ["write-a"]
+        assert provider.requests[0].max_tokens == provider.requests[1].max_tokens == 111
+        assert (
+            provider.requests[0].reasoning_effort
+            is provider.requests[1].reasoning_effort
+            is ReasoningEffort.HIGH
+        )
+        assert (
+            dict(provider.requests[0].thinking_level_map)
+            == dict(provider.requests[1].thinking_level_map)
+            == {ReasoningEffort.HIGH: "vendor-high"}
+        )
+        await _collect(app, "second")
+        assert provider.requests[2].max_tokens == 222
+        assert provider.requests[2].reasoning_effort is ReasoningEffort.OFF
+        directory["providers"]["local"]["enabled"] = False
+        models_path.write_text(json.dumps(directory))
+        with pytest.raises(ConfigError):
+            app.prepare_run()
+        assert not app.is_busy
+        await app.aclose()
+
+    asyncio.run(scenario())
+    assert (
+        service.load_session(stored.meta.session_id).meta.selection
+        == connection.selection
+    )
+    assert provider.aclose_calls == 1
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_owned_provider_close_is_bounded_safe_and_not_retried(fail):
+    from mica_agent.app import MicaAppError
+
+    class ClosingProvider(_ScriptedProvider):
+        async def aclose(self):
+            self.aclose_calls += 1
+            if fail:
+                raise RuntimeError("TEST_ONLY_SECRET")
+            await asyncio.Event().wait()
+
+    provider = ClosingProvider([[Finish()]])
+    app = _make_app(provider)
+    app._close_timeout = 0.01
+
+    async def scenario():
+        for _ in range(2):
+            with pytest.raises(MicaAppError) as caught:
+                await asyncio.wait_for(app.aclose(), timeout=0.5)
+            assert "TEST_ONLY_SECRET" not in str(caught.value)
+        assert provider.aclose_calls == 1
+
+    asyncio.run(scenario())

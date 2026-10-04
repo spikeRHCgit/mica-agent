@@ -25,6 +25,7 @@ from .session_contracts import (
     SessionError,
     SessionFormatError,
     SessionMeta,
+    SessionSelection,
     TurnEntry,
 )
 
@@ -136,7 +137,9 @@ class SessionService:
         )
         return max(meta.updated_at, self._current_time(), latest_entry_at)
 
-    def create_session(self, title: str = "") -> StoredSession:
+    def create_session(
+        self, title: str = "", *, selection: SessionSelection | None = None
+    ) -> StoredSession:
         """Create and persist an empty session in the current workspace."""
         created_at = self._current_time()
         meta = SessionMeta(
@@ -147,6 +150,7 @@ class SessionService:
             title=title,
             created_at=created_at,
             updated_at=created_at,
+            selection=selection,
         )
         return self.store.create(meta)
 
@@ -186,6 +190,7 @@ class SessionService:
                 title=title,
                 created_at=current.meta.created_at,
                 updated_at=self._activity_updated_at(current.meta, current.entries),
+                selection=current.meta.selection,
             )
             return StoredSession(meta, current.entries)
 
@@ -207,6 +212,7 @@ class SessionService:
             title=source.meta.title if title is None else title,
             created_at=source.meta.created_at,
             updated_at=updated_at,
+            selection=source.meta.selection,
         )
         return self.store.create(meta, source.entries)
 
@@ -225,6 +231,7 @@ class SessionService:
                         title=current.meta.title,
                         created_at=current.meta.created_at,
                         updated_at=self._activity_updated_at(current.meta, entries),
+                        selection=current.meta.selection,
                     )
                     return StoredSession(meta, entries)
             raise TurnNotFoundError(from_turn_id)
@@ -241,6 +248,7 @@ class SessionService:
                 title=current.meta.title,
                 created_at=current.meta.created_at,
                 updated_at=self._activity_updated_at(current.meta),
+                selection=current.meta.selection,
             )
             return StoredSession(meta, ())
 

@@ -260,6 +260,7 @@ class JsonlSessionStore:
                 title=meta.title,
                 created_at=meta.created_at,
                 updated_at=meta.updated_at,
+                selection=meta.selection,
             ),
             snapshot.entries,
         )
@@ -409,6 +410,7 @@ class JsonlSessionStore:
                     title=current.meta.title,
                     created_at=current.meta.created_at,
                     updated_at=max(current.meta.updated_at, turn.completed_at),
+                    selection=current.meta.selection,
                 ),
                 (*current.entries, turn),
             )
@@ -434,6 +436,7 @@ class JsonlSessionStore:
                     title=current.meta.title,
                     created_at=current.meta.created_at,
                     updated_at=max(current.meta.updated_at, checkpoint.recorded_at),
+                    selection=current.meta.selection,
                 ),
                 (*current.entries, checkpoint),
             )
