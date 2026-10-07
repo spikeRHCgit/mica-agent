@@ -1,75 +1,431 @@
-# Mica 第六阶段：配置与模型
-
-> 状态：用户已确认计划，进入施工；授权见 D-019，A 的任务划分修订见 D-022，当前任务见 `docs/STATUS.md`。
-> 上位约束：`docs/PROJECT_PLAN.md`；前置阶段：`docs/phase5_plan.md`。
-> 行为规格：`docs/configuration_spec.md`；终端菜单与输入所有权：`docs/tui_design.md` §13.1；工程与验证规范：`docs/code_spec.md`。
+# Phase 6：配置与模型
 
 ## 目标
 
-让用户无需预先填写环境变量即可进入 Mica，在终端中配置多个供应商、登录 ChatGPT 官方订阅、保存模型目录、切换模型与接口，并管理工作区共享设置。切换和恢复保留真实会话与运行进度，不损坏既有历史、权限、取消和终端输入能力。
+用户能在 TUI 里登录多个供应商、发现和切换模型、调整共享设置并在多窗口生效，配置可靠保存；三类接口（Chat Completions、Responses、Messages）和 ChatGPT 官方订阅都能正常推理并保留续接数据。
 
-## 范围
+## 交付项与验收
 
-- 做：配置文件读取与原子保存、未配置启动、模型与供应商选择、三类 Provider 接口、模型发现、官方订阅登录、会话选择兼容、工作区设置和重载。
-- 不做：D-014 延期的整体架构重构、Phase 7 会话命令、图片输入、多 Provider 自动路由、自动故障转移、文件监听、额外推理连接测试和内置工作模式。
+| 交付项 | 目标 | 验收方式 |
+|---|---|---|
+| A2 · 会话内模型菜单与切换 | 空闲时用 `/model` 打开菜单、筛选、切换并保存会话选择；切换到更小上下文时警告并确认 | 用户在 Windows Terminal 验收 `/` 候选和 `/model` 菜单 |
+| B · Responses 与 Messages 接口 | 三类接口各有独立适配器，推理、工具、思考和取消正常工作；跨接口切换时保留通用对话、丢弃不兼容续接 | 用户用三种接口各跑一条真实渠道的工具对话，并跨接口切换一次 |
+| C1 · API Key 登录与目录 | `/login` 输入 URL/Key 后自动发现模型并保存；OpenRouter、DeepSeek、OpenCode Go 三个渠道正常登录 | 用户验收三个渠道的登录和目录 |
+| C2 · ChatGPT 官方订阅 | 浏览器授权、token 刷新、推理和工具调用；本地回调服务器有界运行；ID token 经过签名验证 | 用户用真实 ChatGPT 授权并跑一次工具对话；账号或额度不足时标为未验收 |
+| D · 设置、重载与多窗口 | `/settings` 修改三项共享设置并保存到工作区或全局；`/reload` 重读配置；运行中快捷键切换权限时标记待生效，Run 收口后保存；忙时编辑命令草稿会提醒 | 用户验收设置、重载和忙时提醒 |
 
-配置、登录、模型、来源、恢复和凭据细则见 `docs/configuration_spec.md`；菜单布局、按键、忙时输入见 `docs/tui_design.md`，不重复细则。原简报的基础斜杠命令倾向已收敛为四个确定入口；参考菜单只借操作和内容层级，不借主题或额外功能。
+主线收口时，运行 `uv run pytest -q -W error`、`ruff check`、`ruff format --check`；依赖变化后运行 `uv lock --check` 和 `uv build`。
 
-## 交付项
+---
 
-按 A1 → A2 → B → C → D 顺序验收交付，后一项只使用前一项已经验收合并的契约。A1/A2 合起来交付原 A 的全部需求（D-022）；批次标签不是任务 ID，真正派发时分配 `T-###`，不按字段、按键或单处测试拆碎卡片。热点和公共契约顺序施工，默认不并行修改 CLI/App/会话/TUI 核心。
+## A2 · 会话内模型菜单与切换
 
-1. **A1：配置启动与选择恢复**（前置：无）：三份全局 JSON 与工作区 JSON 的读取、来源和最小安全保存能力（models/auth 只读）；无连接 TUI；既有 Chat Completions 装配及每轮配置冻结；初始模型选择保存与兼容恢复。验收：缺失、未知键、非法值、语法损坏、凭据权限、并发保存和原子失败；手工配置后启动可对话，无配置提交无 Run；新会话默认选择持久化、CLI 临时覆盖不写回、真实旧格式只读兼容、直接/plain 入口及取消/关闭保持。启动提示、事实区、草稿与光标由用户真实终端复验。 ✓ T-021
-2. **A2：会话内模型菜单与切换**（前置：A1 验收）：统一斜杠命令入口及即时候选列表，接入本地 `/model` 筛选与导航、当前/全局默认分离；切换确认、候选准备、选择保存、安装与旧连接收口。验收：单行 `/` 即时提示、继续输入筛选和候选导航可用，未匹配提交原文按普通消息处理；准备/保存失败保留原连接并关闭候选，成功后请求真正使用新模型，取消和退出不留下重复 Run 或无限清理；当前与默认互不偷改。首个菜单由用户检查 Enter/Ctrl+S/Esc、长失焦、resize、草稿与物理光标；不重复 A1 的配置与会话实现。统一入口遵守配置规格 §9（D-023/D-024），后续命令沿用，不提前实现 C/D。
-3. **B：三接口与历史续接**（前置：A2 验收）：Responses、Messages 和既有接口统一文本、思考、工具往返、真实终态、取消、资源收口；安全续接契约与兼容保存；跨接口完成/中断历史接手。验收：真实格式流碎片、正常/失败/不完整终态、思考后的两次工具往返、取消断流、非法工具及允许的重试边界；跨接口不丢通用事实、不串专属数据、不伪造结果或重放副作用，切回也检查绑定。
-4. **C：登录、发现与连接维护**（前置：B 验收）：自定义及三个内置 API 渠道；目录多选/手工添加/刷新；ChatGPT 官方订阅与刷新；重配、禁用、启用、删除。验收：畸形目录、手工字段保护、取消迟到、OAuth state/nonce/签名/权限失败、token 轮换及重配/删除竞争、原子失败；日志/会话/错误/repr 无测试凭据；用户参与真实渠道验收。
-5. **D：共享设置、重载与阶段整合**（前置：C 验收）：`/settings`、逐项全局、权限快捷切换、`/reload`；多窗口安全读取；全部菜单及忙时提示；文档和综合验收。验收：当前/新建/切换/恢复使用同一工作区设置，显式覆盖可解释，其他进程下一安全节点更新，进行中 Run 冻结，逐项全局不改其他覆盖，重载失败无半份生效；终端回归、真实复验和文档收口。
+### 要实现
 
-当前进度见 `docs/STATUS.md`。实施入口建议：A1 核对配置、CLI/App/Runtime 启动、会话保存与 screen 快照；A2 接菜单与连接交接；B 核对 Provider、消息/终态、Engine/App 进度和保存；C 完成认证、目录服务及菜单；D 接运行设置、现有权限和呈现入口。允许新增职责完整模块，不预设大型管理框架或尚不存在的文件。
+**命令候选**：
+- 单行草稿以 `/` 开头时，即时弹出可用命令候选列表，支持 ↑/↓ 选择及继续输入筛选；
+- 只有候选目录中的命令能在本地执行；未匹配内容提交时完整作为普通消息发送，不被本地拦截；
+- 忙时可以编辑命令草稿，提交时提醒「运行中，命令暂不可用」；
+- 命令候选与可编辑 composer 共存，进入配置功能后才替换底部区。
 
-## 契约
+**模型菜单**：
+- 空闲时输入 `/model` 并提交，打开模型选择菜单；
+- 菜单显示当前供应商的所有可用模型，按名称排序；支持 ↑/↓ 导航、继续输入筛选；
+- Enter 选中目标模型，弹出确认：显示新模型名称、上下文窗口大小；如果新模型的 `contextWindow` 小于当前模型，警告「上下文会缩小，历史可能超限」；
+- 确认后切换连接、保存会话选择、关闭旧连接；菜单关闭并回到空闲；
+- Esc 只关闭菜单，不取消 Run；菜单打开时屏蔽普通输入。
 
-- 通用事实继续由 `Message`、`ToolCall`、公共事件、Turn 和 `RunCheckpoint` 表达；Provider 转换协议，Engine 保持单一循环。
-- 连接、能力、会话选择、共享设置与凭据分开归属；具体文件、来源、安全和跨接口规则统一遵守配置规格。
-- 应用拥有连接装配和 Provider 关闭，Runtime 拥有唯一 Run 及消费任务；明确转交所有权，不让 TUI 直接操作业务私有字段。
-- 每轮 Run 固定开始时的连接与运行设置；空闲切换先准备和保存，失败保留旧状态，取消真实收口后才算空闲。
-- 会话选择与专属续接分别先审；旧格式只读兼容、锁内原子升级，不以新格式伪称旧 v4，专属内容不绕过敏感清洗。
-- 菜单复用主缓冲区输入和底部交互区，Ask/Permission 独占输入；键位与忙时提醒按 TUI 规格，不另建消费器。
+**容量提醒**：
+- 只比较新旧模型的 `contextWindow` 字段，不估算历史 token；
+- 真正超限由服务端返回错误，前端正常展示。
 
-A1 编码前审配置字段、来源、启动装配和选择 wire；完整 A 的已审技术方案见 T-021，拆分后按 A1/A2 归属实施，不重交整份方案。A1 不提前实现 A2 的切换接口、菜单或资源管理框架；A2 派发时核对实际已验收契约。B 编码前审续接、完成、敏感清洗与旧格式回放；C 加依赖前审库及分发影响。审查在对应任务内完成，不额外造小卡。改变已确认行为或扩大公共面时先说明，不能以实施细节名义越界。
+**会话选择保存**：
+- 切换成功后，更新当前会话的 `provider_id` 和 `model_id`；
+- 以后恢复该会话时使用保存的选择，不随全局默认模型变更；
+- 新建会话时，如果实际采用了有效配置默认模型（未使用 CLI 临时覆盖），保存该初始选择。
 
-## 验收
+### 实现方式
 
-### 自动化与安全保护
+**模块与文件**：
+- 新建 `src/mica_agent/tui/main_buffer/commands.py`：固定命令登记（名称、说明、是否可用、处理函数）、匹配和分派；候选列表和实际执行用同一份登记；
+- 新建 `src/mica_agent/tui/main_buffer/menus.py`：本地菜单的状态、筛选和绘制，复用 `interactions.py` 的 `PanelView` 和 `fit_panel_rows`；本地菜单与 Ask/Permission 语义分开，Esc 只关菜单；
+- `src/mica_agent/tui/main_buffer/screen.py`：调整 running 状态的输入门禁，让忙时可以编辑草稿；调用 commands 的候选和分派；
+- 扩充 `src/mica_agent/app.py`：Provider 创建从 CLI 挪到 App，新增空闲切换接口，顺序为校验 → 准备新连接 → 保存会话选择 → 安装 → 关闭旧连接；准备或保存失败关闭候选、保留旧连接；
+- 扩充 `src/mica_agent/session_service.py`：新增更新会话选择的方法，复用 `JsonlSessionStore.update` 的锁内变换。
 
-按稳定行为归入现有测试资产，必要时新增配置/认证契约测试，不按阶段号命名。先用代表性场景形成闭环，稳定后集中完成 `docs/code_spec.md` §2.4 所需最终验证，不每写函数就重复全量。
+**关键接口**：
+- `commands.py` 提供：命令登记结构、`match_command(input: str)`、`suggest_commands(prefix: str)` → 候选列表、`dispatch_command(name: str, args: str, ctx)`；
+- `menus.py` 提供：模型菜单状态、筛选、按键处理和绘制；
+- `MicaApp` 新增：`switch_model(provider_id: str, model_id: str)` → 成功或失败及原因；
+- `SessionService` 新增：`update_selection(session_id: str, provider_id: str, model_id: str)`。
 
-| 领域 | 额外必须证明的边界 |
-|---|---|
-| 配置 | 合法字段继续加载、来源正确、目标项保存不损坏无关字段、工作区无凭据。 |
-| 启动/切换 | 保存失败保留选择；直接显式连接和 plain 入口兼容，候选与旧资源真实关闭。 |
-| 会话 | 真实 v1～v4 固定样本可读且只读字节不变；新字段和原子升级安全；元数据操作保留选择；缺渠道不自动换；Turn/checkpoint 顺序不变。 |
-| 三接口 | 真实格式碎片与完整参数组装；思考后的两次工具往返、非法工具、取消/关闭、允许的网络重试。 |
-| 跨接口 | 成功工具及中断工具历史均能接手；不伪造 TOOL/最终回答，不重放旧副作用。 |
-| 认证/目录 | 真实字段差异、手工值保护、刷新轮换及重配/删除竞争、权限失败、敏感输出清洗。 |
-| 设置/重载 | 工作区共用、启动显式覆盖说明、当前 Run 不变、读取失败不半份更新。 |
-| 终端回归 | 草稿/光标、Unicode/粘贴、方向键/数字/Enter/Esc、Ask 自定义答案、权限导航、Ctrl+C/Ctrl+O、resize/scrollback 与历史层级。 |
+**数据流**：
+- screen 收到 `/` 开头的草稿 → 调用 commands 派生候选 → 渲染候选列表；
+- Enter 提交 → commands 匹配并分派 → `/model` 打开 menus 的模型菜单；
+- 菜单确认 → 调用 `App.switch_model()` → App 准备连接 → SessionService 保存选择 → App 安装并关闭旧连接 → 菜单关闭。
 
-并发测试用 Event/队列/实际状态与有界等待；认证和模型服务隔离可控边界，默认不访问真实用户目录、Key、网络。失败保留现场并定位，不跑到绿、不以随后通过宣称历史间歇问题修复。
+**注意事项**：
+- 命令登记只包含 `/model`，`/login`、`/settings`、`/reload` 由后续交付项注册；
+- 不引入命令插件框架，不为未实现命令创建空壳入口；
+- 历史 token 估算和精确用量统计随阶段 7 一起做，A2 不提前实现。
 
-最终按影响选择 `uv run pytest <范围> -q -W error`、`uv run ruff check <范围>`、`uv run ruff format --check <范围>`；依赖与分发改变时执行 `uv lock --check`、`uv build --offline` 及相关安装验证，选择依据见 code spec。
+---
 
-### 真实终端与渠道
+## B · Responses 与 Messages 接口
 
-A1 由用户真实 Windows Terminal 检查未配置提示、启动事实区、输入草稿与光标；A2 首个 `/model` 完成后立即验收菜单，不等全部菜单。C/D 复验登录多选、设置、忙时提醒与 Ask/Permission。正向/负向视觉对照只遵循 `docs/assets/tui/README.md`，自动化截图不自行批准真实验收。
+### 要实现
 
-用户明确参与官方 ChatGPT 授权、OpenRouter/DeepSeek/OpenCode Go 目录及至少一条真实工具对话、跨接口切换和中断恢复。三种协议均需实际渠道证据；账号、能力、资格或额度不足明确未验收，不以模拟替代、不绕过官方限制。仅用户主动验收才发推理，登录和模型选择不隐藏发送测试消息。
+**新增两个接口适配器**：
+- 支持 OpenAI Responses API：`/chat/responses` 端点、reasoning item 续接、thinking 展示；
+- 支持 Anthropic Messages API：`/messages` 端点、thinking block 续接、extended_thinking 展示。
 
-### 收口
+**续接数据保留**：
+- Responses 的 reasoning item（type、content、summary、encrypted_content 等）和 Messages 的 thinking signature（type、thinking、signature）在工具往返和会话恢复时回传给模型；
+- 续接数据经过清洗判定：长度上限、绑定供应商+模型+接口+步骤，通过判定的才保存到会话；
+- TUI 只接收可展示的思考文字（`ReasoningDelta`），不读取专属原文。
 
-全部交付项完成后更新 README 实际使用、源码地图、终端现行规格及公共契约说明，同步清理旧说明和替代测试。施工返工记任务卡，不把报告复制到完成形态；按新版 aTa 整理阶段计划并冻结。自动化、必要分发和用户真实验收分别有证据才标阶段完成；Git 收口由 master 按授权完成并核对远端，不把推送当产品验收，不自动启动 Phase 7。
+**跨接口切换**：
+- 切换到不同接口的模型时，保留通用对话历史（`Message` 的 role/content/tool_calls/tool_call_id）；
+- 丢弃不兼容的续接数据，不强行转换或保留来源不匹配的记录；
+- 切换后第一次推理正常工作，不因缺少续接而失败。
 
-## 待定
+**会话格式升级**：
+- 新增 v6：v1～v5 继续只读可用，读入时续接为空；
+- 第一次业务写入时在锁内整文件升级到 v6，和 v4、v5 的升级方式一致；
+- 旧版 Mica 无法读取 v6 会话。
 
-- 续接的精确 JSONL wire 版本、字段、白名单、关联顺序和失败降级：B 编码前审定；选择 wire 已在 T-021 第一关审定，可安全共用新格式则复用，不加未定义占位。
-- OAuth 验证依赖、许可证、锁文件与分发影响：C 引入依赖前审定，签名验证采用成熟库，不手写密码学。
+### 实现方式
+
+**模块与文件**：
+- 新建 `src/mica_agent/providers/openai_responses.py`：Responses 请求编码和 SSE 解析，用 httpx；reasoning item 解析和续接数据构造；
+- 新建 `src/mica_agent/providers/anthropic_messages.py`：Messages 请求编码和 SSE 解析，用 httpx；thinking block 解析和续接数据构造；
+- 新建 `src/mica_agent/continuation_contracts.py`（公共契约组）：独立的模型步骤续接记录契约，强类型、有长度上限，绑定供应商+模型+接口+步骤；
+- 扩充 `src/mica_agent/providers/base.py`：`ProviderRequest` 新增续接字段、`Finish` 返回续接；三个适配器共用的 SSE 读取和错误分类，只在确实重复时抽到这里；
+- 扩充 `src/mica_agent/engine.py`：在本轮工具往返中携带续接；
+- 扩充 `src/mica_agent/app.py`：按模型的 `api` 字段从一张固定表里选适配器（completions / responses / messages），创建对应 Provider；`prepare_run()` 装配时传入 factory；
+- 扩充 `src/mica_agent/session_contracts.py`：v6 格式定义、续接字段的序列化和反序列化；
+- 扩充 `src/mica_agent/checkpoint_contracts.py`：`RunCheckpointProgress` 新增续接字段；
+- 扩充 `src/mica_agent/jsonl_store.py`：v6 读取、升级和写入；
+- 扩充 `src/mica_agent/session_service.py`：恢复时返回消息加续接的上下文视图；
+- 扩充 `src/mica_agent/message_sanitizer.py`：续接数据的安全判定和清洗。
+
+**续接契约结构**（示意）：
+```python
+@dataclass(frozen=True)
+class ContinuationRecord:
+    provider_id: str
+    model_id: str
+    api_type: str  # "completions" | "responses" | "messages"
+    step_index: int
+    data: dict[str, object]  # 强类型白名单，有长度上限
+```
+
+**数据流**：
+- Engine 请求模型 → ProviderRequest 携带上一步的续接 → 适配器编码专属字段并发送；
+- SSE 返回 → 适配器解析专属字段 → Finish 携带本步续接 → Engine 保存到本轮上下文；
+- Turn/Checkpoint 提交 → 经 sanitizer 清洗判定 → 只保存通过的记录；
+- 恢复会话 → SessionService 投影消息加续接 → Engine 下一步携带。
+
+**接口映射表**（App 装配时使用）：
+- `"openai-completions"` → `OpenAICompatibleProvider`
+- `"openai-responses"` → `OpenAIResponsesProvider`
+- `"anthropic-messages"` → `AnthropicMessagesProvider`
+
+**注意事项**：
+- 不先改已验收的 Chat Completions 适配器，三个适配器独立实现；
+- 续接数据不改变 `Message`/`ToolCall` 的公共 API；
+- 纯思考、无正文的模型步骤也能保存续接，不受「中间消息只允许工具往返」约束；
+- 跨接口切换的兼容性测试要覆盖 completions ↔ responses ↔ messages 各方向。
+
+---
+
+## C1 · API Key 登录与目录
+
+### 要实现
+
+**登录流程**：
+- `/login` 命令打开 API Key 登录界面，提示输入 API URL 和 API Key；
+- Key 输入用遮蔽模式（显示为 `*`），原始 Key 只在提交时交给认证业务，不进入 composer、用户事件或调试 repr；
+- 提交后校验 URL 格式，用 Key 请求模型目录（有界、可取消）；
+- 目录请求成功 → 解析模型列表 → 保存连接到 `auth.json` 和 `models.json` → 提示「已保存 N 个模型」→ 关闭界面；
+- 目录请求失败 → 显示错误（认证失败 / 超时 / 服务端错误）→ 保留输入，用户可重试或取消。
+
+**目录发现**：
+- 按渠道请求模型列表：OpenRouter (`/models`)、DeepSeek (`/models`)、OpenCode Go (`/models`)；
+- 解析出模型 ID、名称和明确的能力（`contextWindow`、是否支持 tool calling、是否支持 reasoning）；
+- 有界请求：超时 30 秒、最多重试 1 次；
+- 内置渠道的基址、目录地址和接口映射写成固定表。
+
+**凭据安全保存**：
+- `auth.json`：先创建目录和文件并设置权限（Windows ACL / POSIX 0600），再写明文，最后原子替换；
+- 锁内重读、合并其他供应商的连接、原子保存；
+- 保存后立即用受保护读取验证权限。
+
+**模型保存**：
+- `models.json`：和 `config.json` 共用一个内部原子替换步骤（mkstemp、flush/fsync、os.replace）；
+- 锁内重读、合并、原子保存。
+
+**渠道支持**：
+- OpenRouter：Chat Completions 接口，基址 `https://openrouter.ai/api/v1`，目录 `/models`；
+- DeepSeek：Chat Completions 接口，基址 `https://api.deepseek.com`，目录 `/models`；
+- OpenCode Go：Chat Completions 接口，基址 `https://api.opencode.dev/v1`，目录 `/models`。
+
+### 实现方式
+
+**模块与文件**：
+- 新建 `src/mica_agent/credential_store.py`（配置与选择组）：`auth.json` 的安全创建、锁内重读合并、原子保存、删除和刷新共用归属锁；
+- 新建 `src/mica_agent/model_catalog.py`（配置与选择组）：按渠道用 httpx 请求模型列表，解析 ID、名称和能力，有界、可取消；内置渠道的固定表；
+- 扩充 `src/mica_agent/config_store.py`：`models.json` 的写入，和 `config.json` 共用内部原子替换步骤；
+- 扩充 `src/mica_agent/tui/main_buffer/commands.py`：注册 `/login` 命令；
+- 扩充 `src/mica_agent/tui/main_buffer/menus.py`：遮蔽 Key 输入组件、多行输入（URL + Key）、提交和取消。
+
+**关键接口**：
+- `CredentialStore`：
+  - `__init__(data_root)`
+  - `save_connection(provider_id, api_url, api_key, models)` → 成功或失败
+  - `remove_connection(provider_id)` → 成功或失败
+- `ModelCatalog`：
+  - `discover(api_url, api_key, channel_hint)` → `list[ModelInfo]` 或错误
+  - `ModelInfo`：id、name、contextWindow、supportsTools、supportsReasoning
+- `ConfigStore` 新增：
+  - `save_models(provider_id, models)` → 成功或失败
+
+**凭据安全流程**：
+1. 创建 `~/.mica/auth.json` 的父目录（如果不存在）；
+2. 用 mkstemp 创建临时文件，立即设置权限（Windows：只允许当前用户和 SYSTEM/Administrators；POSIX：0600）；
+3. 写入 JSON 明文（包含 URL 和 Key）；
+4. flush + fsync；
+5. os.replace 原子替换；
+6. 删除临时文件（失败时记录但不阻塞）；
+7. 用 `_credential_permissions.py` 的受保护读取验证权限。
+
+**目录请求示例**（OpenRouter）：
+```
+GET https://openrouter.ai/api/v1/models
+Authorization: Bearer <api_key>
+→ { "data": [{"id": "...", "name": "...", "context_length": 128000, ...}] }
+```
+
+**注意事项**：
+- 目录格式按渠道区分，不按协议（OpenRouter 和 DeepSeek 都用 Chat Completions，目录格式不同）；
+- 目录请求和推理请求分开，不改 Provider 协议；
+- C2 的 OAuth 整组刷新也用 `CredentialStore`。
+
+---
+
+## C2 · ChatGPT 官方订阅
+
+### 要实现
+
+**授权流程**：
+- `/login` 命令增加「ChatGPT 官方订阅」选项；
+- 选中后，用浏览器打开 ChatGPT 授权页面，用户在浏览器里登录并授权；
+- 本地回调服务器接收授权码，用授权码交换 access token 和 refresh token；
+- 验证 ID token 的签名（用 `PyJWT` 和 OpenAI JWKS）；
+- 保存 token 到 `auth.json`，提示「ChatGPT 已授权」→ 关闭界面。
+
+**Token 刷新**：
+- 推理前检查 access token 是否过期（根据 `expires_at`）；
+- 过期时用 refresh token 换新的 access token，更新 `auth.json`；
+- refresh token 也过期时，提示「授权已过期，请重新登录」。
+
+**推理**：
+- 复用 B 的 Responses 适配器，由连接装配时传入订阅选项：
+  - 认证头用 OAuth token（`Authorization: Bearer <access_token>`）；
+  - 发送 `store: false`（不保存对话）；
+  - 不发送 `max_output_tokens`；
+  - 系统指引转成 `instructions` 字段；
+  - 工具用订阅允许的形式。
+
+**本地回调服务器**：
+- 用标准库 `ThreadingHTTPServer`，在受控线程里运行；
+- 只绑 `127.0.0.1`，端口动态分配；
+- 有超时（120 秒）和取消；
+- 结果安全交回事件循环；
+- 关闭后迟到的请求直接拒绝。
+
+**安全**：
+- state、nonce、PKCE 用标准库生成（`secrets.token_urlsafe`、`hashlib.sha256`）；
+- 校验回调的 state、nonce；
+- 授权码不进入日志或 UI；
+- ID token 签名验证用 `PyJWT[crypto]`。
+
+### 实现方式
+
+**模块与文件**：
+- 新建 `src/mica_agent/chatgpt_auth.py`（配置与选择组）：管授权流程、token 交换和刷新；本地回调服务器；state、nonce、PKCE 生成；
+- 引入运行依赖 `PyJWT[crypto]`（MIT；后端 cryptography 为 Apache-2.0 或 BSD）；
+- 扩充 `src/mica_agent/providers/openai_responses.py`：接受订阅选项（OAuth 认证、store、instructions、工具形式）；
+- 扩充 `src/mica_agent/credential_store.py`：OAuth 整组（access token、refresh token、expires_at）的保存和刷新；
+- 扩充 `src/mica_agent/config_service.py`：识别 `type: "chatgpt_subscription"` 并装配订阅连接；
+- 扩充 `src/mica_agent/tui/main_buffer/menus.py`：登录方式选择（API Key / ChatGPT 订阅）。
+
+**关键接口**：
+- `ChatGPTAuth`：
+  - `start_authorization()` → 浏览器打开授权页面，返回回调服务器地址
+  - `wait_for_callback(timeout)` → 授权码或超时/取消
+  - `exchange_code(code)` → access token、refresh token、expires_at
+  - `refresh_access_token(refresh_token)` → 新 access token、expires_at
+  - `verify_id_token(id_token)` → 验证签名并返回 claims
+
+**授权流程**：
+1. 生成 state、nonce、PKCE code_verifier 和 code_challenge；
+2. 启动本地回调服务器（127.0.0.1:动态端口）；
+3. 用 `webbrowser.open_new_tab()` 打开授权 URL（包含 state、nonce、code_challenge、redirect_uri）；
+4. 等待回调（超时 120 秒）；
+5. 校验 state、nonce；
+6. 用授权码 + code_verifier 换 token；
+7. 验证 ID token 签名；
+8. 保存到 `auth.json`；
+9. 关闭回调服务器。
+
+**依赖审查**（派卡前由 master 核实）：
+- `PyJWT` 当前版本和许可证（MIT）；
+- `cryptography` 当前版本和许可证（Apache-2.0 或 BSD-3-Clause）；
+- 传递依赖的许可证；
+- 添加到 `pyproject.toml` 的 `dependencies`。
+
+**注意事项**：
+- 只维护一套 Responses 编解码，订阅和 API Key 共用；
+- 回调服务器只接收一个请求就关闭；
+- 真实 ChatGPT 授权和推理由用户验收，账号或额度不足时标为未验收。
+
+---
+
+## D · 设置、重载与多窗口
+
+### 要实现
+
+**设置菜单**：
+- `/settings` 命令打开设置菜单，显示三项共享设置：
+  - `permissionMode`：default / solo；
+  - `reasoningEffort`：off / low / medium / high；
+  - `reasoningDisplay`：full / collapsed / hidden。
+- 支持 ↑/↓ 导航、Enter 切换选项；
+- 每项显示当前值、来源（program default / global / workspace / CLI override）；
+- 底部显示「Save to: Workspace / Global / Cancel」，↑/↓ 选择保存目标；
+- 确认后保存到对应配置文件，提示「已保存到 <workspace/global>」→ 关闭菜单。
+
+**配置重载**：
+- `/reload` 命令重读全局和工作区配置；
+- 重读成功 → 提示「配置已重载」→ 下一轮 Run 使用新值；
+- 重读失败 → 显示错误（JSON 格式错误 / 字段非法 / 凭据权限错误）→ 阻止新 Run，保持当前配置。
+
+**待生效机制**：
+- 运行中用快捷键切换权限模式时，只记待生效值，不立即保存；
+- 等消费任务结束、检查点提交、App 忙状态释放后再保存；
+- 下一轮 `prepare_run()` 读到新值。
+
+**忙时提醒**：
+- 运行中编辑命令草稿并提交时，提醒「运行中，命令暂不可用」；
+- 提醒持续 2 秒后自动消失，保留草稿。
+
+**多窗口生效**：
+- 一个窗口修改全局配置 → 另一个窗口下一轮 Run 时读到新值；
+- 一个窗口修改工作区配置 → 同工作区的另一个窗口下一轮 Run 时读到新值；
+- 不实时同步：只在 Run 开始时重读配置。
+
+**CLI override 撤销**：
+- 当前窗口用户在设置菜单修改某项 → 撤销该项的 CLI override；
+- 其他窗口的文件写入 → 不撤销本窗口的 CLI override。
+
+### 实现方式
+
+**模块与文件**：
+- 扩充 `src/mica_agent/app.py`：持有待生效的设置意图；在 Run 收口后、reservation 释放时保存；
+- 扩充 `src/mica_agent/config_store.py`：新增按目标项比较保存工作区和全局设置的方法（`save_setting(name, value, workspace, expected_value)`）；
+- 扩充 `src/mica_agent/config_service.py`：`reload()` 方法，重读配置并返回新快照或错误；
+- 扩充 `src/mica_agent/tui/main_buffer/commands.py`：注册 `/settings`、`/reload` 命令；
+- 扩充 `src/mica_agent/tui/main_buffer/menus.py`：设置菜单组件（三项设置、保存目标选择）；
+- 扩充 `src/mica_agent/tui/main_buffer/screen.py`：快捷键切换权限时更新 App 的待生效意图；忙时提醒组件。
+
+**关键接口**：
+- `MicaApp` 新增：
+  - `mark_pending_setting(name, value)` → 记待生效值
+  - `commit_pending_settings()` → 保存所有待生效值
+- `ConfigStore` 新增：
+  - `save_setting(name, value, workspace, expected_value)` → 成功或冲突
+- `ConfigService` 新增：
+  - `reload()` → `ConfigSnapshot` 或错误
+
+**数据流**：
+- 用户打开 `/settings` → menus 渲染三项设置 → 确认保存目标 → 调用 `ConfigStore.save_setting()` → 成功或冲突；
+- 用户输入 `/reload` → ConfigService 重读配置 → 成功返回新快照 / 失败阻止新 Run；
+- 运行中快捷键切换权限 → 调用 `App.mark_pending_setting()` → Run 收口后调用 `App.commit_pending_settings()` → ConfigStore 保存。
+
+**reasoningDisplay 即时更新**：
+- 不走待生效机制；
+- 设置菜单确认后，立即更新 screen 的 `_reasoning_mode`；
+- 下一次重绘时按新模式渲染思考块。
+
+**注意事项**：
+- 不实现文件监听和实时同步，只在 Run 开始时重读；
+- Shift+Tab 快捷键用于「切换到下一个交互项」，不用于设置相关操作；
+- `/reload` 失败时的阻止机制：在 App 的 `prepare_run()` 入口检查配置有效性。
+
+---
+
+## 不做清单
+
+Phase 6 **不实现**以下内容：
+
+1. 整体架构重构（D-014）；
+2. 阶段 7 的会话命令（`/new`、`/rename`、`/branch`、`/rewind`、`/clear`、`/btw`、`/compact`）；
+3. 图片、文件等多模态输入；
+4. 多 Provider 自动路由和故障转移；
+5. 配置文件监听和实时同步；
+6. 额外的推理连接测试（登录时只请求目录，不单独测试推理）；
+7. 内置工作模式；
+8. 历史 token 估算和上下文用量统计（阶段 7）；
+9. 命令插件框架；
+10. 未实现命令的空壳入口。
+
+---
+
+## 依赖变更
+
+新增运行依赖：
+- `pyjwt[crypto]`（MIT；后端 cryptography 为 Apache-2.0 或 BSD-3-Clause）
+
+派 C2 的卡之前，master 先核实当前版本、许可证和传递依赖。
+
+---
+
+## 数据格式变更
+
+**会话 JSONL 升级到 v6**：
+- 新增字段：续接数据（`continuation`，可选，仅 v6）；
+- v1～v5 继续只读可用，读入时续接为空；
+- 第一次业务写入时在锁内整文件升级到 v6；
+- 旧版 Mica 无法读取 v6 会话。
+
+**新增配置文件**：
+- `~/.mica/models.json`：保存各供应商的模型列表；
+- `~/.mica/auth.json`：保存凭据（API Key 和 OAuth token），受保护权限。
+
+---
+
+## 测试要求
+
+每张卡通过时，必须满足：
+- 全量测试通过：`uv run pytest -q -W error`；
+- 代码检查通过：`ruff check`、`ruff format --check`；
+- 依赖变化后：`uv lock --check`、`uv build` 通过；
+- 新增公共契约、wire 格式变更：有直接断言和安装态验证；
+- 凭据安全：真实 Windows ACL / POSIX 权限验证。
+
+每项交付完成后，用户做真实验收（见交付项表格）。
+
+---
+
+## 参考
+
+- D-017：Phase 6 配置与多接口方案定稿
+- D-020：启动模型覆盖不写回会话
+- D-021：新会话保存配置默认模型的初始选择
+- D-022：配置启动与会话内模型切换分开验收
+- D-023：斜杠命令统一管理、功能分批交付
+- D-024：即时命令候选与未匹配原文回退
+- T-023：Phase 6 剩余交付项的代码事实调研
+- `docs/scratchpad.md`：规划讨论记录
+- `docs/configuration_spec.md`：配置行为规则（计划写成后删除）
