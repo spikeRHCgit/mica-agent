@@ -674,6 +674,19 @@ Run，不等同于拒绝一个工具。`default` 仅在后端产生风险确认�
 - 候选列表与 composer 共存，用户仍可编辑草稿；它不是 `/model` 的模型目录，不提前取代整个输入区。Esc 关闭候选且保留草稿；去掉开头 `/` 或变为多行时隐藏候选。
 - 无匹配候选时不执行任何本地命令；Enter 按 `docs/phase6_plan.md` A2 提交完整普通消息，仍遵守正常提交的空闲与配置检查。不能用默认高亮误执行命令，也不能吞掉未匹配文字。
 
+**命令候选与 `/model` 的视觉约定**
+
+- 界面文案以英文为统一方向；本节新增的命令说明、菜单标题、标记、提示与按键说明使用英文。既有界面的中文统一另行安排，不在模型菜单施工中顺手修改。模型和供应商名称按配置原样显示，经安全清洗后绘制。
+- 命令候选位于输入框下方、事实区上方，无独立外框和标题；每行「`›` 导航标记 + 命令名 + 说明」，命令名列对齐。高亮行使用现有蓝色交互色，其他行灰色；至多五行，窗口随高亮移动。`/model` 的说明为 `Switch model or set global default`。
+- `/model` 沿用 Permission 面板的上下分隔线和底部按键提示层级，不加侧边框、标签页或额外背景。标题为 `Select model`，其下常驻筛选行：空时灰色 `Type to filter...`，非空时 `Filter: <text>`。
+- 每行显示 `模型名称 [供应商名称]`，右侧独立显示 `Current`、`Default`，可同时出现。当前模型的名称、供应商、`✓` 与 `Current` 用现有蓝色交互色；其他模型名称与供应商用灰色。`Default` 是灰色文字，不用星号。
+- 导航位置与当前模型是两种状态：行首 `›` 只表示导航高亮，用蓝色；其后留固定宽度的 `✓` 标记位，仅当前模型有对勾。移动导航不改变模型名称颜色或 `Current` 标记。无色模式仍靠 `›`、`✓` 与文字区分。
+- 窄终端先压缩、截断名称与供应商，仍保留导航、当前和默认标记；不显示上下文容量列。高度不足沿用 §11.8 的面板降级，高亮行始终可见。
+- 列表下方显示提示，再显示灰色 footer：`Enter Switch · Ctrl+S Set default · ↑/↓ Move · Esc Close`。跨供应商提示为 `Future requests will send this session's history to <provider>.`，使用灰色，不要求二次确认。
+- 缩小上下文时在列表下方显示 `Context window will shrink: <current> → <target>`，数值使用千位分隔，任一默认容量各自附 `(default)`；下一行 `Existing history may exceed the new limit.`；footer 改为 `Enter Confirm switch · Esc Back`。
+- 切换中 footer 改为 `Switching...`；失败原因、保存结果显示在 footer 上方。空目录显示 `No models available`，只保留 `Esc Close`；筛选无结果显示 `No matching models`。保存成功提示为 `Saved as global default.`。
+- 运行中完整命令的提醒位于输入框上方，灰色显示 `Commands are available after the current task finishes.`，约两秒后消失，不进入历史。
+
 **布局与输入所有权**
 
 - 复用现有终端读取、主屏按键入口和底部交互区，不另开输入线程、焦点树、全屏框架或常驻输入消费器。
