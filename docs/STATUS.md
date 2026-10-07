@@ -14,7 +14,7 @@ A1 已完成（T-021）。计划已通过用户审查，`configuration_spec.md` 
 ## 任务卡
 
 - T-024 · 已完成 · A2 第 1 步：应用侧模型目录、空闲切换与全局默认保存（2026-10-07 验收通过）
-- T-025 · 待写卡 · A2 第 2 步：终端侧命令入口与 `/model` 菜单；同步 `module_map.md` 中 `app.py` 的职责；完成后安排用户在 Windows Terminal 验收 A2
+- T-025 · 待审查 · A2 第 2 步：终端侧命令入口与 `/model` 菜单（2026-10-07 写卡；同步 `module_map.md` 中 `app.py` 的职责）；通过后派发，本卡验收时安排用户在 Windows Terminal 验收 A2
 
 ## 阻塞
 
