@@ -60,13 +60,12 @@ from .workspace import (
 )
 
 if TYPE_CHECKING:
-    from .app import MicaApp
+    from .app import MicaApp, ProviderFactory
     from .config_service import ConfigService
     from .providers import Provider
 
 ReadLine: TypeAlias = Callable[[], Awaitable[str]]
 Write: TypeAlias = Callable[[str], None]
-ProviderFactory: TypeAlias = Callable[[str, str], "Provider"]
 TurnIdFactory: TypeAlias = Callable[[], str]
 Clock: TypeAlias = Callable[[], datetime]
 SessionMode: TypeAlias = Literal["new", "continue", "resume"]
@@ -449,19 +448,10 @@ async def _run_selected_session(
 
     try:
         connection = resolution.connection
-        provider = (
-            None
-            if connection is None
-            else factory(connection.api_url, connection.api_key)
-        )
-        model = None if connection is None else connection.selection.model_id
-    except Exception:  # noqa: BLE001 - provider details may contain secrets
-        err("mica: unable to initialize provider\n")
-        return 2
-    try:
         app = MicaApp(
-            provider=provider,
-            model=model,
+            provider=None,
+            model=None,
+            provider_factory=factory,
             session_service=service,
             session_id=session_id,
             context_builder=builder,
@@ -478,21 +468,7 @@ async def _run_selected_session(
             selection_source=resolution.source,
         )
     except Exception:  # noqa: BLE001 - startup diagnostics must stay safe
-        if provider is not None:
-            task = asyncio.create_task(
-                provider.aclose(), name="mica-startup-provider-close"
-            )
-            task.add_done_callback(
-                lambda finished: None if finished.cancelled() else finished.exception()
-            )
-            done, _ = await asyncio.wait({task}, timeout=2.0)
-            if not done:
-                task.cancel()
-                await asyncio.wait({task}, timeout=2.0)
-                err("mica: provider release unconfirmed\n")
-            elif task.cancelled() or task.exception() is not None:
-                err("mica: provider release unconfirmed\n")
-        err("mica: unable to initialize application\n")
+        err("mica: unable to initialize provider\n")
         return 2
 
     if plain:

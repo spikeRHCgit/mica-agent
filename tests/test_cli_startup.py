@@ -29,6 +29,48 @@ from mica_agent.workspace import WorkspaceIdentity, resolve_workspace
 TEST_TIME = datetime(2026, 8, 23, tzinfo=UTC)
 
 
+@pytest.mark.parametrize("failure", ["factory", "application"])
+def test_cli_app_construction_failure_uses_safe_provider_diagnostic(
+    tmp_path, monkeypatch, failure
+):
+    import mica_agent.app as app_module
+
+    service, builder, _, _, _ = setup_session(tmp_path)
+    out, err = Recorder(), Recorder()
+    created = []
+    url, key = "https://private.example.test/v1", "TEST_ONLY_KEY"
+    raw_error = f"private exception {url} {key} token-value"
+
+    def fail(*args, **kwargs):
+        raise RuntimeError(raw_error)
+
+    def factory(*args):
+        created.append(True)
+        return ProviderStub()
+
+    if failure == "application":
+        monkeypatch.setattr(app_module, "MicaApp", fail)
+    code = asyncio.run(
+        run_interactive(
+            url,
+            key,
+            "model",
+            provider_factory=fail if failure == "factory" else factory,
+            session_service=service,
+            context_builder=builder,
+            read_line=InputScript(),
+            write_out=out,
+            write_err=err,
+            plain=True,
+        )
+    )
+    assert code == 2 and out.text == ""
+    assert err.text == "mica: unable to initialize provider\n"
+    assert created == []
+    for private in (url, key, raw_error, "token-value"):
+        assert private not in err.text
+
+
 class ScriptedProvider:
     def __init__(self, scripts: list[list[ProviderEvent]]) -> None:
         self.scripts = scripts

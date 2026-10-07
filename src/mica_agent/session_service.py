@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -156,6 +156,19 @@ class SessionService:
 
     def load_session(self, session_id: str) -> StoredSession:
         return self.store.load(session_id)
+
+    def update_selection(self, session_id: str, selection: SessionSelection) -> None:
+        """Change only the selection under the store lock, upgrading legacy sessions."""
+
+        def update(current: StoredSession) -> StoredSession:
+            meta = replace(
+                current.meta,
+                format_version=CURRENT_SESSION_FORMAT_VERSION,
+                selection=selection,
+            )
+            return StoredSession(meta, current.entries)
+
+        self.store.update(session_id, update)
 
     def list_sessions(self) -> SessionListResult:
         result = self.store.scan()

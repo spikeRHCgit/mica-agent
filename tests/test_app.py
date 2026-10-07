@@ -17,13 +17,14 @@ from tempfile import mkdtemp
 import httpx
 import pytest
 
-from mica_agent.app import AppBusyError, AppClosedError, MicaApp
+from mica_agent.app import AppBusyError, AppClosedError, MicaApp, MicaAppError
 from mica_agent.cancellation import CancellationToken
 from mica_agent.checkpoint_contracts import (
     RunCheckpoint,
     RunCheckpointKind,
     RunCheckpointToolStatus,
 )
+from mica_agent.config_contracts import ConfigConflictError, ConfigError
 from mica_agent.context_builder import ContextBuilder, ContextBuildResult
 from mica_agent.events import (
     EngineEvent,
@@ -61,6 +62,7 @@ from mica_agent.providers import (
     TextDelta as ProviderTextDelta,
 )
 from mica_agent.reasoning import ReasoningEffort
+from mica_agent.session_contracts import SessionSelection
 from mica_agent.session_service import SessionService
 from mica_agent.tool_contracts import (
     ToolCall,
@@ -1676,3 +1678,477 @@ def test_owned_provider_close_is_bounded_safe_and_not_retried(fail):
         assert provider.aclose_calls == 1
 
     asyncio.run(scenario())
+
+
+_MODEL_URL = "https://example.test/v1"
+_MODEL_KEY = "TEST_ONLY_SECRET"
+_MODEL_RAW_ERROR = f"private failure {_MODEL_URL} {_MODEL_KEY} token-value"
+
+
+def _assert_model_text_safe(value):
+    text = str(value)
+    for private in (_MODEL_URL, _MODEL_KEY, _MODEL_RAW_ERROR, "token-value"):
+        assert private not in text
+
+
+def _make_switch_app(tmp_path, *, configured=True, factory=None, old=None):
+    from test_config_service import make_service
+
+    configuration = make_service(tmp_path)
+    root = configuration.store.data_root
+    (root / "config.json").write_text(
+        '{"defaultModel":{"provider":"local","model":"a"},"reasoningEffort":"high"}'
+    )
+    snapshot = configuration.load()
+    selection = SessionSelection("local", "a") if configured else None
+    connection = (
+        configuration.resolve(snapshot, explicit=selection).connection
+        if configured
+        else None
+    )
+    service = SessionService(
+        JsonlSessionStore(resolve_workspace(configuration.store.workspace), root)
+    )
+    stored = service.create_session(selection=selection)
+    old = old or _ScriptedProvider([[Finish()]])
+    new = _ScriptedProvider([[Finish()]])
+    app = MicaApp(
+        old if configured else None,
+        "a" if configured else None,
+        session_service=service,
+        session_id=stored.meta.session_id,
+        context_builder=ContextBuilder(
+            data_root=root, workspace=service.store.workspace
+        ),
+        config_service=configuration,
+        connection=connection,
+        startup_settings=snapshot.settings,
+        provider_factory=factory or (lambda url, key: new),
+        close_timeout=0.01,
+    )
+    return app, configuration, service, old, new
+
+
+def test_model_choices_filter_sort_and_refresh_flags(tmp_path):
+    app, configuration, _, _, _ = _make_switch_app(tmp_path)
+    root = configuration.store.data_root
+    path = root / "models.json"
+    directory = json.loads(path.read_text())
+    local = directory["providers"]["local"]
+    local["name"] = "Zulu"
+    local["models"] = [
+        {"id": "a", "name": "Same", "contextWindow": 123456},
+        {"id": "b", "name": "Alpha"},
+        {"id": "unsupported", "api": "anthropic-messages"},
+    ]
+    directory["providers"]["other"] = {
+        "name": "Beta",
+        "baseUrl": _MODEL_URL,
+        "models": [{"id": "a", "name": "Same"}],
+    }
+    directory["providers"]["disabled"] = {**local, "enabled": False}
+    directory["providers"]["no-key"] = local
+    path.write_text(json.dumps(directory))
+    auth = root / "auth.json"
+    credentials = json.loads(auth.read_text())
+    credentials["providers"]["other"] = credentials["providers"]["local"]
+    auth.write_text(json.dumps(credentials))
+    choices = app.model_choices()
+    assert [(c.model_name, c.provider_name) for c in choices] == [
+        ("Alpha", "Zulu"),
+        ("Same", "Beta"),
+        ("Same", "Zulu"),
+    ]
+    assert [c.selection for c in choices] == [
+        SessionSelection("local", "b"),
+        SessionSelection("other", "a"),
+        SessionSelection("local", "a"),
+    ]
+    assert [c.context_window for c in choices] == [200000, 200000, 123456]
+    assert [c.context_window_is_default for c in choices] == [True, True, False]
+    assert [c.is_current for c in choices] == [False, False, True]
+    assert [c.is_default for c in choices] == [False, False, True]
+    _assert_model_text_safe(choices)
+    app.save_default_model(SessionSelection("other", "a"))
+    assert [c.is_default for c in app.model_choices()] == [False, True, False]
+    assert app.current_selection == SessionSelection("local", "a")
+    asyncio.run(app.aclose())
+
+
+def test_switch_persists_uses_new_provider_and_preserves_headers_history(tmp_path):
+    app, configuration, service, old, new = _make_switch_app(tmp_path)
+    target = SessionSelection("local", "b")
+
+    async def scenario():
+        await _collect(app, "before")
+        history = app.history
+        session = service.load_session(app.session_id)
+        header = old.requests[0].messages[:-1]
+        (configuration.store.workspace / "AGENTS.md").write_text(
+            "changed after startup"
+        )
+        result = await app.switch_model(target)
+        assert result.switched and result.cleanup_warning is None
+        _assert_model_text_safe(result)
+        assert service.load_session(app.session_id).meta.selection == target
+        assert service.load_session(app.session_id).entries == session.entries
+        assert app.history == history
+        assert old.aclose_calls == 1
+        assert app.current_selection == target
+        assert app.connection_status == "ready" and app.connection_diagnostic is None
+        assert "Source: session" in app.connection_summary
+        assert "Reasoning: off (preference high" in app.connection_summary
+        assert app.reasoning_notice is not None
+        binding = app.prepare_run()
+        assert binding.model == "b" and binding.reasoning_effort is ReasoningEffort.OFF
+        events = [event async for event in app.run("after", binding=binding)]
+        assert any(isinstance(event, RunCompleted) for event in events)
+        assert new.requests[0].model == "b"
+        assert new.requests[0].messages == header + history + (
+            Message(MessageRole.USER, "after"),
+        )
+        assert len(old.requests) == 1
+        app._provider_factory = lambda url, key: _ScriptedProvider([[Finish()]])
+        back = await app.switch_model(SessionSelection("local", "a"))
+        assert back.switched
+        assert "Reasoning: high (preference high" in app.connection_summary
+        assert app.reasoning_notice is None
+        _assert_model_text_safe(app.connection_summary)
+        await app.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["missing", "disabled", "protocol", "config", "factory", "save", "no-factory"],
+)
+def test_failed_switch_preserves_connection_selection_and_file(
+    tmp_path, monkeypatch, failure
+):
+    app, configuration, service, old, new = _make_switch_app(tmp_path)
+    target = SessionSelection("local", "b")
+    path = service.store.path_for_session(app.session_id)
+    original = path.read_bytes()
+    current = app.current_selection
+    connection = app._connection
+    summary = app.connection_summary
+
+    def fail(*args, **kwargs):
+        raise RuntimeError(_MODEL_RAW_ERROR)
+
+    if failure == "missing":
+        target = SessionSelection("missing", "b")
+    elif failure in {"disabled", "protocol"}:
+        directory_path = configuration.store.data_root / "models.json"
+        directory = json.loads(directory_path.read_text())
+        if failure == "disabled":
+            directory["providers"]["local"]["enabled"] = False
+        else:
+            directory["providers"]["local"]["models"][1]["api"] = "anthropic-messages"
+        directory_path.write_text(json.dumps(directory))
+    elif failure == "config":
+        monkeypatch.setattr(configuration, "load", fail)
+    elif failure == "factory":
+        app._provider_factory = fail
+    elif failure == "save":
+        monkeypatch.setattr(service, "update_selection", fail)
+    else:
+        app._provider_factory = None
+    result = asyncio.run(app.switch_model(target))
+    assert not result.switched
+    _assert_model_text_safe(result)
+    assert app._provider is old and app._connection is connection
+    assert app.current_selection == current and app.connection_summary == summary
+    assert service.load_session(app.session_id).meta.selection == current
+    assert path.read_bytes() == original and old.aclose_calls == 0
+    assert new.aclose_calls == (1 if failure == "save" else 0)
+    assert not app.is_busy
+    asyncio.run(app.aclose())
+
+
+@pytest.mark.parametrize("failure", ["timeout", "error"])
+@pytest.mark.parametrize("closing", ["previous", "candidate"])
+def test_switch_cleanup_failure_keeps_committed_or_original_selection(
+    tmp_path, monkeypatch, failure, closing
+):
+    class ClosingProvider(_ScriptedProvider):
+        async def aclose(self):
+            self.aclose_calls += 1
+            if failure == "error":
+                raise RuntimeError(_MODEL_RAW_ERROR)
+            await asyncio.Event().wait()
+
+    closing_provider = ClosingProvider([[Finish()]])
+    if closing == "previous":
+        app, _, service, old, new = _make_switch_app(tmp_path, old=closing_provider)
+    else:
+        app, _, service, old, _ = _make_switch_app(
+            tmp_path, factory=lambda url, key: closing_provider
+        )
+        new = closing_provider
+
+        def fail_save(*args):
+            raise RuntimeError(_MODEL_RAW_ERROR)
+
+        monkeypatch.setattr(service, "update_selection", fail_save)
+
+    async def scenario():
+        target = SessionSelection("local", "b")
+        result = await asyncio.wait_for(app.switch_model(target), 0.5)
+        assert result.switched == (closing == "previous")
+        assert result.cleanup_warning
+        _assert_model_text_safe(result)
+        expected = target if closing == "previous" else SessionSelection("local", "a")
+        assert app.current_selection == expected
+        assert service.load_session(app.session_id).meta.selection == expected
+        assert closing_provider.aclose_calls == 1
+        assert app._provider is (new if closing == "previous" else old)
+        await _collect(app, "next")
+        assert (new if closing == "previous" else old).requests[
+            0
+        ].model == expected.model_id
+        await app.aclose()
+        assert old.aclose_calls == new.aclose_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_selection_save_closes_candidate_and_releases_gate(
+    tmp_path, monkeypatch
+):
+    app, _, service, old, new = _make_switch_app(tmp_path)
+    path = service.store.path_for_session(app.session_id)
+    original = path.read_bytes()
+
+    def cancel_save(*args):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(service, "update_selection", cancel_save)
+
+    async def scenario():
+        with pytest.raises(asyncio.CancelledError):
+            await app.switch_model(SessionSelection("local", "b"))
+        assert path.read_bytes() == original
+        assert app._provider is old and app.current_selection == SessionSelection(
+            "local", "a"
+        )
+        assert new.aclose_calls == 1 and old.aclose_calls == 0 and not app.is_busy
+        await app.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_switch_gate_rejects_reservation_running_closed_and_concurrent_run(
+    tmp_path, monkeypatch
+):
+    app, _, service, old, new = _make_switch_app(tmp_path)
+    target = SessionSelection("local", "b")
+    original = service.store.path_for_session(app.session_id).read_bytes()
+    binding = app.prepare_run()
+    with pytest.raises(AppBusyError) as caught:
+        asyncio.run(app.switch_model(target))
+    _assert_model_text_safe(caught.value)
+    assert app.current_selection == SessionSelection("local", "a")
+    assert old.aclose_calls == new.aclose_calls == 0
+    app.release_run(binding)
+
+    async def scenario():
+        stream = app.run("active")
+        await anext(stream)
+        with pytest.raises(AppBusyError) as caught:
+            await app.switch_model(target)
+        _assert_model_text_safe(caught.value)
+        await stream.aclose()
+        update = service.update_selection
+
+        def guarded_update(session_id, selection):
+            with pytest.raises(AppBusyError) as caught:
+                app.prepare_run()
+            _assert_model_text_safe(caught.value)
+            assert app.is_busy
+            assert app._provider is old and app.current_selection != target
+            update(session_id, selection)
+
+        monkeypatch.setattr(service, "update_selection", guarded_update)
+        assert (await app.switch_model(target)).switched
+        await app.aclose()
+        saved = service.store.path_for_session(app.session_id).read_bytes()
+        with pytest.raises(AppClosedError) as caught:
+            await app.switch_model(SessionSelection("local", "a"))
+        _assert_model_text_safe(caught.value)
+        assert app.current_selection == target
+        assert service.store.path_for_session(app.session_id).read_bytes() == saved
+        assert old.aclose_calls == new.aclose_calls == 1
+
+    asyncio.run(scenario())
+    assert original != service.store.path_for_session(app.session_id).read_bytes()
+
+
+def test_switch_in_progress_blocks_run_and_second_switch_until_cleanup(
+    tmp_path, monkeypatch
+):
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class ClosingProvider(_ScriptedProvider):
+        async def aclose(self):
+            self.aclose_calls += 1
+            started.set()
+            await release.wait()
+
+    new = ClosingProvider([[Finish()]])
+    app, _, service, old, _ = _make_switch_app(tmp_path, factory=lambda url, key: new)
+    app._close_timeout = 0.5
+
+    def fail_save(*args):
+        raise RuntimeError(_MODEL_RAW_ERROR)
+
+    monkeypatch.setattr(service, "update_selection", fail_save)
+
+    async def scenario():
+        switch = asyncio.create_task(app.switch_model(SessionSelection("local", "b")))
+        await asyncio.wait_for(started.wait(), 0.5)
+        with pytest.raises(AppBusyError):
+            app.prepare_run()
+        with pytest.raises(AppBusyError):
+            await app.switch_model(SessionSelection("local", "b"))
+        assert app._provider is old and app.current_selection == SessionSelection(
+            "local", "a"
+        )
+        release.set()
+        result = await asyncio.wait_for(switch, 0.5)
+        assert not result.switched and new.aclose_calls == 1 and not app.is_busy
+        _assert_model_text_safe(result)
+        await app.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_current_model_switch_is_noop_without_loading_or_saving(tmp_path, monkeypatch):
+    app, configuration, service, old, new = _make_switch_app(tmp_path)
+    path = service.store.path_for_session(app.session_id)
+    original = path.read_bytes()
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("当前模型空操作不应读取配置、创建连接或保存")
+
+    monkeypatch.setattr(configuration, "load", unexpected)
+    monkeypatch.setattr(service, "update_selection", unexpected)
+    app._provider_factory = unexpected
+    result = asyncio.run(app.switch_model(app.current_selection))
+    assert result.switched and result.cleanup_warning is None
+    _assert_model_text_safe(result)
+    assert path.read_bytes() == original
+    assert app._provider is old and old.aclose_calls == new.aclose_calls == 0
+    asyncio.run(app.aclose())
+
+
+def test_unconfigured_app_can_switch_and_run(tmp_path):
+    app, _, _, old, new = _make_switch_app(tmp_path, configured=False)
+    assert app.current_selection is None
+    assert not any(c.is_current for c in app.model_choices())
+
+    async def scenario():
+        result = await app.switch_model(SessionSelection("local", "b"))
+        assert result.switched
+        _assert_model_text_safe(result)
+        binding = app.prepare_run()
+        assert binding.model == "b"
+        events = [event async for event in app.run("first", binding=binding)]
+        assert any(isinstance(event, RunCompleted) for event in events)
+        assert new.requests[0].model == "b"
+        await app.aclose()
+
+    asyncio.run(scenario())
+    assert old.aclose_calls == 0 and new.aclose_calls == 1
+
+
+def test_app_constructs_provider_from_connection_and_factory_failure_is_safe(tmp_path):
+    app, configuration, service, _, new = _make_switch_app(tmp_path)
+    calls = []
+
+    def factory(url, key):
+        calls.append((url, key))
+        return new
+
+    arguments = {
+        "session_service": service,
+        "session_id": app.session_id,
+        "context_builder": ContextBuilder(
+            data_root=configuration.store.data_root, workspace=service.store.workspace
+        ),
+        "connection": app._connection,
+    }
+    constructed = MicaApp(None, None, provider_factory=factory, **arguments)
+    assert calls == [(_MODEL_URL, _MODEL_KEY)]
+    binding = constructed.prepare_run()
+    assert binding.model == "a"
+    constructed.release_run(binding)
+    asyncio.run(constructed.aclose())
+
+    def fail(url, key):
+        raise RuntimeError(_MODEL_RAW_ERROR)
+
+    with pytest.raises(MicaAppError) as caught:
+        MicaApp(None, None, provider_factory=fail, **arguments)
+    _assert_model_text_safe(caught.value)
+    assert caught.value.__suppress_context__
+    asyncio.run(app.aclose())
+
+
+def test_default_model_save_success_conflict_and_failure_are_safe(
+    tmp_path, monkeypatch
+):
+    from mica_agent import config_store
+
+    app, configuration, service, old, new = _make_switch_app(tmp_path)
+    target = SessionSelection("local", "b")
+    selection = app.current_selection
+    session_bytes = service.store.path_for_session(app.session_id).read_bytes()
+    path = configuration.store.data_root / "config.json"
+    app.save_default_model(target)
+    assert json.loads(path.read_text())["defaultModel"] == {
+        "provider": "local",
+        "model": "b",
+    }
+    assert app.current_selection == selection and app._provider is old
+    assert service.store.path_for_session(app.session_id).read_bytes() == session_bytes
+    assert old.aclose_calls == new.aclose_calls == 0
+    load = configuration.load
+    snapshot = load()
+    path.write_text('{"defaultModel":{"provider":"local","model":"a"}}')
+    monkeypatch.setattr(configuration, "load", lambda: snapshot)
+    with pytest.raises(ConfigConflictError) as caught:
+        app.save_default_model(target)
+    _assert_model_text_safe(caught.value)
+    monkeypatch.setattr(configuration, "load", load)
+    original = path.read_bytes()
+
+    def fail_replace(*args):
+        raise OSError(_MODEL_RAW_ERROR)
+
+    monkeypatch.setattr(config_store.os, "replace", fail_replace)
+    with pytest.raises(ConfigError) as caught:
+        app.save_default_model(target)
+    _assert_model_text_safe(caught.value)
+    assert path.read_bytes() == original and app.current_selection == selection
+    path.write_text(_MODEL_RAW_ERROR)
+    for action in (app.model_choices, lambda: app.save_default_model(target)):
+        with pytest.raises(ConfigError) as caught:
+            action()
+        _assert_model_text_safe(caught.value)
+    asyncio.run(app.aclose())
+
+
+def test_model_operations_without_configuration_report_safe_failure():
+    app = _make_app(_ScriptedProvider([[Finish()]]))
+    assert app.model_choices() == () and app.current_selection is None
+    target = SessionSelection("local", "a")
+    result = asyncio.run(app.switch_model(target))
+    assert not result.switched
+    _assert_model_text_safe(result)
+    with pytest.raises(ConfigError) as caught:
+        app.save_default_model(target)
+    _assert_model_text_safe(caught.value)
+    asyncio.run(app.aclose())

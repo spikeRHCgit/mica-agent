@@ -8,6 +8,7 @@ from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import MappingProxyType
+from typing import TypeAlias
 from uuid import uuid4
 
 from .cancellation import CancellationToken
@@ -33,7 +34,7 @@ from .models import Message, MessageRole
 from .providers import Provider, ProviderRequest
 from .providers.openai_compatible import DEFAULT_MAX_TOKENS, DEFAULT_THINKING_LEVEL_MAP
 from .reasoning import ReasoningEffort
-from .session_contracts import TurnEntry
+from .session_contracts import SessionSelection, TurnEntry
 from .session_service import SessionService
 from .system_prompt import build_system_prompt
 from .tool_executor import ToolExecutor
@@ -42,6 +43,7 @@ from .tool_presentation import ToolPresentationSnapshot
 TurnIdFactory = Callable[[], str]
 CheckpointIdFactory = Callable[[], str]
 Clock = Callable[[], datetime]
+ProviderFactory: TypeAlias = Callable[[str, str], Provider]
 _STORAGE_FAILURE_MESSAGE = "session persistence failed"
 _STORAGE_FAILURE_AFTER_TOOL_MESSAGE = (
     "session persistence failed; tool changes may have occurred; check the workspace"
@@ -68,6 +70,24 @@ class AppBusyError(MicaAppError):
 
 class AppClosedError(MicaAppError):
     """Starting a run after the app has been closed."""
+
+
+@dataclass(frozen=True, slots=True)
+class ModelChoice:
+    selection: SessionSelection
+    model_name: str
+    provider_name: str
+    context_window: int
+    context_window_is_default: bool
+    is_current: bool
+    is_default: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ModelSwitchResult:
+    switched: bool
+    message: str
+    cleanup_warning: str | None = None
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -104,6 +124,7 @@ class MicaApp:
         clock: Clock | None = None,
         tool_executor: ToolExecutor | None = None,
         config_service: ConfigService | None = None,
+        provider_factory: ProviderFactory | None = None,
         connection: ConnectionBinding | None = None,
         connection_status: str = "ready",
         connection_diagnostic: str | None = None,
@@ -111,7 +132,12 @@ class MicaApp:
         selection_source: str = "direct",
         close_timeout: float = 2.0,
     ) -> None:
-        if (provider is None) != (model is None):
+        create_provider = (
+            provider is None and connection is not None and provider_factory is not None
+        )
+        if create_provider:
+            model = connection.selection.model_id
+        if not create_provider and (provider is None) != (model is None):
             raise ValueError("provider and model must be configured together")
         if model is not None and not isinstance(model, str):
             raise TypeError(f"model must be a str, got {type(model).__name__}")
@@ -135,6 +161,8 @@ class MicaApp:
             context_snapshot, ContextBuildResult
         ):
             raise TypeError("context_snapshot must be a ContextBuildResult or None")
+        if tool_executor is not None and not isinstance(tool_executor, ToolExecutor):
+            raise TypeError("tool_executor must be a ToolExecutor or None")
         resolved_context = (
             context_builder.build() if context_snapshot is None else context_snapshot
         )
@@ -148,8 +176,14 @@ class MicaApp:
             if system_prompt is None
             else system_prompt
         )
+        if create_provider:
+            try:
+                provider = provider_factory(connection.api_url, connection.api_key)
+            except Exception:  # noqa: BLE001 - factory details may contain credentials
+                raise MicaAppError("unable to initialize provider") from None
         self._model = model
         self._provider = provider
+        self._provider_factory = provider_factory
         self._session_service = session_service
         self._session_id = session_id
         self._header_messages = (
@@ -169,16 +203,7 @@ class MicaApp:
             None if connection is None else connection.model.capabilities
         )
         self._selection_source = selection_source
-        self._effective_effort = ReasoningEffort.OFF
-        if self._capabilities is not None:
-            available = (
-                self._capabilities.thinking_level_map or DEFAULT_THINKING_LEVEL_MAP
-            )
-            if (
-                self._capabilities.reasoning
-                and self._settings.reasoning_effort in available
-            ):
-                self._effective_effort = self._settings.reasoning_effort
+        self._effective_effort = self._resolve_effort()
         self._connection_status = (
             connection_status
             if provider is not None
@@ -188,6 +213,7 @@ class MicaApp:
         self._close_timeout = close_timeout
         self._close_task: asyncio.Task | None = None
         self._reservation: RunBinding | None = None
+        self._switching = False
         self._engine = (
             None
             if provider is None
@@ -200,6 +226,135 @@ class MicaApp:
         )
         self._active_run = False
         self._closed = False
+
+    def _resolve_effort(self) -> ReasoningEffort:
+        if self._capabilities is not None and self._capabilities.reasoning:
+            available = (
+                self._capabilities.thinking_level_map or DEFAULT_THINKING_LEVEL_MAP
+            )
+            if self._settings.reasoning_effort in available:
+                return self._settings.reasoning_effort
+        return ReasoningEffort.OFF
+
+    @property
+    def current_selection(self) -> SessionSelection | None:
+        return None if self._connection is None else self._connection.selection
+
+    def model_choices(self) -> tuple[ModelChoice, ...]:
+        """Read the current local directory; configuration failures remain safe."""
+        if self._config_service is None:
+            return ()
+        snapshot = self._config_service.load()
+        choices = []
+        for provider in snapshot.providers:
+            if not provider.enabled:
+                continue
+            for model in provider.models:
+                resolved = self._config_service.resolve(
+                    snapshot, explicit=model.selection
+                )
+                if resolved.status != "ready" or resolved.connection is None:
+                    continue
+                caps = model.capabilities
+                choices.append(
+                    ModelChoice(
+                        model.selection,
+                        model.name,
+                        provider.name,
+                        caps.context_window,
+                        caps.sources.get("contextWindow") != "explicit",
+                        model.selection == self.current_selection,
+                        model.selection == snapshot.default_model,
+                    )
+                )
+        return tuple(
+            sorted(choices, key=lambda item: (item.model_name, item.provider_name))
+        )
+
+    async def _close_candidate(self, provider: Provider) -> str | None:
+        """Release a replaced or rejected connection without exposing provider errors."""
+        task = asyncio.create_task(provider.aclose(), name="mica-model-provider-close")
+        task.add_done_callback(
+            lambda finished: None if finished.cancelled() else finished.exception()
+        )
+        try:
+            done, _ = await asyncio.wait({task}, timeout=self._close_timeout)
+        except asyncio.CancelledError:
+            task.cancel()
+            await asyncio.wait({task}, timeout=self._close_timeout)
+            raise
+        if not done:
+            task.cancel()
+            await asyncio.wait({task}, timeout=self._close_timeout)
+            return "provider release is unconfirmed"
+        if task.cancelled() or task.exception() is not None:
+            return "provider release failed"
+        return None
+
+    async def switch_model(self, selection: SessionSelection) -> ModelSwitchResult:
+        """Persist an idle selection before installing it; failed preparation rolls back."""
+        if self._closed:
+            raise AppClosedError("app is closed; cannot switch models")
+        if self.is_busy:
+            raise AppBusyError("app is busy; cannot switch models")
+        self._switching = True
+        try:
+            if selection == self.current_selection:
+                return ModelSwitchResult(True, "model is already selected")
+            if self._config_service is None:
+                return ModelSwitchResult(False, "model configuration is unavailable")
+            try:
+                snapshot = self._config_service.load()
+                resolved = self._config_service.resolve(snapshot, explicit=selection)
+            except Exception:  # noqa: BLE001 - configuration details stay private
+                return ModelSwitchResult(False, "unable to read model configuration")
+            connection = resolved.connection
+            if resolved.status != "ready" or connection is None:
+                return ModelSwitchResult(False, "selected model is unavailable")
+            if self._provider_factory is None:
+                return ModelSwitchResult(False, "provider factory is unavailable")
+            try:
+                provider = self._provider_factory(
+                    connection.api_url, connection.api_key
+                )
+            except Exception:  # noqa: BLE001 - factory details stay private
+                return ModelSwitchResult(False, "unable to initialize provider")
+            try:
+                self._session_service.update_selection(self._session_id, selection)
+            except asyncio.CancelledError:
+                await self._close_candidate(provider)
+                raise
+            except Exception:  # noqa: BLE001 - rollback must not reveal storage details
+                warning = await self._close_candidate(provider)
+                return ModelSwitchResult(False, "unable to save session model", warning)
+            previous = self._provider
+            self._provider = provider
+            self._model = connection.selection.model_id
+            self._connection = connection
+            self._engine = AgentEngine(
+                provider,
+                run_id_factory=self._run_id_factory,
+                tool_executor=self._tool_executor,
+                presentation_workspace=self._workspace,
+            )
+            self._capabilities = connection.model.capabilities
+            self._selection_source = "session"
+            self._connection_status = "ready"
+            self._connection_diagnostic = None
+            self._effective_effort = self._resolve_effort()
+            warning = (
+                None if previous is None else await self._close_candidate(previous)
+            )
+            return ModelSwitchResult(True, "model switched", warning)
+        finally:
+            self._switching = False
+
+    def save_default_model(self, selection: SessionSelection) -> None:
+        """Save the global default with the configuration service's conflict check."""
+        if self._config_service is None:
+            raise ConfigError("model configuration is unavailable")
+        snapshot = self._config_service.load()
+        self._config_service.save_default_model(selection, snapshot.default_model)
 
     @property
     def session_id(self) -> str:
@@ -245,7 +400,7 @@ class MicaApp:
 
     @property
     def is_busy(self) -> bool:
-        return self._reservation is not None
+        return self._reservation is not None or self._switching
 
     def prepare_run(
         self, *, reasoning_effort: ReasoningEffort | None = None
@@ -548,4 +703,7 @@ __all__ = [
     "AppClosedError",
     "MicaApp",
     "MicaAppError",
+    "ModelChoice",
+    "ModelSwitchResult",
+    "ProviderFactory",
 ]

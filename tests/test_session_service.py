@@ -14,6 +14,7 @@ import pytest
 from mica_agent.jsonl_store import (
     JsonlSessionStore,
     SessionDeleteStatus,
+    SessionNotFoundError,
 )
 from mica_agent.models import Message, MessageRole
 from mica_agent.session_contracts import (
@@ -22,6 +23,8 @@ from mica_agent.session_contracts import (
     RunCheckpointProgress,
     RunCheckpointToolProgress,
     RunCheckpointToolStatus,
+    SessionFormatError,
+    SessionSelection,
     TurnEntry,
 )
 from mica_agent.session_service import (
@@ -38,6 +41,93 @@ from mica_agent.tool_presentation import (
 from mica_agent.workspace import resolve_workspace
 
 NOW = datetime(2026, 8, 22, 3, 4, 5, tzinfo=UTC)
+
+
+def test_update_selection_preserves_all_other_metadata_and_entries(tmp_path):
+    service, store, clock = make_service(tmp_path, session_ids=["selected"])
+    initial = service.create_session(
+        "keep title", selection=SessionSelection("old", "a")
+    )
+    service.commit_turn(initial.meta.session_id, make_turn(1))
+    checkpoint = RunCheckpoint(
+        checkpoint_id="checkpoint",
+        run_id="interrupted",
+        kind=RunCheckpointKind.CANCELLED,
+        user_message=Message(MessageRole.USER, "continue"),
+        progress=(),
+        partial_assistant_message=Message(MessageRole.ASSISTANT, "partial"),
+        recorded_at=NOW,
+    )
+    service.commit_checkpoint(initial.meta.session_id, checkpoint)
+    before = service.load_session(initial.meta.session_id)
+    clock.value += timedelta(days=1)
+    selection = SessionSelection("new", "b")
+    assert service.update_selection(initial.meta.session_id, selection) is None
+    after = service.load_session(initial.meta.session_id)
+    assert after.meta == replace(before.meta, selection=selection)
+    assert after.entries == before.entries
+    wire = json.loads(
+        store.path_for_session(initial.meta.session_id).read_text().splitlines()[0]
+    )
+    assert wire["provider_id"] == "new" and wire["model_id"] == "b"
+
+
+def test_update_selection_upgrades_real_v4_checkpoint_session(tmp_path):
+    service, store, _ = make_service(tmp_path)
+    session_id = "legacy-v4"
+    meta = {
+        "record_type": "session_meta",
+        "format_version": 4,
+        "session_id": session_id,
+        "workspace_id": store.workspace.workspace_id,
+        "workspace_path": str(store.workspace.workspace_path),
+        "title": "legacy",
+        "created_at": NOW.isoformat(timespec="microseconds"),
+        "updated_at": NOW.isoformat(timespec="microseconds"),
+    }
+    checkpoint = b'{"record_type":"run_checkpoint","format_version":4,"checkpoint_id":"old-checkpoint","run_id":"old-run","kind":"cancelled","user_message":{"role":"user","content":"continue"},"progress":[],"partial_assistant_message":{"role":"assistant","content":"partial"},"recorded_at":"2026-08-22T03:04:05.000000+00:00"}\n'
+    path = store.path_for_session(session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(json.dumps(meta).encode() + b"\n" + checkpoint)
+    before = service.load_session(session_id)
+    assert before.meta.format_version == 4
+    target = SessionSelection("local", "new")
+    service.update_selection(session_id, target)
+    after = service.load_session(session_id)
+    assert after.meta == replace(before.meta, format_version=5, selection=target)
+    assert after.entries == before.entries
+    assert all(
+        json.loads(line)["format_version"] == 5
+        for line in path.read_text().splitlines()
+    )
+
+
+def test_update_selection_upgrades_real_v1_session(tmp_path):
+    service, store, _ = make_service(tmp_path)
+    write_v1_session(store, "legacy-v1")
+    before = service.load_session("legacy-v1")
+    target = SessionSelection("local", "new")
+    service.update_selection("legacy-v1", target)
+    after = service.load_session("legacy-v1")
+    assert after.meta == replace(before.meta, format_version=5, selection=target)
+    assert after.entries == before.entries
+
+
+def test_update_selection_missing_or_corrupt_session_keeps_safe_errors(tmp_path):
+    service, store, _ = make_service(tmp_path)
+    target = SessionSelection("local", "a")
+    with pytest.raises(SessionNotFoundError) as caught:
+        service.update_selection("missing", target)
+    assert "missing" not in str(caught.value)
+    path = store.path_for_session("broken")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    original = b"private failure https://example.test/v1 TEST_ONLY_SECRET token-value"
+    path.write_bytes(original)
+    with pytest.raises(SessionFormatError) as caught:
+        service.update_selection("broken", target)
+    for private in ("https://example.test/v1", "TEST_ONLY_SECRET", "token-value"):
+        assert private not in str(caught.value)
+    assert path.read_bytes() == original
 
 
 class Clock:
