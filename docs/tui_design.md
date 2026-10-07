@@ -312,7 +312,7 @@ Mica · stop
 
 思考强度与内容显示是独立设置。Provider 传递强度、识别独立思考内容和公共事件的契约已经建立，TUI 只消费这些公共事件；没有独立思考事件时不猜测正文，但唯一 `working` 状态条仍正常工作。
 
-模型能力、off/minimal/low/medium/high/xhigh/max 档位及协议映射统一见 `docs/configuration_spec.md` §5、§9；菜单呈现见本文 §13.1。这些配置与选择入口属于已确认、待实现的 Phase 6，不宣称 Responses 或 Messages 适配器当前已交付。
+模型能力、off/minimal/low/medium/high/xhigh/max 档位及协议映射统一见 `docs/configuration_spec.md` §5、§9；菜单呈现见本文 §13.1。
 
 ## 9. 模型正式回复
 
@@ -662,9 +662,9 @@ Run，不等同于拒绝一个工具。`default` 仅在后端产生风险确认�
 
 ## 13. 后续界面入口
 
-### 13.1 Phase 6 配置菜单（已确认、待实现）
+### 13.1 配置菜单
 
-配置菜单是已确认目标，不表示当前可用。文件、来源、模型能力、登录、保存和共享生效见 `docs/configuration_spec.md`；实施和验收见 `docs/phase6_plan.md`。参考用户提供的 pi 模型/登录列表与设置列表，只参考操作及内容层级，不照搬主题、标签页或其他功能。
+文件、来源、模型能力、登录、保存和共享生效见 `docs/configuration_spec.md`；实施和验收见 `docs/phase6_plan.md`。参考用户提供的 pi 模型/登录列表与设置列表，只参考操作及内容层级，不照搬主题、标签页或其他功能。
 
 **命令候选菜单**
 

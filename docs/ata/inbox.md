@@ -1,11 +1,7 @@
 # 候选经验收件箱
 
-> 由 master 维护。以下条目是候选，不是规则，任何会话都不按它行事；提炼遵循已配置 aTa。
-> 本次从 `docs/lessons/inbox.md` 完整迁入既有条目与证据，不筛选、不晋升。
-
-## 条目
-
-<!-- 格式：- YYYY-MM-DD · 来源（任务 ID / 角色 / 日志条目）· 现象与证据 → 建议去向 -->
+> 由 master 维护。这里的条目是候选，不是规则，任何会话都不按它行事。
+> 格式：`- YYYY-MM-DD · 来源 · 现象和证据位置 → 建议去向`
 
 - 2026-09-30 · T-015 / T-016 跨平台审计 · Git 源码输出需明确按 UTF-8 解码；CRLF 工作树与 LF
   blob 的原始字节不同，也可能具有相同过滤后 object ID。证据见 `c6c7997:docs/tasks/T-015.md`、
@@ -20,10 +16,10 @@
   本次不修改实践手册；不得仅凭恢复成功将事件视为没有发生。
 
 - 2026-09-26 · P5-11C-MR3 光标修复 · 没有正文要重画时，仍可能需要发送光标定位；只比较正文会
-  漏掉可观察输出。证据见 `docs/log/phase5_build_log.md` P5-11C-MR3、
+  漏掉可观察输出。证据见 `3829052:docs/log/phase5_build_log.md` P5-11C-MR3、
   `docs/tui_design.md` §5.2 → 领域实现观察，尚未提炼为所有模块通用的优化规则。
 
 - 2026-09-26 · P5-11C 构造边界 · `MainBufferRuntime` 曾用 `hasattr(run/aclose)` 接受冒充对象，
-  现已采用严格类型检查。证据见 `docs/log/phase5_build_log.md` P5-11C、
+  现已采用严格类型检查。证据见 `3829052:docs/log/phase5_build_log.md` P5-11C、
   `src/mica_agent/tui/main_buffer/runtime.py` → 保留为该装配边界经验，不据此要求所有协议使用
   `isinstance`；是否提炼通用规范仍待后续证据。

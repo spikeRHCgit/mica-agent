@@ -39,4 +39,4 @@
 
 ## 4. 验收结论
 
-第三阶段已通过契约与损坏输入、并发和原子失败、工作区隔离、AGENTS 加载、成功轮提交边界、CLI 恢复及仓库外 wheel 继续对话的验证；静态检查、格式检查与离线构建通过。详细施工证据保留在 `docs/log/phase3_build_log.md`，当前用法和代码位置分别以 `README.md`、`docs/module_map.md` 为准。
+第三阶段已通过契约与损坏输入、并发和原子失败、工作区隔离、AGENTS 加载、成功轮提交边界、CLI 恢复及仓库外 wheel 继续对话的验证；静态检查、格式检查与离线构建通过。详细施工证据见 `git show 3829052:docs/log/phase3_build_log.md`，当前用法和代码位置分别以 `README.md`、`docs/module_map.md` 为准。

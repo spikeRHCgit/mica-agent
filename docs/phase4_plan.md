@@ -43,4 +43,4 @@
 
 ## 4. 验收结论
 
-第四阶段已通过五工具、Schema 与权限、文件和子进程安全边界、SSE 工具调用、多步 Run、取消、旧会话兼容升级与安装态闭环验证；Windows Bash 和真实 Provider 的受控场景完成验收，静态检查及离线构建通过。详细施工证据见 `docs/log/phase4_build_log.md`；现行调用与源码位置以 `README.md`、`docs/module_map.md` 为准。
+第四阶段已通过五工具、Schema 与权限、文件和子进程安全边界、SSE 工具调用、多步 Run、取消、旧会话兼容升级与安装态闭环验证；Windows Bash 和真实 Provider 的受控场景完成验收，静态检查及离线构建通过。详细施工证据见 `git show 3829052:docs/log/phase4_build_log.md`；现行调用与源码位置以 `README.md`、`docs/module_map.md` 为准。

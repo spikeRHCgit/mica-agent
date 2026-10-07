@@ -49,4 +49,4 @@
 
 ## 4. 验收结论
 
-第五阶段的主缓冲区入口、输入编辑、时间线、Markdown、工具与交互展示、取消清理和中断恢复均通过自动化、分发/离线构建及用户真实 Windows Terminal 冒烟验收。旧全屏前端已移除，`mica cli` 与 `--plain` 的入口边界已确认。视觉细则以 `docs/tui_design.md` 为准；施工和返工证据保留在 `docs/log/phase5_build_log.md`。
+第五阶段的主缓冲区入口、输入编辑、时间线、Markdown、工具与交互展示、取消清理和中断恢复均通过自动化、分发/离线构建及用户真实 Windows Terminal 冒烟验收。旧全屏前端已移除，`mica cli` 与 `--plain` 的入口边界已确认。视觉细则以 `docs/tui_design.md` 为准；施工和返工证据见 `git show 3829052:docs/log/phase5_build_log.md`。
