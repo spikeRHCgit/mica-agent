@@ -141,7 +141,7 @@ uv run pytest -q -W error --strict-markers    # 最终全量，包含上述四�
 - `AGENTS.md`：所有 agent 会话的项目入口，包含定位、文档路由和通用工程原则。
 - `docs/PROJECT_PLAN.md`：Mica 的正式项目方向和长期架构边界。
 - `docs/STATUS.md`：当前开发主线、进行中任务和待决策。
-- `docs/configuration_spec.md`：配置与模型的完整规格；手工配置和恢复已实现，后续菜单、登录和新协议仍以阶段交付为准。
+- `docs/phase6_plan.md`：配置与模型阶段的交付规格；手工配置和恢复已实现，菜单、登录和多接口适配在本阶段交付。
 - `docs/module_map.md`：按功能分组定位全部现有源码和测试文件。
 - `docs/code_spec.md`：已定稿的产品代码、测试与验证、注释编写规范。
 - `docs/decisions.md`：已确认的项目决策及其理由。

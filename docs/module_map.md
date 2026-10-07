@@ -35,7 +35,7 @@
 
 ## 配置与选择
 
-规格：`docs/configuration_spec.md`。
+规格：`docs/phase6_plan.md`。
 
 - `src/mica_agent/config_contracts.py`：不可变设置、能力、来源与独立连接绑定。
 - `src/mica_agent/config_store.py`：配置 JSON 读取及默认目标项锁内原子保存。

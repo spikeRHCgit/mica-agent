@@ -10,7 +10,7 @@ Mica 是面向个人开发者的轻量、可扩展 Agent 基座：以可靠的�
 | 当前主线、任务和待决策 | `docs/STATUS.md` |
 | 已确认的决定和理由 | `docs/decisions.md` |
 | 讨论中尚未归入正式文档的内容 | `docs/scratchpad.md` |
-| 配置、登录、模型和恢复行为 | `docs/configuration_spec.md` |
+| 配置、登录、模型和恢复行为 | `docs/phase6_plan.md` |
 | 终端交互、视觉规则和真实终端验收 | `docs/tui_design.md`、`docs/assets/tui/README.md` |
 | 代码位置与文件职责 | `docs/module_map.md` |
 | 产品代码、测试、验证和注释规范 | `docs/code_spec.md` |
