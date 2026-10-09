@@ -1,8 +1,9 @@
 """Main-buffer frontend orchestration and mode machine.
 
-The active modes are ``IDLE``, ``RUNNING``, ``ASK``, and ``PERMISSION``, plus terminal
-``CLOSED``. Terminal focus does not change mode; explicit mode alone owns input, so
-missing focus events cannot change how the next key is handled.
+The active modes are ``IDLE``, ``RUNNING``, ``ASK``, ``PERMISSION``, ``MENU``, and
+``SWITCHING``, plus terminal ``CLOSED``. Terminal focus does not change mode;
+explicit mode alone owns input, so missing focus events cannot change how the next
+key is handled.
 
 The orchestration layer owns the terminal, renderer, editor, and single-run controller,
 but not business state. Existing services retain sessions, tool results, permissions,
@@ -15,16 +16,18 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
-    from mica_agent.app import MicaApp
+    from mica_agent.app import MicaApp, ModelSwitchResult
 
 from mica_agent.checkpoint_contracts import (
     RunCheckpoint,
     RunCheckpointToolProgress,
     RunCheckpointToolStatus,
 )
+from mica_agent.config_contracts import ConfigConflictError
 from mica_agent.events import (
     ErrorCategory,
     PermissionRequested,
@@ -48,7 +51,8 @@ from mica_agent.tool_presentation import (
     ToolPresentationStatus,
 )
 
-from ..models import ReasoningDisplayMode
+from ..models import ReasoningDisplayMode, TuiSessionSnapshot
+from .commands import Command, CommandCandidates, CommandRegistry
 from .components import (
     IDLE_HINT,
     ReasoningBlock,
@@ -68,18 +72,21 @@ from .interactions import (
     PermissionInteraction,
 )
 from .markdown import MarkdownBlock, StreamingMarkdownBlock
+from .menus import ModelMenu
 from .renderer import Block, BlockLike, MainBufferRenderer, Palette, truncate_head
 from .runtime import InterruptedMarker, MainBufferRuntime
 from .sanitize import sanitize_scalar, sanitize_text
 from .terminal import Terminal
 from .tool_views import GenericToolView, ToolView, ToolViewFactory
 
-Mode = Literal["idle", "running", "ask", "permission", "closed"]
+Mode = Literal["idle", "running", "ask", "permission", "menu", "switching", "closed"]
 Status = Literal["idle", "working", "done", "stop", "error"]
 
 CTRL_C_WINDOW = 2.0
 DONE_VISIBLE_SECONDS = 2.0
 REFRESH_INTERVAL = 0.25
+COMMAND_NOTICE_SECONDS = 2.0
+BUSY_COMMAND_NOTICE = "Commands are available after the current task finishes."
 MAX_TOOL_DETAIL = 72
 MAX_OUTPUT_LINES = 8
 # A lone Esc finishes only after this bounded window without another byte, preventing
@@ -180,6 +187,21 @@ class MainBufferScreen:
         self.diagnostics: list[str] = []
         self.cleanup_errors: list[str] = []
         self._configuration_notice: str | None = app.connection_diagnostic
+        self._commands = CommandRegistry(
+            (
+                Command(
+                    "/model",
+                    "Switch model or set global default",
+                    self._open_model_menu,
+                ),
+            )
+        )
+        self._candidates = CommandCandidates(self._commands)
+        self._menu: ModelMenu | None = None
+        self._command_notice: str | None = None
+        self._command_notice_deadline: float | None = None
+        self._switch_tasks: set[asyncio.Task[ModelSwitchResult]] = set()
+        self._switch_request: object | None = None
 
     @property
     def mode(self) -> Mode:
@@ -268,6 +290,8 @@ class MainBufferScreen:
             if kind == "key":
                 if self._handle_key(payload):
                     break
+            elif kind == "model_switch":
+                self._finish_model_switch(*payload)
             else:
                 await self.handle_event(payload)
             self.render()
@@ -290,6 +314,10 @@ class MainBufferScreen:
         finally:
             self._finalize_terminal()
             try:
+                await self._close_model_switches()
+            except Exception:  # noqa: BLE001 - pending model work must not expose errors
+                self.cleanup_errors.append("model switch cleanup failed")
+            try:
                 await self._runtime.aclose()
                 if self._runtime.cleanup_error is not None:
                     self.cleanup_errors.append(self._runtime.cleanup_error)
@@ -298,6 +326,16 @@ class MainBufferScreen:
             finally:
                 self._mode = "closed"
                 self._shutdown_done = True
+
+    async def _close_model_switches(self) -> None:
+        self._switch_request = None
+        self._menu = None
+        tasks = tuple(self._switch_tasks)
+        for task in tasks:
+            task.cancel()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        if any(isinstance(result, Exception) for result in results):
+            self.cleanup_errors.append("model switch cleanup failed")
 
     def _finalize_terminal(self) -> None:
         """Restore terminal state synchronously with each cleanup step isolated."""
@@ -475,11 +513,22 @@ class MainBufferScreen:
         if self._mode in {"ask", "permission"}:
             self._handle_interaction_key(key)
             return False
+        if self._mode == "menu":
+            self._handle_menu_key(key)
+            return False
         if key.name == "escape":
             if self._mode == "running":
                 self._runtime.cancel(self._runtime.run_id)
+            elif self._mode == "idle" and self._candidates.visible:
+                self._candidates.dismiss()
             return False
-        if self._mode == "running":
+        if self._mode in {"running", "switching"}:
+            if key.name == "enter":
+                command = self._commands.exact(self._editor.submit_text())
+                if command is not None:
+                    self._execute_command(command)
+            elif key.name != "ctrl_d":
+                self._handle_composer_key(key)
             return False
         if key.name == "ctrl_d":
             # Exit only when idle with a blank draft; otherwise ignore Ctrl-D without
@@ -500,8 +549,19 @@ class MainBufferScreen:
         return False
 
     def _handle_composer_key(self, key: Key) -> None:
+        self._candidates.sync(self._editor.submit_text())
         if key.name == "enter":
-            self._submit()
+            command = self._candidates.selected
+            if command is not None:
+                self._execute_command(command)
+            else:
+                self._submit()
+        elif (
+            self._mode == "idle"
+            and self._candidates.visible
+            and key.name in {"up", "down"}
+        ):
+            self._candidates.move(-1 if key.name == "up" else 1)
         elif key.name == "newline":
             self._editor.insert("\n")
         elif key.name in {"text", "paste"}:
@@ -510,6 +570,142 @@ class MainBufferScreen:
             getattr(self._editor, key.name)()
         elif key.name in {"left", "right", "up", "down", "home", "end"}:
             self._editor.move(key.name)
+        self._candidates.sync(self._editor.submit_text())
+
+    def _set_command_notice(self, text: str) -> None:
+        self._command_notice = text
+        self._command_notice_deadline = self._clock() + COMMAND_NOTICE_SECONDS
+        self._start_refresh()
+
+    def _execute_command(self, command: Command) -> None:
+        if self._mode != "idle":
+            self._set_command_notice(BUSY_COMMAND_NOTICE)
+            return
+        self._editor.clear()
+        self._candidates.sync("")
+        self._command_notice = None
+        self._command_notice_deadline = None
+        command.handler()
+
+    def _open_model_menu(self) -> None:
+        try:
+            choices = self._app.model_choices()
+        except Exception:  # noqa: BLE001 - configuration exceptions stay private
+            self._set_command_notice("Unable to load models.")
+            return
+        self._menu = ModelMenu(choices)
+        self._mode = "menu"
+
+    def _close_model_menu(self) -> None:
+        self._menu = None
+        # Visibility does not end a request: input stays gated until its queue result.
+        self._mode = "switching" if self._switch_request is not None else "idle"
+
+    def _handle_menu_key(self, key: Key) -> None:
+        menu = self._menu
+        if menu is None:
+            return
+        outcome = menu.handle(key)
+        if outcome.action == "close":
+            self._close_model_menu()
+        elif outcome.action == "save_default" and outcome.selection is not None:
+            try:
+                self._app.save_default_model(outcome.selection)
+            except ConfigConflictError:
+                menu.set_hint(
+                    "Default changed elsewhere. Please reopen the menu and try again."
+                )
+            except Exception:  # noqa: BLE001 - saving errors must never echo private input
+                menu.set_hint("Unable to save global default.")
+            else:
+                try:
+                    choices = self._app.model_choices()
+                except Exception:  # noqa: BLE001 - committed save and failed refresh differ
+                    menu.set_hint(
+                        "Default saved, but unable to refresh models. Reopen the menu."
+                    )
+                else:
+                    menu.set_choices(choices)
+                    menu.set_hint("Saved as global default.")
+        elif outcome.action == "switch" and outcome.selection is not None:
+            menu.set_hint("")
+            menu.set_busy(True)
+            request = object()
+            self._switch_request = request
+            task = asyncio.create_task(
+                self._app.switch_model(outcome.selection), name="mica-menu-model-switch"
+            )
+            self._switch_tasks.add(task)
+            task.add_done_callback(
+                lambda finished: self._enqueue_model_switch(finished, menu, request)
+            )
+
+    def _enqueue_model_switch(
+        self, task: asyncio.Task[ModelSwitchResult], menu: ModelMenu, request: object
+    ) -> None:
+        from mica_agent.app import AppBusyError, AppClosedError
+
+        self._switch_tasks.discard(task)
+        result = None
+        hint = None
+        try:
+            result = task.result()
+        except asyncio.CancelledError:
+            return
+        except AppBusyError:
+            hint = "The app is busy. Try again after the current task finishes."
+        except AppClosedError:
+            hint = "The app is closed."
+        except Exception:  # noqa: BLE001 - classify switch failures without retaining errors
+            hint = "Unable to switch model."
+        if not self._closed:
+            self._queue.put_nowait(("model_switch", (menu, request, result, hint)))
+
+    def _finish_model_switch(
+        self,
+        menu: ModelMenu,
+        request: object,
+        result: ModelSwitchResult | None,
+        hint: str | None,
+    ) -> None:
+        if self._closed or self._switch_request is not request:
+            return
+        self._switch_request = None
+        visible = self._mode == "menu" and self._menu is menu
+        if result is None or not result.switched:
+            message = hint or "Unable to switch model."
+            if result is not None:
+                message = result.message
+                if result.cleanup_warning:
+                    message += " " + result.cleanup_warning
+            if visible:
+                menu.set_busy(False)
+                menu.set_hint(message)
+            elif self._mode == "switching":
+                self._mode = "idle"
+                self._set_command_notice(message)
+            return
+        # A committed selection updates global facts even after its menu was dismissed.
+        selection = self._app.current_selection
+        if selection is not None and isinstance(
+            self._session_snapshot, TuiSessionSnapshot
+        ):
+            self._session_snapshot = replace(
+                self._session_snapshot, model=f"{selection.model_id} (session)"
+            )
+        renderer = self._renderer
+        if renderer is not None:
+            summary = self._app.connection_summary
+            if summary:
+                renderer.append(Block("muted", summary))
+            if result.cleanup_warning:
+                renderer.append(Block("muted", result.cleanup_warning))
+        self._configuration_notice = self._app.reasoning_notice
+        if visible:
+            menu.set_busy(False)
+            self._close_model_menu()
+        elif self._mode == "switching":
+            self._mode = "idle"
 
     def _submit(self) -> None:
         """Submit a draft; runtime rejection preserves it and creates no user row or run."""
@@ -913,6 +1109,13 @@ class MainBufferScreen:
                     self._done_deadline = None
                     self.render()
                 continue
+            deadline = self._command_notice_deadline
+            if self._command_notice is not None:
+                self.render()
+                if deadline is not None and self._clock() < deadline:
+                    continue
+                self._command_notice = None
+                self._command_notice_deadline = None
             return
 
     async def _refresh_branch(self) -> None:
@@ -960,6 +1163,9 @@ class MainBufferScreen:
         if self._mode == "permission" and self._permission is not None:
             view = self._permission.panel(width, self._palette, limit=limit)
             return view.lines, (len(view.lines) - 1, 0), view.selected_row
+        if self._mode == "menu" and self._menu is not None:
+            view = self._menu.panel(width, self._palette, limit=limit)
+            return view.lines, (len(view.lines) - 1, 0), view.selected_row
         lines: list[str] = []
         if self._configuration_notice:
             from .renderer import wrap_line
@@ -970,6 +1176,15 @@ class MainBufferScreen:
         if status is not None:
             kind = "status_cancel" if self._status in {"stop", "error"} else "status"
             lines.append(self._palette.paint(status, kind))
+        if (
+            self._command_notice
+            and self._command_notice_deadline is not None
+            and self._clock() < self._command_notice_deadline
+        ):
+            from .renderer import wrap_line
+
+            for line in wrap_line(self._command_notice, width):
+                lines.append(self._palette.paint(line, "muted"))
         view = self._editor.wrapped(composer_body_width(width))
         visible, start = windowed_lines(view.lines, view.cursor_row)
         frame = composer_frame(
@@ -985,6 +1200,9 @@ class MainBufferScreen:
         )
         cursor = (len(lines) + frame.cursor[0], frame.cursor[1])
         lines.extend(frame.lines)
+        if self._mode == "idle":
+            self._candidates.sync(self._editor.submit_text())
+            lines.extend(self._candidates.lines(width, self._palette))
         lines.extend(self._facts_lines())
         return lines, cursor, None
 

@@ -61,6 +61,7 @@ _KEY_NAMES: dict[Any, str] = {
     Keys.ControlC: "ctrl_c",
     Keys.ControlO: "ctrl_o",
     Keys.ControlD: "ctrl_d",
+    Keys.ControlS: "ctrl_s",
     Keys.BracketedPaste: "paste",
 }
 

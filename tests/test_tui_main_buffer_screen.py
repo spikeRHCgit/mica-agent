@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import sys
 from collections.abc import AsyncIterator, Iterator
 from contextlib import AbstractContextManager
@@ -16,9 +17,10 @@ from prompt_toolkit.input.vt100_parser import Vt100Parser
 from prompt_toolkit.key_binding.key_processor import KeyPress
 from prompt_toolkit.keys import Keys
 
-from mica_agent.app import MicaApp
+from mica_agent.app import AppBusyError, AppClosedError, MicaApp
 from mica_agent.cancellation import CancellationToken
 from mica_agent.checkpoint_contracts import RunCheckpointKind
+from mica_agent.config_contracts import ConfigConflictError, ConfigError
 from mica_agent.context_builder import ContextBuilder
 from mica_agent.interactions import (
     AskOption,
@@ -32,6 +34,7 @@ from mica_agent.permissions import PermissionMode
 from mica_agent.policy import PolicyEngine, PolicyInput, PolicyOperation
 from mica_agent.providers import Finish, ProviderEvent, ProviderRequest
 from mica_agent.providers import TextDelta as ProviderTextDelta
+from mica_agent.session_contracts import SessionSelection
 from mica_agent.session_service import SessionService
 from mica_agent.tool_contracts import (
     ToolCall,
@@ -496,7 +499,7 @@ def test_running_state_ignores_composer_input_and_second_submit(
             fake.feed(*typed("first"), ENTER)
             await asyncio.wait_for(provider.started.wait(), timeout=TIMEOUT)
             await feed_and_wait_processed(screen, fake, *typed("ignored"))
-            assert screen.composer_text == ""
+            assert screen.composer_text == "ignored"
             assert provider.requests and len(provider.requests) == 1
             provider.release.set()
             await pump(
@@ -537,7 +540,7 @@ def test_escape_cancels_active_run_without_committing_turn(tmp_path: Path) -> No
             stored = app._session_service.load_session(app.session_id)
             assert stored.turns == ()
             assert stored.checkpoints[0].kind is RunCheckpointKind.CANCELLED
-            assert screen.composer_text == ""
+            assert screen.composer_text == "x"
             frame = screen.renderer.frame()
             assert any("stop" in line for line in frame)
 
@@ -1733,6 +1736,868 @@ def test_unconfigured_input_bytes_preserve_draft_cursor_and_create_no_run(
                 screen._terminal.emitted_text(), encoding="utf-8"
             )
             (target / f"unconfigured-{size[0]}x{size[1]}.json").write_text(
+                json.dumps(frames, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+
+    asyncio.run(scenario())
+
+
+CTRL_S = KeyPress(Keys.ControlS, "\x13")
+BACKSPACE = KeyPress(Keys.ControlH, "\x08")
+MODEL_URL = "https://example.test/v1"
+MODEL_KEY = "TEST_ONLY_SECRET"
+MODEL_PRIVATE_ERROR = f"private model error {MODEL_URL} {MODEL_KEY} token-value"
+
+
+def assert_model_display_safe(screen):
+    displayed = screen._terminal.emitted_text()
+    for private in (MODEL_URL, MODEL_KEY, MODEL_PRIVATE_ERROR, "token-value"):
+        assert private not in displayed
+
+
+def model_screen_app(tmp_path, *, old=None, factory=None):
+    from test_config_service import make_service
+
+    configuration = make_service(tmp_path)
+    root = configuration.store.data_root
+    (root / "config.json").write_text(
+        '{"defaultModel":{"provider":"local","model":"a"},"reasoningEffort":"high"}'
+    )
+    directory_path = root / "models.json"
+    directory = json.loads(directory_path.read_text())
+    directory["providers"]["local"]["name"] = "Provider A"
+    directory["providers"]["local"]["models"][0]["name"] = "Alpha"
+    directory["providers"]["local"]["models"][1]["name"] = "Beta"
+    directory_path.write_text(json.dumps(directory))
+    snapshot = configuration.load()
+    current = SessionSelection("local", "a")
+    connection = configuration.resolve(snapshot, explicit=current).connection
+    service = SessionService(
+        JsonlSessionStore(resolve_workspace(configuration.store.workspace), root)
+    )
+    stored = service.create_session(selection=current)
+    old = old or ScriptedProvider([[ProviderTextDelta("old answer"), Finish()]])
+    created = []
+
+    def make_provider(url, key):
+        assert (url, key) == (MODEL_URL, MODEL_KEY)
+        provider = ScriptedProvider([[ProviderTextDelta("new answer"), Finish()]])
+        created.append(provider)
+        return provider
+
+    app = MicaApp(
+        old,
+        "a",
+        session_service=service,
+        session_id=stored.meta.session_id,
+        context_builder=ContextBuilder(
+            data_root=root, workspace=service.store.workspace
+        ),
+        connection=connection,
+        config_service=configuration,
+        startup_settings=snapshot.settings,
+        provider_factory=factory or make_provider,
+        close_timeout=0.05,
+    )
+    return app, configuration, service, old, created
+
+
+async def open_model_menu(screen, fake):
+    await feed_and_wait_processed(screen, fake, *typed("/m"), ENTER)
+    await pump(lambda: screen.mode == "menu", message="model menu")
+
+
+def test_command_candidate_keyboard_position_dismissal_and_execution(tmp_path):
+    async def scenario():
+        from test_tui_main_buffer_vt import VirtualTerminal
+
+        provider = ScriptedProvider([[Finish()]])
+        app = make_app(tmp_path, provider)
+        fake = FakeInput()
+        screen, _ = make_screen(app, fake)
+        async with ScreenHarness(screen, fake):
+            await feed_and_wait_processed(screen, fake, *typed("/"))
+            before = screen.editor.cursor
+            await feed_and_wait_processed(screen, fake, DOWN, UP)
+            assert screen.editor.cursor == before
+            frame = screen.renderer.frame()
+            composer_bottom = next(
+                index for index, line in enumerate(frame) if line.startswith("└")
+            )
+            candidate = next(
+                index for index, line in enumerate(frame) if "› /model" in line
+            )
+            facts = next(
+                index for index, line in enumerate(frame) if "~/workspace" in line
+            )
+            assert composer_bottom < candidate < facts
+            assert (
+                frame[candidate].strip()
+                == "› /model    Switch model or set global default"
+            )
+            view = VirtualTerminal(rows=24, cols=80)
+            view.feed(screen._terminal.emitted_text())
+            assert view.row_index("/model") > view.row_index("└")
+            assert view.row_index("/model") < view.row_index("~/workspace")
+            await feed_and_wait_processed(screen, fake, *typed("m"), ESCAPE)
+            assert screen.submit_text == "/m" and not screen._candidates.visible
+            await feed_and_wait_processed(screen, fake, LEFT, RIGHT)
+            assert not screen._candidates.visible
+            await feed_and_wait_processed(screen, fake, *typed("x"))
+            assert not screen._candidates.visible
+            await feed_and_wait_processed(screen, fake, BACKSPACE)
+            assert screen._candidates.visible and screen.submit_text == "/m"
+            await feed_and_wait_processed(screen, fake, NEWLINE)
+            assert not screen._candidates.visible
+            await feed_and_wait_processed(screen, fake, BACKSPACE, ENTER)
+            assert screen.mode == "menu" and screen.submit_text == ""
+            assert "No models available" in "\n".join(screen.renderer.frame())
+            assert provider.requests == [] and app.history == ()
+            assert not any("/m" in line for line in screen.renderer.document_lines())
+            assert_model_display_safe(screen)
+            await feed_and_wait_processed(screen, fake, ESCAPE)
+            assert screen.mode == "idle" and not screen.closed
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "original", ["/xyz 你好", "/model\nfollowup", "/model\n", " /model "]
+)
+def test_unmatched_slash_submission_preserves_full_message(tmp_path, original):
+    async def scenario():
+        provider = ScriptedProvider([[ProviderTextDelta("answer"), Finish()]])
+        app = make_app(tmp_path, provider)
+        fake = FakeInput()
+        screen, _ = make_screen(app, fake)
+        freeze_done_window(screen)
+        async with ScreenHarness(screen, fake):
+            await feed_and_wait_processed(
+                screen, fake, KeyPress(Keys.BracketedPaste, original), ENTER
+            )
+            await pump(lambda: screen.mode == "idle" and screen.status == "done")
+            assert provider.requests[0].messages[-1].content == original
+            assert app.history[0].content == original
+            assert len(provider.requests) == 1 and screen._menu is None
+
+    asyncio.run(scenario())
+
+
+def test_running_command_notice_expires_and_editable_draft_keeps_cursor(tmp_path):
+    async def scenario():
+        from mica_agent.tui.main_buffer.screen import BUSY_COMMAND_NOTICE
+
+        provider = ScriptedProvider(
+            [[ProviderTextDelta("answer"), Finish()]], block_after_text=True
+        )
+        app = make_app(tmp_path, provider)
+        fake = FakeInput()
+        screen, _ = make_screen(app, fake)
+        now = [0.0]
+        ticks = asyncio.Queue()
+        screen._clock = lambda: now[0]
+
+        async def tick_sleep(interval):
+            await ticks.get()
+
+        screen._sleep = tick_sleep
+        async with ScreenHarness(screen, fake) as harness:
+            await feed_and_wait_processed(screen, fake, *typed("first"), ENTER)
+            await asyncio.wait_for(provider.started.wait(), TIMEOUT)
+            await feed_and_wait_processed(
+                screen, fake, KeyPress(Keys.BracketedPaste, " /MODEL "), ENTER
+            )
+            assert screen.submit_text == " /MODEL " and len(provider.requests) == 1
+            frame = screen.renderer.frame()
+            assert BUSY_COMMAND_NOTICE in "\n".join(frame)
+            assert not any("› /model" in line for line in frame)
+            assert BUSY_COMMAND_NOTICE not in "\n".join(
+                screen.renderer.document_lines()
+            )
+            now[0] = 3.0
+            ticks.put_nowait(None)
+            await pump(
+                lambda: BUSY_COMMAND_NOTICE not in "\n".join(screen.renderer.frame())
+            )
+            await feed_and_wait_processed(
+                screen,
+                fake,
+                HOME,
+                *([DELETE] * len(" /MODEL ")),
+                *typed("next"),
+                LEFT,
+                BACKSPACE,
+                KeyPress(Keys.BracketedPaste, "Q\nR"),
+                ENTER,
+                KeyPress(Keys.ControlD, "\x04"),
+            )
+            draft, cursor = screen.submit_text, screen.editor.cursor
+            assert draft == "neQ\nRt"
+            assert not harness.task.done() and len(provider.requests) == 1
+            assert BUSY_COMMAND_NOTICE not in "\n".join(screen.renderer.frame())
+            provider.release.set()
+            await pump(lambda: screen.mode == "idle" and screen.status == "done")
+            assert screen.submit_text == draft and screen.editor.cursor == cursor
+            assert len(provider.requests) == 1
+            assert_model_display_safe(screen)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("cleanup_failure", [False, True])
+def test_menu_switch_updates_real_app_facts_history_and_next_provider(
+    tmp_path, cleanup_failure
+):
+    async def scenario():
+        class ClosingProvider(ScriptedProvider):
+            async def aclose(self):
+                self.aclose_calls += 1
+                if cleanup_failure:
+                    raise RuntimeError(MODEL_PRIVATE_ERROR)
+
+        old = ClosingProvider([[ProviderTextDelta("old answer"), Finish()]])
+        app, _, service, old, created = model_screen_app(tmp_path, old=old)
+        fake = FakeInput()
+        screen, _ = make_screen(app, fake)
+        screen.update_session_snapshot(
+            TuiSessionSnapshot(
+                workspace="~/workspace",
+                session_label="session-title",
+                model="a (global)",
+            )
+        )
+        freeze_done_window(screen)
+        async with ScreenHarness(screen, fake):
+            await feed_and_wait_processed(screen, fake, *typed("before"), ENTER)
+            await pump(lambda: screen.mode == "idle" and screen.status == "done")
+            history = app.history
+            await open_model_menu(screen, fake)
+            assert "old answer" in "\n".join(screen.renderer.document_lines())
+            assert "Type your request" not in "\n".join(screen.renderer.chrome)
+            assert "sessions:" not in "\n".join(screen.renderer.chrome)
+            await feed_and_wait_processed(screen, fake, DOWN, ENTER)
+            await pump(lambda: screen.mode == "idle", message="switch complete")
+            assert app.current_selection == SessionSelection("local", "b")
+            assert (
+                service.load_session(app.session_id).meta.selection
+                == app.current_selection
+            )
+            assert app.history == history
+            assert "b (session)" in "\n".join(screen.renderer.frame())
+            document = "\n".join(screen.renderer.document_lines())
+            assert "Source: session." in document
+            assert "Reasoning: off (preference high" in document
+            assert app.reasoning_notice in "\n".join(screen.renderer.chrome)
+            if cleanup_failure:
+                assert "provider release failed" in document
+            assert old.aclose_calls == 1
+            await feed_and_wait_processed(screen, fake, *typed("after"), ENTER)
+            await pump(lambda: screen.mode == "idle" and screen.status == "done")
+            assert len(created) == 1 and created[0].requests[0].model == "b"
+            assert len(old.requests) == 1
+            assert_model_display_safe(screen)
+        assert created[0].aclose_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_failed_menu_switch_retains_menu_old_connection_and_safe_reason(tmp_path):
+    def fail_factory(url, key):
+        raise RuntimeError(MODEL_PRIVATE_ERROR)
+
+    async def scenario():
+        app, _, service, old, _ = model_screen_app(tmp_path, factory=fail_factory)
+        fake = FakeInput()
+        screen, _ = make_screen(app, fake)
+        original = service.store.path_for_session(app.session_id).read_bytes()
+        async with ScreenHarness(screen, fake):
+            await open_model_menu(screen, fake)
+            await feed_and_wait_processed(screen, fake, DOWN, ENTER)
+            await pump(
+                lambda: (
+                    "unable to initialize provider" in "\n".join(screen.renderer.chrome)
+                )
+            )
+            assert screen.mode == "menu" and app.current_selection == SessionSelection(
+                "local", "a"
+            )
+            assert (
+                service.store.path_for_session(app.session_id).read_bytes() == original
+            )
+            assert old.aclose_calls == 0
+            assert_model_display_safe(screen)
+            await feed_and_wait_processed(
+                screen, fake, ESCAPE, *typed("still works"), ENTER
+            )
+            await pump(lambda: bool(old.requests))
+            assert old.requests[0].model == "a"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "error,hint",
+    [
+        (AppBusyError, "The app is busy. Try again after the current task finishes."),
+        (AppClosedError, "The app is closed."),
+        (RuntimeError, "Unable to switch model."),
+    ],
+)
+def test_switch_exceptions_are_classified_without_raw_text(
+    tmp_path, monkeypatch, error, hint
+):
+    async def scenario():
+        app, _, _, _, _ = model_screen_app(tmp_path)
+
+        async def fail(selection):
+            raise error(MODEL_PRIVATE_ERROR)
+
+        monkeypatch.setattr(app, "switch_model", fail)
+        fake = FakeInput()
+        screen, _ = make_screen(app, fake)
+        async with ScreenHarness(screen, fake):
+            await open_model_menu(screen, fake)
+            await feed_and_wait_processed(screen, fake, DOWN, ENTER)
+            await pump(lambda: hint in "\n".join(screen.renderer.chrome))
+            assert screen.mode == "menu" and app.current_selection == SessionSelection(
+                "local", "a"
+            )
+            assert_model_display_safe(screen)
+
+    asyncio.run(scenario())
+
+
+def test_ctrl_s_saves_global_default_refreshes_markers_without_switch(tmp_path):
+    async def scenario():
+        app, configuration, service, old, created = model_screen_app(tmp_path)
+        fake = FakeInput()
+        screen, _ = make_screen(app, fake)
+        original = service.store.path_for_session(app.session_id).read_bytes()
+        async with ScreenHarness(screen, fake):
+            await open_model_menu(screen, fake)
+            await feed_and_wait_processed(screen, fake, DOWN, CTRL_S)
+            frame = "\n".join(screen.renderer.chrome)
+            assert "Saved as global default." in frame
+            assert screen.mode == "menu" and app.current_selection == SessionSelection(
+                "local", "a"
+            )
+            assert created == [] and old.aclose_calls == 0
+            assert json.loads(
+                (configuration.store.data_root / "config.json").read_text()
+            )["defaultModel"] == {"provider": "local", "model": "b"}
+            assert (
+                service.store.path_for_session(app.session_id).read_bytes() == original
+            )
+            alpha = next(line for line in screen.renderer.chrome if "Alpha" in line)
+            beta = next(line for line in screen.renderer.chrome if "Beta" in line)
+            assert "Current" in alpha and "Default" not in alpha
+            assert "›" in beta and "Default" in beta and "Current" not in beta
+            assert_model_display_safe(screen)
+            await feed_and_wait_processed(screen, fake, ESCAPE)
+            assert screen.mode == "idle" and not screen.closed
+            assert configuration.load().default_model == SessionSelection("local", "b")
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "failure,hint",
+    [
+        (
+            "conflict",
+            "Default changed elsewhere. Please reopen the menu and try again.",
+        ),
+        ("config", "Unable to save global default."),
+        ("raw", "Unable to save global default."),
+        ("refresh", "Default saved, but unable to refresh models. Reopen the menu."),
+    ],
+)
+def test_default_errors_and_committed_save_refresh_error_preserve_visible_markers(
+    tmp_path, monkeypatch, failure, hint
+):
+    async def scenario():
+        app, configuration, _, _, created = model_screen_app(tmp_path)
+        fake = FakeInput()
+        screen, _ = make_screen(app, fake)
+        async with ScreenHarness(screen, fake):
+            await open_model_menu(screen, fake)
+            await feed_and_wait_processed(screen, fake, DOWN)
+            before = tuple(
+                (item.selection, item.is_default) for item in screen._menu.choices
+            )
+            if failure == "refresh":
+
+                def fail_read():
+                    raise ConfigError(MODEL_PRIVATE_ERROR)
+
+                monkeypatch.setattr(app, "model_choices", fail_read)
+            else:
+
+                def fail_save(selection):
+                    exception = (
+                        ConfigConflictError
+                        if failure == "conflict"
+                        else ConfigError
+                        if failure == "config"
+                        else RuntimeError
+                    )
+                    raise exception(MODEL_PRIVATE_ERROR)
+
+                monkeypatch.setattr(app, "save_default_model", fail_save)
+            await feed_and_wait_processed(screen, fake, CTRL_S)
+            assert hint in "\n".join(screen.renderer.chrome)
+            assert screen.mode == "menu" and app.current_selection == SessionSelection(
+                "local", "a"
+            )
+            assert created == []
+            assert before == tuple(
+                (item.selection, item.is_default) for item in screen._menu.choices
+            )
+            default = configuration.load().default_model
+            assert default == SessionSelection(
+                "local", "b" if failure == "refresh" else "a"
+            )
+            assert_model_display_safe(screen)
+
+    asyncio.run(scenario())
+
+
+def test_directory_load_error_is_safe_and_empty_menu_only_closes(tmp_path, monkeypatch):
+    async def scenario():
+        provider = ScriptedProvider([[Finish()]])
+        app = make_app(tmp_path, provider)
+        fake = FakeInput()
+        screen, _ = make_screen(app, fake)
+        freeze_done_window(screen)
+        async with ScreenHarness(screen, fake):
+            original = app.model_choices
+
+            def fail_read():
+                raise ConfigError(MODEL_PRIVATE_ERROR)
+
+            monkeypatch.setattr(app, "model_choices", fail_read)
+            await feed_and_wait_processed(screen, fake, *typed("/model"), ENTER)
+            assert screen.mode == "idle" and screen._menu is None
+            assert "Unable to load models." in "\n".join(screen.renderer.chrome)
+            assert provider.requests == []
+            assert_model_display_safe(screen)
+            monkeypatch.setattr(app, "model_choices", original)
+            await open_model_menu(screen, fake)
+            await feed_and_wait_processed(
+                screen, fake, DOWN, *typed("ignored"), ENTER, CTRL_S
+            )
+            assert screen.mode == "menu" and "No models available" in "\n".join(
+                screen.renderer.chrome
+            )
+            assert screen._menu.filter_text == "" and provider.requests == []
+            await feed_and_wait_processed(screen, fake, ESCAPE)
+            assert (
+                screen.mode == "idle" and screen.submit_text == "" and not screen.closed
+            )
+            assert app.history == ()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("exit_during_switch", [False, "menu", "closed"])
+@pytest.mark.parametrize("cleanup_failure", [False, True])
+def test_switching_gates_input_ignores_stale_menu_result_and_cleans_exit(
+    tmp_path, exit_during_switch, cleanup_failure
+):
+    async def scenario():
+        from mica_agent.app import ModelSwitchResult
+        from mica_agent.tui.main_buffer.renderer import Palette, strip_ansi
+        from mica_agent.tui.main_buffer.screen import BUSY_COMMAND_NOTICE
+
+        started, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        class WaitingCloseProvider(ScriptedProvider):
+            async def aclose(self):
+                self.aclose_calls += 1
+                started.set()
+                try:
+                    await release.wait()
+                    if cleanup_failure:
+                        raise RuntimeError(MODEL_PRIVATE_ERROR)
+                finally:
+                    finished.set()
+
+        old = WaitingCloseProvider([[Finish()]])
+        app, _, service, old, created = model_screen_app(tmp_path, old=old)
+        app._close_timeout = 30.0
+        fake = FakeInput()
+        screen, _ = make_screen(app, fake)
+        screen.update_session_snapshot(
+            TuiSessionSnapshot(workspace="~/workspace", model="a (global)")
+        )
+        freeze_done_window(screen)
+        async with ScreenHarness(screen, fake) as harness:
+            screen._palette = Palette(True)
+            await open_model_menu(screen, fake)
+            await feed_and_wait_processed(screen, fake, DOWN, ENTER)
+            await asyncio.wait_for(started.wait(), TIMEOUT)
+            original_menu = screen._menu
+            request = screen._switch_request
+            selected = original_menu.selected.selection
+            await feed_and_wait_processed(
+                screen, fake, UP, ENTER, *typed("ignored"), CTRL_S
+            )
+            assert (
+                screen._menu is original_menu
+                and original_menu.selected.selection == selected
+            )
+            assert original_menu.filter_text == "" and len(created) == 1
+            assert "Switching..." in "\n".join(screen.renderer.chrome)
+            assert service.load_session(
+                app.session_id
+            ).meta.selection == SessionSelection("local", "b")
+            if exit_during_switch == "menu":
+                await feed_and_wait_processed(screen, fake, CTRL_C, CTRL_C)
+                await asyncio.wait_for(harness.task, TIMEOUT)
+                assert screen.closed and screen.mode == "closed"
+                assert (
+                    finished.is_set()
+                    and old.aclose_calls == created[0].aclose_calls == 1
+                )
+                assert not screen._switch_tasks
+                assert screen.cleanup_errors in ([], ["model switch cleanup failed"])
+            else:
+                await feed_and_wait_processed(screen, fake, ESCAPE)
+                assert screen.mode == "switching" and screen._menu is None
+                assert screen._switch_request is request and app.is_busy
+                await feed_and_wait_processed(
+                    screen, fake, ESCAPE, KeyPress(Keys.ControlD, "\x04")
+                )
+                assert screen.mode == "switching" and not harness.task.done()
+                expanded = screen.renderer.expanded
+                await feed_and_wait_processed(
+                    screen, fake, KeyPress(Keys.ControlO, "\x0f")
+                )
+                assert screen.renderer.expanded is not expanded
+                await feed_and_wait_processed(
+                    screen, fake, KeyPress(Keys.ControlO, "\x0f")
+                )
+                assert screen.renderer.expanded is expanded
+                document = screen.renderer.document_lines()
+                screen._queue.put_nowait(
+                    (
+                        "model_switch",
+                        (original_menu, object(), ModelSwitchResult(True, ""), None),
+                    )
+                )
+                await feed_and_wait_processed(
+                    screen, fake, KeyPress(Keys.BracketedPaste, " /MODEL "), ENTER
+                )
+                assert BUSY_COMMAND_NOTICE in "\n".join(screen.renderer.chrome)
+                assert screen.submit_text == " /MODEL "
+                assert screen._menu is None and screen._switch_request is request
+                assert "› /model" not in "\n".join(screen.renderer.chrome)
+                await feed_and_wait_processed(
+                    screen,
+                    fake,
+                    HOME,
+                    *([DELETE] * len(" /MODEL ")),
+                    *typed("next request"),
+                    LEFT,
+                    ENTER,
+                    CTRL_S,
+                )
+                draft, cursor = screen.submit_text, screen.editor.cursor
+                assert draft == "next request" and cursor == len(draft) - 1
+                assert app.history == () and old.requests == created[0].requests == []
+                assert screen.renderer.document_lines() == document
+                assert len(created) == 1 and screen.mode == "switching"
+                body = next(
+                    row for row in screen.renderer.chrome if "next request" in row
+                )
+                assert body == Palette(True).paint(strip_ansi(body), "muted")
+                if exit_during_switch == "closed":
+                    await feed_and_wait_processed(screen, fake, CTRL_C, CTRL_C)
+                    await asyncio.wait_for(harness.task, TIMEOUT)
+                    assert screen.closed and screen.mode == "closed"
+                    assert finished.is_set()
+                    assert old.aclose_calls == created[0].aclose_calls == 1
+                    assert not screen._switch_tasks
+                    assert screen.cleanup_errors in (
+                        [],
+                        ["model switch cleanup failed"],
+                    )
+                    assert screen.renderer.document_lines() == document
+                    assert_model_display_safe(screen)
+                    return
+                release.set()
+                await pump(
+                    lambda: screen.mode == "idle",
+                    message="closed-menu switch processed",
+                )
+                assert finished.is_set() and not app.is_busy
+                assert screen.submit_text == draft and screen.editor.cursor == cursor
+                assert app.history == () and created[0].requests == []
+                body = next(
+                    row for row in screen.renderer.chrome if "next request" in row
+                )
+                assert body == Palette(True).paint(strip_ansi(body), "composer")
+                assert screen._session_snapshot.model == "b (session)"
+                assert "b (session)" in "\n".join(screen.renderer.chrome)
+                assert screen._configuration_notice == app.reasoning_notice
+                assert app.reasoning_notice in "\n".join(screen.renderer.chrome)
+                completed = screen.renderer.document_lines()
+                assert "\n".join(completed).count("Source: session.") == 1
+                assert "\n".join(completed).count("provider release failed") == int(
+                    cleanup_failure
+                )
+                assert old.aclose_calls == 1 and len(created) == 1
+                await feed_and_wait_processed(screen, fake, ENTER)
+                await pump(lambda: screen.mode == "idle" and screen.status == "done")
+                assert len(created[0].requests) == 1
+                assert created[0].requests[0].messages[-1].content == draft
+                assert created[0].requests[0].model == "b" and old.requests == []
+                await open_model_menu(screen, fake)
+                new_menu = screen._menu
+                assert new_menu is not original_menu
+                assert new_menu.current.selection == app.current_selection
+                assert new_menu.selected.selection == SessionSelection("local", "b")
+                completed = screen.renderer.document_lines()
+                screen._queue.put_nowait(
+                    (
+                        "model_switch",
+                        (original_menu, request, ModelSwitchResult(True, ""), None),
+                    )
+                )
+                await feed_and_wait_processed(screen, fake, KeyPress(Keys.F1, ""))
+                assert screen._menu is new_menu and screen.mode == "menu"
+                assert screen.renderer.document_lines() == completed
+                assert screen._session_snapshot.model == "b (session)"
+            assert_model_display_safe(screen)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "failure,hint",
+    [
+        ("business", "unable to initialize provider"),
+        (AppBusyError, "The app is busy. Try again after the current task finishes."),
+        (AppClosedError, "The app is closed."),
+        (RuntimeError, "Unable to switch model."),
+    ],
+)
+def test_closed_menu_switch_failure_recovers_draft_and_safe_submission(
+    tmp_path, monkeypatch, failure, hint
+):
+    def fail_factory(url, key):
+        raise RuntimeError(MODEL_PRIVATE_ERROR)
+
+    async def scenario():
+        app, _, service, old, created = model_screen_app(tmp_path, factory=fail_factory)
+        started, release = asyncio.Event(), asyncio.Event()
+        switch = app.switch_model
+
+        async def delayed_switch(selection):
+            started.set()
+            await release.wait()
+            if failure == "business":
+                return await switch(selection)
+            raise failure(MODEL_PRIVATE_ERROR)
+
+        monkeypatch.setattr(app, "switch_model", delayed_switch)
+        original = service.store.path_for_session(app.session_id).read_bytes()
+        fake = FakeInput()
+        screen, _ = make_screen(app, fake)
+        screen._clock = lambda: 0.0
+        freeze_done_window(screen)
+        async with ScreenHarness(screen, fake):
+            await open_model_menu(screen, fake)
+            await feed_and_wait_processed(screen, fake, DOWN, ENTER)
+            await asyncio.wait_for(started.wait(), TIMEOUT)
+            document = screen.renderer.document_lines()
+            await feed_and_wait_processed(
+                screen, fake, ESCAPE, *typed("retry"), LEFT, ENTER
+            )
+            assert screen.mode == "switching" and screen._menu is None
+            assert screen.submit_text == "retry" and screen.editor.cursor == 4
+            assert old.requests == created == [] and app.history == ()
+            release.set()
+            await pump(
+                lambda: screen.mode == "idle", message="switch failure processed"
+            )
+            assert hint in "\n".join(screen.renderer.chrome)
+            assert screen._switch_request is None and not screen._switch_tasks
+            assert screen.submit_text == "retry" and screen.editor.cursor == 4
+            assert app.current_selection == SessionSelection("local", "a")
+            assert (
+                service.store.path_for_session(app.session_id).read_bytes() == original
+            )
+            assert old.aclose_calls == 0
+            assert screen.renderer.document_lines() == document
+            assert_model_display_safe(screen)
+            await feed_and_wait_processed(screen, fake, ENTER)
+            await pump(lambda: screen.mode == "idle" and screen.status == "done")
+            assert len(old.requests) == 1 and old.requests[0].model == "a"
+            assert old.requests[0].messages[-1].content == "retry"
+            assert_model_display_safe(screen)
+
+    asyncio.run(scenario())
+
+
+def test_valid_switch_result_updates_facts_without_mutating_another_menu(
+    tmp_path, monkeypatch
+):
+    async def scenario():
+        from mica_agent.app import ModelSwitchResult
+        from mica_agent.tui.main_buffer.menus import ModelMenu
+
+        app, _, _, _, created = model_screen_app(tmp_path)
+        started, release = asyncio.Event(), asyncio.Event()
+        switch = app.switch_model
+
+        async def delayed_switch(selection):
+            started.set()
+            await release.wait()
+            return await switch(selection)
+
+        monkeypatch.setattr(app, "switch_model", delayed_switch)
+        fake = FakeInput()
+        screen, _ = make_screen(app, fake)
+        async with ScreenHarness(screen, fake):
+            await open_model_menu(screen, fake)
+            original_menu = screen._menu
+            await feed_and_wait_processed(screen, fake, DOWN, ENTER)
+            await asyncio.wait_for(started.wait(), TIMEOUT)
+            request = screen._switch_request
+            await feed_and_wait_processed(screen, fake, ESCAPE)
+            # Deliberately replace only the presentation to exercise lifecycle isolation.
+            other_menu = ModelMenu(app.model_choices())
+            other_menu.set_hint("Other menu result.")
+            screen._menu = other_menu
+            screen._mode = "menu"
+            choices = other_menu.choices
+            release.set()
+            await pump(
+                lambda: screen._switch_request is None, message="valid result processed"
+            )
+            assert screen._menu is other_menu and screen.mode == "menu"
+            assert other_menu.choices == choices
+            assert "Other menu result." in "\n".join(screen.renderer.chrome)
+            assert screen._session_snapshot.model == "b (session)"
+            assert screen._configuration_notice == app.reasoning_notice
+            document = screen.renderer.document_lines()
+            assert "\n".join(document).count("Source: session.") == 1
+            screen._queue.put_nowait(
+                (
+                    "model_switch",
+                    (original_menu, request, ModelSwitchResult(True, ""), None),
+                )
+            )
+            await feed_and_wait_processed(screen, fake, KeyPress(Keys.F1, ""))
+            assert screen._menu is other_menu and screen.mode == "menu"
+            assert screen.renderer.document_lines() == document
+            assert_model_display_safe(screen)
+        assert created[0].aclose_calls == 1
+        # The shutdown guard also rejects late direct delivery of the previous request.
+        screen._finish_model_switch(
+            original_menu, request, ModelSwitchResult(True, ""), None
+        )
+        assert screen.renderer.document_lines() == document
+        assert screen.mode == "closed" and screen._menu is None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("size", [(100, 30), (40, 14), (24, 10)])
+def test_model_menu_vt_replay_and_visual_evidence(tmp_path, size):
+    import os
+
+    from test_tui_main_buffer_vt import VirtualTerminal
+
+    from mica_agent.tui.main_buffer.renderer import Palette, cell_len, strip_ansi
+
+    async def scenario():
+        app, configuration, _, _, created = model_screen_app(tmp_path)
+        directory_path = configuration.store.data_root / "models.json"
+        directory = json.loads(directory_path.read_text())
+        directory["providers"]["local"]["models"][1]["contextWindow"] = 32000
+        directory_path.write_text(json.dumps(directory))
+        fake = FakeInput()
+        terminal = Terminal(
+            output=io.StringIO(),
+            input_factory=lambda: fake,
+            size=size,
+            environ={},
+            interactive=True,
+        )
+        screen = MainBufferScreen(
+            app,
+            terminal=terminal,
+            session_snapshot=TuiSessionSnapshot(
+                workspace="~/workspace",
+                model="a (global)",
+                session_label="session-title",
+            ),
+            clock=lambda: 0.0,
+        )
+        frames = []
+
+        def capture(label):
+            view = VirtualTerminal(rows=size[1], cols=size[0])
+            view.feed(terminal.emitted_text())
+            assert not view.violations
+            assert all(
+                cell_len(strip_ansi(row)) <= size[0] for row in screen.renderer.chrome
+            )
+            frames.append(
+                {
+                    "label": label,
+                    "width": size[0],
+                    "height": size[1],
+                    "lines": view.screen(),
+                    "rows": screen.renderer.physical_frame(),
+                    "cursor": view.cursor_cell(),
+                }
+            )
+            return view
+
+        async with ScreenHarness(screen, fake):
+            await feed_and_wait_processed(screen, fake, *typed("/m"))
+            candidate = capture("command-candidate")
+            assert candidate.row_index("/model") > candidate.row_index("└")
+            assert candidate.row_index("/model") < candidate.row_index("sessions:")
+            await feed_and_wait_processed(screen, fake, ENTER)
+            capture("current-and-default")
+            assert screen.mode == "menu"
+            assert any(
+                "✓" in strip_ansi(row) and "Current Default" in strip_ansi(row)
+                for row in screen.renderer.chrome
+            )
+            await feed_and_wait_processed(screen, fake, DOWN)
+            capture("navigation-is-independent")
+            selected = next(
+                row for row in screen.renderer.chrome if "›" in strip_ansi(row)
+            )
+            assert strip_ansi(selected).startswith(" ›   ")
+            assert Palette(True).paint("Beta [Provider A]", "muted") in selected
+            await feed_and_wait_processed(screen, fake, CTRL_S)
+            capture("saved-global-default")
+            assert app.current_selection == SessionSelection("local", "a")
+            assert configuration.load().default_model == SessionSelection("local", "b")
+            await feed_and_wait_processed(screen, fake, ENTER)
+            capture("smaller-context-confirmation")
+            assert screen.mode == "menu" and created == []
+            await feed_and_wait_processed(screen, fake, ESCAPE)
+            assert screen.mode == "menu" and created == []
+            await feed_and_wait_processed(screen, fake, ENTER, ENTER)
+            await pump(lambda: screen.mode == "idle", message="confirmed model switch")
+            capture("model-switched")
+            assert app.current_selection == SessionSelection("local", "b")
+            assert_model_display_safe(screen)
+        evidence = os.environ.get("MICA_TEST_EVIDENCE_DIR")
+        if evidence:
+            target = Path(evidence)
+            target.mkdir(parents=True, exist_ok=True)
+            (target / f"model-menu-{size[0]}x{size[1]}.ansi").write_text(
+                terminal.emitted_text(), encoding="utf-8"
+            )
+            (target / f"model-menu-{size[0]}x{size[1]}.json").write_text(
                 json.dumps(frames, ensure_ascii=False, indent=2), encoding="utf-8"
             )
 

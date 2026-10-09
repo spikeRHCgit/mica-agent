@@ -41,6 +41,10 @@ from mica_agent.tui.main_buffer.sanitize import sanitize_text
 PASTE = "\n".join(f"pasted line {index}" for index in range(PASTE_LINE_THRESHOLD + 3))
 
 
+def test_control_s_is_normalized_for_local_menu_default_save() -> None:
+    assert normalize_key(KeyPress(Keys.ControlS, "\x13")) == Key("ctrl_s", "\x13")
+
+
 def make_ask(*, allow_custom: bool = True) -> AskInteraction:
     prompt = AskPrompt(
         "Pick one",

@@ -22,7 +22,7 @@
 
 ## 应用入口
 
-- `src/mica_agent/app.py`：未配置/连接装配、每轮冻结和运行持久化边界。
+- `src/mica_agent/app.py`：连接装配、模型目录/空闲切换/默认保存、每轮冻结和运行持久化边界。
 - `src/mica_agent/cli.py`：命令行覆盖、配置启动、会话选择和前端路由。
 - `src/mica_agent/__main__.py`：`python -m mica_agent` 入口。
 - `src/mica_agent/cancellation.py`：Provider、Engine、工具和交互共用的取消令牌。
@@ -127,6 +127,8 @@
 - `src/mica_agent/tui/main_buffer/markdown.py`：Markdown 清洗渲染和流式正文。
 - `src/mica_agent/tui/main_buffer/tool_views.py`：内置工具和通用工具视图。
 - `src/mica_agent/tui/main_buffer/editor.py`：草稿、光标、软换行和粘贴片段。
+- `src/mica_agent/tui/main_buffer/commands.py`：本地命令登记、匹配和输入框候选。
+- `src/mica_agent/tui/main_buffer/menus.py`：模型菜单筛选、导航、容量确认与面板排版。
 - `src/mica_agent/tui/main_buffer/interactions.py`：Ask/Permission 输入模式。
 - `src/mica_agent/tui/main_buffer/runtime.py`：单 Run 控制器和资源收口。
 - `src/mica_agent/tui/main_buffer/screen.py`：主缓冲区编排、模式机和事件投影。
@@ -134,6 +136,8 @@
 - `tests/test_tui_models.py`：终端视图模型。
 - `tests/test_tui_main_buffer_cli.py`：主缓冲区 CLI 装配。
 - `tests/test_tui_main_buffer_composer.py`：编辑器和 composer。
+- `tests/test_tui_main_buffer_commands.py`：命令匹配、候选交互和五行窗口。
+- `tests/test_tui_main_buffer_menus.py`：模型菜单输入、独立标记、配色和宽高降级。
 - `tests/test_tui_main_buffer_events.py`：事件投影。
 - `tests/test_tui_main_buffer_hierarchy.py`：内容层级。
 - `tests/test_tui_main_buffer_lifecycle.py`：生命周期。
