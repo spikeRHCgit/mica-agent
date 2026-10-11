@@ -16,6 +16,16 @@ from typing import Any
 
 import httpx
 
+from ..continuation_contracts import (
+    MAX_TURN_CONTINUATION_BYTES,
+    ChatReasoningItem,
+    ContinuationStatus,
+    ModelStepContinuation,
+    ProviderApi,
+    ReasoningDetail,
+    ReasoningDetailType,
+    continuation_size,
+)
 from ..reasoning import ReasoningEffort
 from ..tool_contracts import ToolCall, to_mutable_json
 from .base import (
@@ -45,6 +55,113 @@ DEFAULT_THINKING_LEVEL_MAP = MappingProxyType(
         ReasoningEffort.MAX: "max",
     }
 )
+
+_DETAIL_CONTENT_FIELDS = {
+    ReasoningDetailType.SUMMARY: ("summary",),
+    ReasoningDetailType.ENCRYPTED: ("data",),
+    ReasoningDetailType.TEXT: ("text", "signature"),
+}
+
+
+def _parse_reasoning_detail(value: object) -> ReasoningDetail:
+    if not isinstance(value, dict):
+        raise TypeError("reasoning detail must be an object")
+    kind = ReasoningDetailType(value.get("type"))
+    allowed = {"type", "id", "format", "index", *_DETAIL_CONTENT_FIELDS[kind]}
+    if set(value) - allowed:
+        raise ValueError("reasoning detail contains unexpected fields")
+    return ReasoningDetail(**{**value, "type": kind})
+
+
+def _encode_reasoning_detail(detail: ReasoningDetail) -> dict[str, Any]:
+    return {
+        "type": detail.type.value,
+        **{
+            name: getattr(detail, name)
+            for name in ("id", "format", "index", *_DETAIL_CONTENT_FIELDS[detail.type])
+            if getattr(detail, name) is not None
+        },
+    }
+
+
+class _ChatContinuationAccumulator:
+    """Bound replay data during streaming, independently of visible reasoning."""
+
+    def __init__(self, request: ProviderRequest, channel: str | None) -> None:
+        self.request = request
+        self.enabled = (
+            channel is not None
+            and request.provider_id is not None
+            and request.api is ProviderApi.OPENAI_COMPLETIONS
+        )
+        self.reasoning_content: str | None = None
+        self.reasoning: str | None = None
+        self.details: tuple[ReasoningDetail, ...] = ()
+        self.discarded = False
+
+    def discard(self) -> None:
+        self.discarded = True
+        self.reasoning_content = None
+        self.reasoning = None
+        self.details = ()
+
+    def record(self) -> ModelStepContinuation | None:
+        if not self.enabled:
+            return None
+        if self.discarded:
+            return ModelStepContinuation(
+                self.request.provider_id,
+                self.request.model,
+                self.request.api,
+                ContinuationStatus.UNREPLAYABLE,
+            )
+        if not (self.reasoning_content or self.reasoning or self.details):
+            return None
+        return ModelStepContinuation(
+            self.request.provider_id,
+            self.request.model,
+            self.request.api,
+            ContinuationStatus.REPLAYABLE,
+            (ChatReasoningItem(self.reasoning_content, self.reasoning, self.details),),
+        )
+
+    def add(self, parsed: dict[str, Any], channel: str | None) -> tuple[str, ...]:
+        content = parsed["reasoning_content"]
+        reasoning = parsed["reasoning"] if channel == "openrouter" else None
+        details: list[ReasoningDetail] = []
+        if channel == "openrouter" and parsed["reasoning_details"] is not None:
+            raw_details = parsed["reasoning_details"]
+            if not isinstance(raw_details, list):
+                if self.enabled:
+                    self.discard()
+            else:
+                for value in raw_details:
+                    try:
+                        detail = _parse_reasoning_detail(value)
+                    except (TypeError, ValueError):
+                        if self.enabled:
+                            self.discard()
+                        continue
+                    details.append(detail)
+        if self.enabled and not self.discarded:
+            if content is not None:
+                self.reasoning_content = (self.reasoning_content or "") + content
+            if reasoning is not None:
+                self.reasoning = (self.reasoning or "") + reasoning
+            self.details += tuple(details)
+            record = self.record()
+            if (
+                record is not None
+                and continuation_size(record) > MAX_TURN_CONTINUATION_BYTES
+            ):
+                self.discard()
+        if content is not None:
+            return (content,) if content else ()
+        if reasoning is not None:
+            return (reasoning,) if reasoning else ()
+        return tuple(
+            text for detail in details for text in (detail.summary, detail.text) if text
+        )
 
 
 def _validated_thinking_level_map(
@@ -98,6 +215,9 @@ class OpenAICompatibleProvider:
     :func:`resolve_endpoint` for the URL rules. The API key enters only the request
     headers, never ``repr``, exception messages, or events.
 
+    ``continuation_channel`` explicitly enables DeepSeek or OpenRouter replay
+    encoding. It defaults to disabled and never supplies the request's source ID.
+
     Retries: by default only ``ProviderTimeoutError`` and ``TemporaryServerError`` are
     retried, and only while the event stream has produced no text yet, up to
     ``max_retries`` times; ``RateLimitError`` is never retried automatically (that
@@ -117,6 +237,7 @@ class OpenAICompatibleProvider:
         sleep: SleepFn | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         thinking_level_map: Mapping[ReasoningEffort, str] | None = None,
+        continuation_channel: str | None = None,
     ) -> None:
         if not isinstance(api_key, str) or not api_key.strip():
             raise ValueError("api_key must be a non-empty, non-blank string")
@@ -128,6 +249,9 @@ class OpenAICompatibleProvider:
             raise ValueError("max_retries must be a non-negative integer")
         if retry_backoff < 0:
             raise ValueError("retry_backoff must be a non-negative number")
+        if continuation_channel not in (None, "deepseek", "openrouter"):
+            raise ValueError("continuation_channel is invalid")
+        self._continuation_channel = continuation_channel
         self._api_key = api_key
         self._endpoint = resolve_endpoint(base_url)
         self._max_retries = max_retries
@@ -155,6 +279,7 @@ class OpenAICompatibleProvider:
     def _build_payload(self, request: ProviderRequest) -> dict[str, Any]:
         """Convert a provider-agnostic request into a Chat Completions JSON payload."""
         messages: list[dict[str, Any]] = []
+        continuations = iter(request.continuations)
         for message in request.messages:
             item: dict[str, Any] = {
                 "role": message.role.value,
@@ -179,6 +304,36 @@ class OpenAICompatibleProvider:
                 ]
             elif message.role.value == "tool":
                 item["tool_call_id"] = message.tool_call_id
+            if message.role.value == "assistant":
+                record = next(continuations)
+                if (
+                    self._continuation_channel is not None
+                    and request.provider_id is not None
+                    and request.api is ProviderApi.OPENAI_COMPLETIONS
+                    and record is not None
+                    and record.status is ContinuationStatus.REPLAYABLE
+                    and record.provider_id == request.provider_id
+                    and record.model_id == request.model
+                    and record.api is request.api
+                ):
+                    reasoning_item = record.items[0]
+                    assert isinstance(reasoning_item, ChatReasoningItem)
+                    if self._continuation_channel == "deepseek":
+                        if (
+                            request.tools
+                            and reasoning_item.reasoning_content is not None
+                        ):
+                            item["reasoning_content"] = reasoning_item.reasoning_content
+                    else:
+                        for name in ("reasoning_content", "reasoning"):
+                            value = getattr(reasoning_item, name)
+                            if value:
+                                item[name] = value
+                        if reasoning_item.reasoning_details:
+                            item["reasoning_details"] = [
+                                _encode_reasoning_detail(detail)
+                                for detail in reasoning_item.reasoning_details
+                            ]
             messages.append(item)
 
         payload: dict[str, Any] = {
@@ -235,8 +390,7 @@ class OpenAICompatibleProvider:
             and isinstance(error, (ProviderTimeoutError, TemporaryServerError))
         )
 
-    @staticmethod
-    def _parse_chat_chunk(data: str) -> dict[str, Any] | None:
+    def _parse_chat_chunk(self, data: str) -> dict[str, Any] | None:
         """Parse one SSE chunk into text, tool-call fragments, and the finish reason."""
         try:
             obj = json.loads(data)
@@ -271,6 +425,15 @@ class OpenAICompatibleProvider:
         reasoning = delta.get("reasoning_content")
         if reasoning is not None and not isinstance(reasoning, str):
             raise MalformedResponseError("'delta.reasoning_content' must be a string")
+        alternate_reasoning = None
+        details = None
+        if self._continuation_channel == "openrouter":
+            alternate_reasoning = delta.get("reasoning")
+            if alternate_reasoning is not None and not isinstance(
+                alternate_reasoning, str
+            ):
+                raise MalformedResponseError("'delta.reasoning' must be a string")
+            details = delta.get("reasoning_details")
         content = delta.get("content")
         if content is not None and not isinstance(content, str):
             raise MalformedResponseError("'delta.content' must be a string")
@@ -325,6 +488,8 @@ class OpenAICompatibleProvider:
 
         if (
             reasoning is None
+            and alternate_reasoning is None
+            and details is None
             and content is None
             and not fragments
             and finish_reason is None
@@ -332,6 +497,8 @@ class OpenAICompatibleProvider:
             return None
         return {
             "reasoning_content": reasoning,
+            "reasoning": alternate_reasoning,
+            "reasoning_details": details,
             "content": content,
             "tool_calls": fragments,
             "finish_reason": finish_reason,
@@ -377,6 +544,7 @@ class OpenAICompatibleProvider:
         reason: str | None,
         accumulators: dict[int, dict[str, Any]],
         has_text: bool,
+        continuation: ModelStepContinuation | None = None,
     ) -> Finish:
         if accumulators:
             if reason != "tool_calls":
@@ -384,13 +552,15 @@ class OpenAICompatibleProvider:
                     "tool calls require a tool_calls finish reason"
                 )
             return Finish(
-                reason=reason, tool_calls=self._assemble_tool_calls(accumulators)
+                reason=reason,
+                tool_calls=self._assemble_tool_calls(accumulators),
+                continuation=continuation,
             )
         if reason == "tool_calls":
             raise MalformedResponseError("tool_calls finish reason requires tool calls")
-        if not has_text:
+        if not has_text and continuation is None:
             raise MalformedResponseError("completion contained no text or tool calls")
-        return Finish(reason=reason)
+        return Finish(reason=reason, continuation=continuation)
 
     async def stream(self, request: ProviderRequest) -> AsyncIterator[ProviderEvent]:
         try:
@@ -407,6 +577,7 @@ class OpenAICompatibleProvider:
         produced = False
         has_text = False
         tool_accumulators: dict[int, dict[str, Any]] = {}
+        continuation = _ChatContinuationAccumulator(request, self._continuation_channel)
         for attempt in range(self._max_retries + 1):
             established = False
             try:
@@ -434,6 +605,7 @@ class OpenAICompatibleProvider:
                                     "tool_calls" if tool_accumulators else None,
                                     tool_accumulators,
                                     has_text,
+                                    continuation.record(),
                                 )
                             except MalformedResponseError as exc:
                                 yield ProviderErrorEvent(error=exc)
@@ -447,8 +619,9 @@ class OpenAICompatibleProvider:
                             return
                         if parsed is None:
                             continue
-                        reasoning = parsed["reasoning_content"]
-                        if reasoning:
+                        for reasoning in continuation.add(
+                            parsed, self._continuation_channel
+                        ):
                             produced = True
                             yield ProviderReasoningDelta(text=reasoning)
                         content = parsed["content"]
@@ -493,7 +666,10 @@ class OpenAICompatibleProvider:
                             continue
                         try:
                             finish = self._finish_completion(
-                                finish_reason, tool_accumulators, has_text
+                                finish_reason,
+                                tool_accumulators,
+                                has_text,
+                                continuation.record(),
                             )
                         except MalformedResponseError as exc:
                             yield ProviderErrorEvent(error=exc)

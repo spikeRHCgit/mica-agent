@@ -13,13 +13,19 @@ import json
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import aclosing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .cancellation import CancellationRequested, CancellationToken
 from .checkpoint_contracts import (
     RunCheckpointProgress,
     RunCheckpointToolProgress,
     RunCheckpointToolStatus,
+)
+from .continuation_contracts import (
+    ContinuationStatus,
+    ModelStepContinuation,
+    apply_turn_size_limit,
+    check_step_association,
 )
 from .events import (
     EngineEvent,
@@ -38,7 +44,7 @@ from .events import (
     UserInputRequested,
 )
 from .interactions import InteractionKind, InteractionRequest
-from .message_sanitizer import sanitize_tool_message
+from .message_sanitizer import sanitize_step_continuation, sanitize_tool_message
 from .models import Message, MessageRole
 from .providers import (
     AuthenticationError,
@@ -66,6 +72,7 @@ from .workspace import WorkspaceIdentity
 
 RunIdFactory = Callable[[], str]
 CompletedMessagesSink = Callable[[tuple[Message, ...]], None]
+CompletedContinuationsSink = Callable[[tuple[ModelStepContinuation | None, ...]], None]
 CompletedToolPresentationsSink = Callable[[tuple[ToolPresentationSnapshot, ...]], None]
 DEFAULT_MAX_MODEL_STEPS = 8
 DEFAULT_MAX_TOOL_CALLS = 32
@@ -161,7 +168,14 @@ class AgentEngine:
         completed_messages_sink: CompletedMessagesSink | None = None,
         completed_tool_presentations_sink: CompletedToolPresentationsSink | None = None,
         progress_sink: ProgressSink | None = None,
+        completed_continuations_sink: CompletedContinuationsSink | None = None,
     ) -> AsyncIterator[EngineEvent]:
+        """Run the loop, submitting only this turn's safe continuation slots.
+
+        Completion callbacks run synchronously before the successful terminal
+        event. Interrupted progress includes finished steps, never replay data
+        for an unfinished provider stream.
+        """
         run_id = self._run_id_factory()
         seq = 0
         if completed_messages_sink is not None and not callable(
@@ -176,12 +190,29 @@ class AgentEngine:
             )
         if progress_sink is not None and not callable(progress_sink):
             raise TypeError("progress_sink must be callable or None")
+        if completed_continuations_sink is not None and not callable(
+            completed_continuations_sink
+        ):
+            raise TypeError("completed_continuations_sink must be callable or None")
         token = cancellation or CancellationToken()
         completed_tool_presentations: list[ToolPresentationSnapshot] = []
         yield RunStarted(run_id=run_id)
         seq += 1
         messages = request.messages
         completed_messages: list[Message] = []
+        history_continuations = tuple(
+            record
+            if record is not None
+            and request.provider_id is not None
+            and record.provider_id == request.provider_id
+            and record.model_id == request.model
+            and record.api is request.api
+            and record.status is ContinuationStatus.REPLAYABLE
+            else None
+            for record in request.continuations
+        )
+        completed_continuations: tuple[ModelStepContinuation | None, ...] = ()
+        turn_continuations_discarded = False
         side_effect_tool_started = False
         model_steps = 0
         tool_calls_total = 0
@@ -256,6 +287,9 @@ class AgentEngine:
                     reasoning_effort=request.reasoning_effort,
                     max_tokens=request.max_tokens,
                     thinking_level_map=request.thinking_level_map,
+                    provider_id=request.provider_id,
+                    api=request.api,
+                    continuations=history_continuations + completed_continuations,
                 )
                 async with aclosing(
                     self._provider_events(current_request, token)
@@ -299,13 +333,48 @@ class AgentEngine:
                         "provider stream ended without a terminal event",
                     )
                     return
-                if not finish.tool_calls:
-                    completed_messages.append(
-                        Message(
-                            role=MessageRole.ASSISTANT,
-                            content="".join(current_step_text),
+                original_assistant = Message(
+                    MessageRole.ASSISTANT,
+                    "".join(current_step_text),
+                    finish.tool_calls,
+                )
+                continuation = finish.continuation
+                if continuation is not None:
+                    try:
+                        if (
+                            request.provider_id is None
+                            or continuation.provider_id != request.provider_id
+                            or continuation.model_id != request.model
+                            or continuation.api is not request.api
+                        ):
+                            raise ValueError("continuation binding mismatch")
+                        safe_continuation = sanitize_step_continuation(
+                            continuation, original_assistant
                         )
+                        check_step_association(continuation, original_assistant)
+                        continuation = safe_continuation
+                    except (TypeError, ValueError):
+                        yield fail(
+                            ErrorCategory.MALFORMED,
+                            "provider produced an invalid continuation",
+                        )
+                        return
+                    if turn_continuations_discarded:
+                        continuation = replace(
+                            continuation,
+                            status=ContinuationStatus.UNREPLAYABLE,
+                            items=(),
+                        )
+                candidates = completed_continuations + (continuation,)
+                completed_continuations = apply_turn_size_limit(candidates)
+                if completed_continuations != candidates:
+                    turn_continuations_discarded = True
+                for index, step in enumerate(progress_steps):
+                    progress_steps[index] = replace(
+                        step, continuation=completed_continuations[index]
                     )
+                if not finish.tool_calls:
+                    completed_messages.append(original_assistant)
                     if completed_messages_sink is not None:
                         try:
                             completed_messages_sink(tuple(completed_messages))
@@ -336,6 +405,20 @@ class AgentEngine:
                                 ),
                             )
                             return
+                    if completed_continuations_sink is not None:
+                        try:
+                            completed_continuations_sink(completed_continuations)
+                        except Exception:  # noqa: BLE001 - safe completion boundary
+                            yield RunFailed(
+                                run_id=run_id,
+                                seq=seq,
+                                category=ErrorCategory.UNKNOWN,
+                                message=self._failure_message(
+                                    "completed continuation handling failed",
+                                    side_effect_tool_started,
+                                ),
+                            )
+                            return
                     yield RunCompleted(run_id=run_id, seq=seq)
                     return
                 if self._tool_executor is None:
@@ -346,11 +429,6 @@ class AgentEngine:
                     yield fail(ErrorCategory.LIMIT, "tool call limit reached")
                     return
                 tool_calls_total += batch_size
-                original_assistant = Message(
-                    role=MessageRole.ASSISTANT,
-                    content="".join(current_step_text),
-                    tool_calls=finish.tool_calls,
-                )
                 assistant_message = sanitize_tool_message(original_assistant)
                 messages = messages + (assistant_message,)
                 completed_messages.append(assistant_message)
@@ -369,6 +447,7 @@ class AgentEngine:
                         if assistant_message.content
                         else None,
                         tools=tuple(current_step_tools),
+                        continuation=completed_continuations[-1],
                     )
                 )
                 for current_call_index, (call, sanitized_call) in enumerate(
@@ -441,6 +520,7 @@ class AgentEngine:
                                         -1
                                     ].assistant_message,
                                     tools=tuple(current_step_tools),
+                                    continuation=progress_steps[-1].continuation,
                                 )
                                 yield ToolStarted(
                                     run_id=run_id,
@@ -508,6 +588,7 @@ class AgentEngine:
                     progress_steps[-1] = RunCheckpointProgress(
                         assistant_message=progress_steps[-1].assistant_message,
                         tools=tuple(current_step_tools),
+                        continuation=progress_steps[-1].continuation,
                     )
         except CancellationRequested:
             extra = emit_progress()

@@ -14,6 +14,15 @@ from typing import get_args
 
 import pytest
 
+from mica_agent.continuation_contracts import (
+    ChatReasoningItem,
+    ContinuationStatus,
+    ModelStepContinuation,
+    ProviderApi,
+    TextItem,
+    TextPhase,
+    ToolCallItem,
+)
 from mica_agent.models import Message, MessageRole
 from mica_agent.providers import (
     AuthenticationError,
@@ -474,3 +483,65 @@ def test_unexpected_program_error_propagates_as_exception() -> None:
 
     with pytest.raises(RuntimeError, match="programmer bug"):
         asyncio.run(consume())
+
+
+def test_request_continuation_slots_and_finish_are_compatible_and_private() -> None:
+    messages = (
+        Message(MessageRole.ASSISTANT, "first"),
+        Message(MessageRole.USER, "next"),
+        Message(MessageRole.ASSISTANT, "second"),
+    )
+    record = ModelStepContinuation(
+        "source",
+        "model",
+        ProviderApi.OPENAI_COMPLETIONS,
+        ContinuationStatus.REPLAYABLE,
+        (ChatReasoningItem("private-thought", "private-alternate", ()),),
+    )
+    assert ProviderRequest("model", messages).continuations == (None, None)
+    assert build_request().continuations == ()
+    request = ProviderRequest(
+        "model", messages, provider_id="source", continuations=(record, None)
+    )
+    assert request.continuations == (record, None)
+    assert Finish("stop", (), record).continuation is record
+    assert "private-thought" not in repr((request, Finish(continuation=record)))
+    assert "private-alternate" not in repr((request, Finish(continuation=record)))
+    assert request.api is ProviderApi.OPENAI_COMPLETIONS
+    assert ProviderRequest("model", messages).provider_id is None
+    with pytest.raises(TypeError, match="continuation"):
+        Finish(continuation={"private": "private-thought"})
+
+
+@pytest.mark.parametrize(
+    "values,error",
+    [
+        ({"provider_id": 3}, TypeError),
+        ({"provider_id": "  "}, ValueError),
+        ({"api": "openai-completions"}, TypeError),
+        ({"continuations": []}, TypeError),
+        ({"continuations": (None, None)}, ValueError),
+        ({"continuations": ({"thought": "private-thought"},)}, TypeError),
+    ],
+)
+def test_request_continuation_validation_is_safe(values, error) -> None:
+    with pytest.raises(error) as caught:
+        ProviderRequest("model", (Message(MessageRole.ASSISTANT, "text"),), **values)
+    assert "private-thought" not in str(caught.value)
+
+
+def test_request_checks_ordered_message_association() -> None:
+    record = ModelStepContinuation(
+        "source",
+        "model",
+        ProviderApi.OPENAI_RESPONSES,
+        ContinuationStatus.REPLAYABLE,
+        (TextItem(TextPhase.FINAL_ANSWER), ToolCallItem("expected")),
+    )
+    assistant = Message(
+        MessageRole.ASSISTANT, "text", (ToolCall("wrong", "lookup", {}),)
+    )
+    with pytest.raises(ValueError, match="references") as caught:
+        ProviderRequest("model", (assistant,), continuations=(record,))
+    assert "expected" not in str(caught.value)
+    assert "wrong" not in str(caught.value)

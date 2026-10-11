@@ -14,6 +14,17 @@ import httpx
 import pytest
 from sse_transport_helpers import RecordingTransport, sse_response
 
+from mica_agent.continuation_contracts import (
+    MAX_TURN_CONTINUATION_BYTES,
+    ChatReasoningItem,
+    ContinuationStatus,
+    ModelStepContinuation,
+    ProviderApi,
+    ReasoningDetail,
+    ReasoningDetailType,
+    TextItem,
+    continuation_size,
+)
 from mica_agent.models import Message, MessageRole
 from mica_agent.providers import (
     AuthenticationError,
@@ -103,6 +114,7 @@ def make_provider(
     max_retries: int = 0,
     retry_backoff: float = 1.0,
     thinking_level_map: dict[ReasoningEffort, str] | None = None,
+    continuation_channel: str | None = None,
 ) -> OpenAICompatibleProvider:
     return OpenAICompatibleProvider(
         api_key=api_key,
@@ -112,6 +124,7 @@ def make_provider(
         retry_backoff=retry_backoff,
         sleep=_noop_sleep,
         thinking_level_map=thinking_level_map,
+        continuation_channel=continuation_channel,
     )
 
 
@@ -2044,3 +2057,597 @@ def test_aclose_is_idempotent() -> None:
 
     asyncio.run(provider.aclose())
     asyncio.run(provider.aclose())  # 第二次调用不抛异常
+
+
+def _continuation_record(content="thinking", *, model="gpt-test", provider_id="source"):
+    return ModelStepContinuation(
+        provider_id,
+        model,
+        ProviderApi.OPENAI_COMPLETIONS,
+        ContinuationStatus.REPLAYABLE,
+        (ChatReasoningItem(content, None, ()),),
+    )
+
+
+def _reasoning_sse(delta, finish_reason=None):
+    return (
+        "data: "
+        + json.dumps(
+            {"choices": [{"delta": delta, "finish_reason": finish_reason}]},
+            ensure_ascii=False,
+        )
+        + "\n\n"
+    )
+
+
+@pytest.mark.parametrize("tools", [False, True])
+def test_deepseek_accumulates_and_replays_every_history_assistant(tools) -> None:
+    captured = []
+
+    def handler(request):
+        captured.append(json.loads(request.read()))
+        return _sse_response(
+            _reasoning_sse({"reasoning_content": "first "}),
+            _reasoning_sse({"reasoning_content": "思考", "content": "answer"}, "stop"),
+        )
+
+    old = _continuation_record("old reasoning")
+    recent = _continuation_record("recent reasoning")
+    spec = ToolSpec("lookup", "Lookup", {"type": "object"})
+    call = ToolCall("call-one", "lookup", {})
+    messages = (
+        Message(MessageRole.ASSISTANT, "old answer"),
+        Message(MessageRole.USER, "next"),
+        Message(MessageRole.ASSISTANT, "", (call,)),
+        Message(MessageRole.TOOL, "result", tool_call_id="call-one"),
+        Message(MessageRole.USER, "hi"),
+    )
+    request = ProviderRequest(
+        "gpt-test",
+        messages,
+        (spec,) if tools else (),
+        provider_id="source",
+        continuations=(old, recent),
+    )
+    provider = make_provider(handler, continuation_channel="deepseek")
+    events = _run_collect(provider, request)
+    assert events == [
+        ProviderReasoningDelta("first "),
+        ProviderReasoningDelta("思考"),
+        TextDelta("answer"),
+        Finish("stop", (), _continuation_record("first 思考")),
+    ]
+    expected_messages = [
+        {"role": "assistant", "content": "old answer"},
+        {"role": "user", "content": "next"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-one",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "content": "result", "tool_call_id": "call-one"},
+        {"role": "user", "content": "hi"},
+    ]
+    expected = {
+        "model": "gpt-test",
+        "messages": expected_messages,
+        "stream": True,
+        "max_tokens": 4096,
+    }
+    if tools:
+        expected_messages[0]["reasoning_content"] = "old reasoning"
+        expected_messages[2]["reasoning_content"] = "recent reasoning"
+        expected["tools"] = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "description": "Lookup",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ]
+    assert captured == [expected]
+
+
+def test_openrouter_preserves_detail_arrival_order_and_exact_replay_fields() -> None:
+    details = [
+        {
+            "type": "reasoning.text",
+            "index": 8,
+            "id": "t1",
+            "format": "fmt",
+            "text": "first",
+            "signature": "signed",
+        },
+        {
+            "type": "reasoning.text",
+            "index": 8,
+            "text": "second",
+            "signature": "more-signature",
+        },
+        {"type": "reasoning.summary", "index": 2, "summary": "", "id": "s1"},
+        {"type": "reasoning.encrypted", "index": 0, "data": "ciphertext"},
+    ]
+    captured = []
+
+    def handler(request):
+        captured.append(json.loads(request.read()))
+        return _sse_response(
+            _reasoning_sse(
+                {
+                    "reasoning_content": "shown ",
+                    "reasoning": "alternate ",
+                    "reasoning_details": details[:1],
+                }
+            ),
+            _reasoning_sse(
+                {
+                    "reasoning_content": "once",
+                    "reasoning": "also saved",
+                    "reasoning_details": details[1:],
+                }
+            ),
+            _reasoning_sse({"content": "answer"}, "stop"),
+        )
+
+    provider = make_provider(handler, continuation_channel="openrouter")
+    request = ProviderRequest(
+        "gpt-test", (Message(MessageRole.USER, "hi"),), provider_id="source"
+    )
+    expected = ModelStepContinuation(
+        "source",
+        "gpt-test",
+        ProviderApi.OPENAI_COMPLETIONS,
+        ContinuationStatus.REPLAYABLE,
+        (
+            ChatReasoningItem(
+                "shown once",
+                "alternate also saved",
+                (
+                    ReasoningDetail(
+                        ReasoningDetailType.TEXT,
+                        "t1",
+                        "fmt",
+                        8,
+                        text="first",
+                        signature="signed",
+                    ),
+                    ReasoningDetail(
+                        ReasoningDetailType.TEXT,
+                        index=8,
+                        text="second",
+                        signature="more-signature",
+                    ),
+                    ReasoningDetail(
+                        ReasoningDetailType.SUMMARY, "s1", index=2, summary=""
+                    ),
+                    ReasoningDetail(
+                        ReasoningDetailType.ENCRYPTED, index=0, data="ciphertext"
+                    ),
+                ),
+            ),
+        ),
+    )
+    events = _run_collect(provider, request)
+    assert events == [
+        ProviderReasoningDelta("shown "),
+        ProviderReasoningDelta("once"),
+        TextDelta("answer"),
+        Finish("stop", (), expected),
+    ]
+    assert "signed" not in repr(events[-1]) and "ciphertext" not in repr(events[-1])
+    replay = ProviderRequest(
+        "gpt-test",
+        (Message(MessageRole.ASSISTANT, "answer"), Message(MessageRole.USER, "again")),
+        provider_id="source",
+        continuations=(events[-1].continuation,),
+    )
+    _run_collect(provider, replay)
+    assert captured[1] == {
+        "model": "gpt-test",
+        "stream": True,
+        "max_tokens": 4096,
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "answer",
+                "reasoning_content": "shown once",
+                "reasoning": "alternate also saved",
+                "reasoning_details": details,
+            },
+            {"role": "user", "content": "again"},
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    "delta,shown",
+    [
+        ({"reasoning": "fallback"}, ["fallback"]),
+        (
+            {
+                "reasoning_content": "",
+                "reasoning": "hidden",
+                "reasoning_details": [{"type": "reasoning.text", "text": "hidden"}],
+            },
+            [],
+        ),
+        (
+            {
+                "reasoning_details": [
+                    {"type": "reasoning.summary", "summary": "summary"},
+                    {
+                        "type": "reasoning.text",
+                        "text": "plain",
+                        "signature": "signature",
+                    },
+                    {"type": "reasoning.encrypted", "data": "cipher"},
+                ]
+            },
+            ["summary", "plain"],
+        ),
+    ],
+)
+def test_openrouter_reasoning_display_uses_one_source(delta, shown) -> None:
+    provider = make_provider(
+        lambda request: _sse_response(
+            _reasoning_sse(delta), _reasoning_sse({"content": "answer"}, "stop")
+        ),
+        continuation_channel="openrouter",
+    )
+    events = _run_collect(
+        provider,
+        ProviderRequest(
+            "gpt-test", (Message(MessageRole.USER, "hi"),), provider_id="source"
+        ),
+    )
+    assert [
+        event.text for event in events if isinstance(event, ProviderReasoningDelta)
+    ] == shown
+    assert events[-1].continuation.status is ContinuationStatus.REPLAYABLE
+    if delta.get("reasoning_content") == "":
+        assert events[-1].continuation.items[0].reasoning_content == ""
+        assert events[-1].continuation.items[0].reasoning_details[0].id is None
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        {"type": "reasoning.future", "data": "private"},
+        {"type": "reasoning.text", "text": "thought", "extra": "private"},
+        {"type": "reasoning.summary", "summary": "summary", "text": None},
+        {"type": "reasoning.encrypted", "data": "bad\nopaque"},
+        {"type": "reasoning.text", "text": 123},
+        {"type": "reasoning.text", "text": "thought", "index": True},
+        {"type": "reasoning.text", "text": "thought", "id": "invalid id"},
+        "invalid",
+    ],
+)
+def test_unknown_or_unrepresentable_details_discard_step_but_keep_tool_facts(
+    detail,
+) -> None:
+    provider = make_provider(
+        lambda request: _sse_response(
+            _reasoning_sse({"reasoning_details": [detail]}),
+            _reasoning_sse(
+                {
+                    "reasoning": "later",
+                    "content": "answer",
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call-one",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": "{}"},
+                        }
+                    ],
+                },
+                "tool_calls",
+            ),
+        ),
+        continuation_channel="openrouter",
+    )
+    events = _run_collect(
+        provider,
+        ProviderRequest(
+            "gpt-test", (Message(MessageRole.USER, "hi"),), provider_id="source"
+        ),
+    )
+    finish = events[-1]
+    assert isinstance(finish, Finish)
+    assert finish.tool_calls == (ToolCall("call-one", "lookup", {}),)
+    assert finish.continuation.status is ContinuationStatus.UNREPLAYABLE
+    assert finish.continuation.items == ()
+    assert [event.text for event in events if isinstance(event, TextDelta)] == [
+        "answer"
+    ]
+    assert [
+        event.text for event in events if isinstance(event, ProviderReasoningDelta)
+    ][-1] == "later"
+
+
+@pytest.mark.parametrize("channel", ["deepseek", "openrouter"])
+@pytest.mark.parametrize("extra", [0, 1])
+@pytest.mark.parametrize("prefix", ["", '思考"\\\n'])
+def test_stream_continuation_budget_uses_wire_bytes_and_keeps_visible_stream(
+    channel, extra, prefix
+) -> None:
+    empty_overhead = continuation_size(_continuation_record(prefix + "x")) - 1
+    text = prefix + "x" * (MAX_TURN_CONTINUATION_BYTES - empty_overhead + extra)
+
+    async def body():
+        yield _reasoning_sse({"reasoning_content": text}).encode()
+        # 检查流仍在运行时专属累计已释放，而非 Finish 才裁剪。
+        accumulator = generator.ag_frame.f_locals["continuation"]
+        if extra:
+            assert accumulator.discarded
+            assert accumulator.reasoning_content is None
+            assert accumulator.details == ()
+            yield _reasoning_sse(
+                {"reasoning_content": "later", "content": "answer"}, "stop"
+            ).encode()
+        else:
+            assert (
+                continuation_size(accumulator.record()) == MAX_TURN_CONTINUATION_BYTES
+            )
+            yield _reasoning_sse({"content": "answer"}, "stop").encode()
+
+    provider = make_provider(
+        lambda request: sse_response(content=body()), continuation_channel=channel
+    )
+    request = ProviderRequest(
+        "gpt-test", (Message(MessageRole.USER, "hi"),), provider_id="source"
+    )
+    generator = provider.stream(request)
+
+    async def scenario():
+        return [event async for event in generator]
+
+    events = asyncio.run(scenario())
+    record = events[-1].continuation
+    if extra:
+        assert record.status is ContinuationStatus.UNREPLAYABLE and record.items == ()
+        assert [
+            event.text for event in events if isinstance(event, ProviderReasoningDelta)
+        ] == [text, "later"]
+    else:
+        assert continuation_size(record) == MAX_TURN_CONTINUATION_BYTES
+    assert isinstance(events[-1], Finish)
+    assert any(
+        isinstance(event, TextDelta) and event.text == "answer" for event in events
+    )
+
+
+@pytest.mark.parametrize("channel", ["deepseek", "openrouter"])
+def test_enabled_channel_pure_reasoning_finishes_only_with_known_source(
+    channel,
+) -> None:
+    provider = make_provider(
+        lambda request: _sse_response(
+            _reasoning_sse({"reasoning_content": "thought"}, "stop")
+        ),
+        continuation_channel=channel,
+    )
+    known = _run_collect(
+        provider,
+        ProviderRequest(
+            "gpt-test", (Message(MessageRole.USER, "hi"),), provider_id="source"
+        ),
+    )
+    assert known[-1] == Finish("stop", (), _continuation_record("thought"))
+    unknown = _run_collect(provider, _make_request())
+    assert isinstance(unknown[-1], ProviderErrorEvent)
+    assert not any(isinstance(event, Finish) for event in unknown)
+
+
+@pytest.mark.parametrize(
+    "binding", ["provider", "model", "api", "unreplayable", "unknown_source", "off"]
+)
+@pytest.mark.parametrize("channel", ["deepseek", "openrouter"])
+def test_chat_replay_filters_binding_and_disabled_channels(binding, channel) -> None:
+    record = _continuation_record(
+        provider_id="other" if binding == "provider" else "source",
+        model="other" if binding == "model" else "gpt-test",
+    )
+    if binding == "api":
+        record = ModelStepContinuation(
+            "source",
+            "gpt-test",
+            ProviderApi.OPENAI_RESPONSES,
+            ContinuationStatus.REPLAYABLE,
+            (TextItem(None),),
+        )
+    elif binding == "unreplayable":
+        record = ModelStepContinuation(
+            "source",
+            "gpt-test",
+            ProviderApi.OPENAI_COMPLETIONS,
+            ContinuationStatus.UNREPLAYABLE,
+        )
+    captured = []
+
+    def handler(request):
+        captured.append(json.loads(request.read()))
+        return _sse_response(
+            _reasoning_sse(
+                {"content": "answer", "reasoning_content": "thought"}, "stop"
+            )
+        )
+
+    provider = make_provider(
+        handler, continuation_channel=None if binding == "off" else channel
+    )
+    request = ProviderRequest(
+        "gpt-test",
+        (Message(MessageRole.ASSISTANT, "old"), Message(MessageRole.USER, "hi")),
+        tools=(ToolSpec("lookup", "Lookup", {"type": "object"}),),
+        provider_id=None if binding == "unknown_source" else "source",
+        continuations=(record,),
+    )
+    events = _run_collect(provider, request)
+    assert captured[0]["messages"] == [
+        {"role": "assistant", "content": "old"},
+        {"role": "user", "content": "hi"},
+    ]
+    assert isinstance(events[-1], Finish)
+    if binding in {"off", "unknown_source"}:
+        assert events[-1].continuation is None
+
+
+@pytest.mark.parametrize("ending", ["drain", "broken", "invalid_reasoning", "reject"])
+def test_continuation_does_not_hide_protocol_errors_or_trigger_retry(ending) -> None:
+    requests = []
+
+    async def body():
+        yield _reasoning_sse({"reasoning_content": "private-thought"}).encode()
+        if ending == "broken":
+            raise httpx.ReadError("private transport payload")
+        if ending == "invalid_reasoning":
+            yield _reasoning_sse({"reasoning": {"private": "payload"}}, "stop").encode()
+
+    def handler(request):
+        requests.append(request)
+        return (
+            httpx.Response(400, content=b"private-thought")
+            if ending == "reject"
+            else sse_response(content=body())
+        )
+
+    provider = make_provider(handler, continuation_channel="openrouter", max_retries=2)
+    events = _run_collect(
+        provider,
+        ProviderRequest(
+            "gpt-test", (Message(MessageRole.USER, "hi"),), provider_id="source"
+        ),
+    )
+    assert len(requests) == 1
+    assert isinstance(events[-1], ProviderErrorEvent)
+    assert not any(isinstance(event, Finish) for event in events)
+    assert "private" not in repr(events[-1])
+
+
+def test_cancelled_reasoning_stream_never_produces_finish_continuation() -> None:
+    ready = asyncio.Event()
+    response_holder = []
+
+    async def body():
+        yield _reasoning_sse({"reasoning_content": "private-thought"}).encode()
+        ready.set()
+        await asyncio.Event().wait()
+
+    def handler(request):
+        response = sse_response(content=body())
+        response_holder.append(response)
+        return response
+
+    provider = make_provider(handler, continuation_channel="openrouter")
+    events = []
+
+    async def scenario():
+        task = asyncio.create_task(
+            _collect(
+                provider,
+                ProviderRequest(
+                    "gpt-test", (Message(MessageRole.USER, "hi"),), provider_id="source"
+                ),
+                events,
+            )
+        )
+        await asyncio.wait_for(ready.wait(), 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await provider.aclose()
+
+    asyncio.run(scenario())
+    assert events == [ProviderReasoningDelta("private-thought")]
+    assert response_holder[0].is_closed
+
+
+@pytest.mark.parametrize("value", ["go", "DeepSeek", "", 1, []])
+def test_continuation_channel_validation_is_safe(value) -> None:
+    with pytest.raises(ValueError, match="continuation_channel is invalid"):
+        make_provider(lambda request: httpx.Response(200), continuation_channel=value)
+
+
+def test_openrouter_over_budget_details_release_opaque_data_and_do_not_restore() -> (
+    None
+):
+    async def body():
+        yield _reasoning_sse(
+            {
+                "reasoning_details": [
+                    {
+                        "type": "reasoning.encrypted",
+                        "data": "c" * MAX_TURN_CONTINUATION_BYTES,
+                    }
+                ]
+            }
+        ).encode()
+        accumulator = generator.ag_frame.f_locals["continuation"]
+        assert accumulator.discarded and accumulator.details == ()
+        yield _reasoning_sse(
+            {
+                "reasoning": "visible later",
+                "reasoning_details": [
+                    {"type": "reasoning.text", "text": "later detail"}
+                ],
+                "content": "answer",
+            },
+            "stop",
+        ).encode()
+
+    provider = make_provider(
+        lambda request: sse_response(content=body()), continuation_channel="openrouter"
+    )
+    generator = provider.stream(
+        ProviderRequest(
+            "gpt-test", (Message(MessageRole.USER, "hi"),), provider_id="source"
+        )
+    )
+
+    async def scenario():
+        return [event async for event in generator]
+
+    events = asyncio.run(scenario())
+    assert events == [
+        ProviderReasoningDelta("visible later"),
+        TextDelta("answer"),
+        Finish(
+            "stop",
+            (),
+            ModelStepContinuation(
+                "source",
+                "gpt-test",
+                ProviderApi.OPENAI_COMPLETIONS,
+                ContinuationStatus.UNREPLAYABLE,
+            ),
+        ),
+    ]
+
+
+@pytest.mark.parametrize("details", [{"type": "reasoning.text", "text": "private"}, 12])
+def test_openrouter_invalid_details_container_marks_step_unreplayable(details) -> None:
+    provider = make_provider(
+        lambda request: _sse_response(
+            _reasoning_sse({"reasoning_details": details}),
+            _reasoning_sse({"content": "answer"}, "stop"),
+        ),
+        continuation_channel="openrouter",
+    )
+    events = _run_collect(
+        provider,
+        ProviderRequest(
+            "gpt-test", (Message(MessageRole.USER, "hi"),), provider_id="source"
+        ),
+    )
+    assert isinstance(events[-1], Finish)
+    assert events[-1].continuation.status is ContinuationStatus.UNREPLAYABLE
+    assert events[-1].continuation.items == ()

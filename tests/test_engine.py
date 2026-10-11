@@ -18,6 +18,16 @@ from mica_agent.checkpoint_contracts import (
     RunCheckpointProgress,
     RunCheckpointToolStatus,
 )
+from mica_agent.continuation_contracts import (
+    MAX_TURN_CONTINUATION_BYTES,
+    ChatReasoningItem,
+    ContinuationStatus,
+    ModelStepContinuation,
+    ProviderApi,
+    TextItem,
+    ToolCallItem,
+    continuation_size,
+)
 from mica_agent.engine import AgentEngine, RunProgressSnapshot
 from mica_agent.events import (
     EngineEvent,
@@ -2903,3 +2913,522 @@ def test_real_bash_engine_aclose_after_first_delta_reaps_tool(
     assert completed_presentations == []
     executor.output_reporter(call_id, "bash", "late")
     assert len(observed) == 4
+
+
+def _chat_record(text="thought", *, provider_id="source", model="test-model"):
+    return ModelStepContinuation(
+        provider_id,
+        model,
+        ProviderApi.OPENAI_COMPLETIONS,
+        ContinuationStatus.REPLAYABLE,
+        (ChatReasoningItem(text, None, ()),),
+    )
+
+
+def test_continuations_grow_across_tools_and_completion_excludes_history() -> None:
+    executor, registry = _lookup_executor()
+    old = _chat_record("old thought")
+    first = _chat_record("first thought")
+    last = _chat_record("final thought")
+    calls = [ToolCall(f"call-{i}", "lookup", {"query": "value"}) for i in range(2)]
+    provider = _ScriptedProvider(
+        [
+            [Finish(tool_calls=(calls[0],), continuation=first)],
+            [Finish(tool_calls=(calls[1],))],
+            [Finish(continuation=last)],
+        ]
+    )
+    engine = AgentEngine(provider, tool_executor=executor)
+    received, messages = [], []
+    request = ProviderRequest(
+        "test-model",
+        (Message(MessageRole.ASSISTANT, "old"), Message(MessageRole.USER, "next")),
+        registry.specs(),
+        provider_id="source",
+        continuations=(old,),
+    )
+
+    async def scenario():
+        events = []
+        async for event in engine.run(
+            request,
+            completed_continuations_sink=received.append,
+            completed_messages_sink=messages.append,
+        ):
+            if isinstance(event, RunCompleted):
+                assert received == [(first, None, last)]
+            events.append(event)
+        return events
+
+    assert isinstance(asyncio.run(scenario())[-1], RunCompleted)
+    assert [r.continuations for r in provider.requests] == [
+        (old,),
+        (old, first),
+        (old, first, None),
+    ]
+    assert all(
+        r.provider_id == "source" and r.api is request.api for r in provider.requests
+    )
+    assert len([m for m in messages[0] if m.role is MessageRole.ASSISTANT]) == 3
+    assert messages[0][-1].content == ""
+
+
+@pytest.mark.parametrize("sensitive", ["arguments", "thought"])
+def test_original_message_continuation_safety_reaches_request_commit_and_cancel(
+    sensitive,
+) -> None:
+    call = ToolCall(
+        "call-safe",
+        "lookup",
+        {
+            "query": "x",
+            **({"api_key": "sk-fake-test-secret"} if sensitive == "arguments" else {}),
+        },
+    )
+    record = _chat_record(
+        "C:/private/work/file.txt" if sensitive == "thought" else "safe thought"
+    )
+    spec = ToolSpec("lookup", "Lookup", {"type": "object"})
+    observed = []
+    registry = ToolRegistry()
+
+    async def handler(request, cancellation):
+        observed.append(request.arguments)
+        return ToolResult(
+            request.call_id, request.name, ToolResultStatus.SUCCESS, "done"
+        )
+
+    registry.register(spec, handler)
+
+    async def scenario(cancel):
+        provider = _ScriptedProvider(
+            [
+                [Finish(tool_calls=(call,), continuation=record)],
+                [ProviderTextDelta("answer"), Finish()],
+            ]
+        )
+        received, messages, snapshots = [], [], []
+        token = CancellationToken()
+        engine = AgentEngine(
+            provider,
+            tool_executor=ToolExecutor(
+                registry,
+                PolicyEngine(PermissionMode.DEFAULT),
+                policy_input_factory=lambda request, spec: PolicyInput(
+                    request.name, PolicyOperation.READ, False, False
+                ),
+            ),
+        )
+        events = []
+        async for event in engine.run(
+            ProviderRequest(
+                "test-model",
+                (Message(MessageRole.USER, "hi"),),
+                (spec,),
+                provider_id="source",
+            ),
+            cancellation=token,
+            completed_continuations_sink=received.append,
+            completed_messages_sink=messages.append,
+            progress_sink=snapshots.append,
+        ):
+            events.append(event)
+            if cancel and isinstance(event, ToolStarted):
+                token.cancel()
+        if cancel:
+            assert isinstance(events[-1], RunCancelled)
+            safe = snapshots[0].progress[0].continuation
+            assert received == []
+        else:
+            assert isinstance(events[-1], RunCompleted)
+            safe = received[0][0]
+            assert provider.requests[1].continuations == (safe,)
+            assert "sk-fake-test-secret" not in repr(messages)
+        assert safe.status is ContinuationStatus.UNREPLAYABLE
+        assert safe.items == ()
+
+    asyncio.run(scenario(False))
+    asyncio.run(scenario(True))
+    if sensitive == "arguments":
+        assert observed[0]["api_key"] == "sk-fake-test-secret"
+
+
+@pytest.mark.parametrize(
+    "status", [ToolResultStatus.SUCCESS, ToolResultStatus.EXECUTION_FAILED]
+)
+def test_finished_step_continuation_survives_tool_status_and_second_stream_failure(
+    status,
+) -> None:
+    registry = ToolRegistry()
+    spec = _tool_spec()
+    record = _chat_record()
+
+    async def handler(request, cancellation):
+        return ToolResult(request.call_id, request.name, status, "result")
+
+    registry.register(spec, handler)
+    provider = _ScriptedProvider(
+        [
+            [
+                Finish(
+                    tool_calls=(ToolCall("call-one", "lookup", {"query": "x"}),),
+                    continuation=record,
+                )
+            ],
+            [
+                ProviderTextDelta("partial"),
+                ProviderErrorEvent(MalformedResponseError("interrupted")),
+            ],
+        ]
+    )
+    engine = AgentEngine(
+        provider,
+        tool_executor=ToolExecutor(
+            registry,
+            PolicyEngine(PermissionMode.DEFAULT),
+            policy_input_factory=lambda request, spec: PolicyInput(
+                request.name, PolicyOperation.READ, False, False
+            ),
+        ),
+    )
+    snapshots, received = [], []
+
+    async def scenario():
+        return [
+            event
+            async for event in engine.run(
+                ProviderRequest(
+                    "test-model",
+                    (Message(MessageRole.USER, "hi"),),
+                    (spec,),
+                    provider_id="source",
+                ),
+                progress_sink=snapshots.append,
+                completed_continuations_sink=received.append,
+            )
+        ]
+
+    assert isinstance(asyncio.run(scenario())[-1], RunFailed)
+    assert received == []
+    assert snapshots[0].progress[0].continuation == record
+    assert snapshots[0].progress[0].tools[0].status is (
+        RunCheckpointToolStatus.SUCCESS
+        if status is ToolResultStatus.SUCCESS
+        else RunCheckpointToolStatus.FAILED
+    )
+    assert snapshots[0].partial_assistant_message == Message(
+        MessageRole.ASSISTANT, "partial"
+    )
+
+
+@pytest.mark.parametrize("stop_at", [ToolPrepared, ToolStarted])
+def test_tool_cancellation_preserves_finished_continuation(stop_at) -> None:
+    registry = ToolRegistry()
+
+    async def handler(request, cancellation):
+        await cancellation.wait()
+        cancellation.raise_if_cancelled()
+
+    registry.register(_tool_spec(), handler)
+    executor = ToolExecutor(
+        registry,
+        PolicyEngine(PermissionMode.DEFAULT),
+        policy_input_factory=lambda request, spec: PolicyInput(
+            request.name, PolicyOperation.READ, False, False
+        ),
+    )
+    record = _chat_record()
+    token = CancellationToken()
+    snapshots = []
+    engine = AgentEngine(
+        _ScriptedProvider(
+            [
+                [
+                    Finish(
+                        tool_calls=(ToolCall("call-one", "lookup", {"query": "x"}),),
+                        continuation=record,
+                    )
+                ]
+            ]
+        ),
+        tool_executor=executor,
+    )
+
+    async def scenario():
+        events = []
+        async for event in engine.run(
+            ProviderRequest(
+                "test-model",
+                (Message(MessageRole.USER, "hi"),),
+                registry.specs(),
+                provider_id="source",
+            ),
+            cancellation=token,
+            progress_sink=snapshots.append,
+        ):
+            events.append(event)
+            if isinstance(event, stop_at):
+                token.cancel()
+        return events
+
+    assert isinstance(asyncio.run(scenario())[-1], RunCancelled)
+    assert snapshots[0].progress[0].continuation == record
+    assert snapshots[0].progress[0].tools[0].status is (
+        RunCheckpointToolStatus.NOT_STARTED
+        if stop_at is ToolPrepared
+        else RunCheckpointToolStatus.IN_PROGRESS
+    )
+    assert snapshots[0].partial_assistant_message is None
+
+
+@pytest.mark.parametrize("extra", [0, 1])
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_turn_continuation_budget_is_exact_sticky_and_updates_progress(
+    extra, interrupt
+) -> None:
+    executor, registry = _lookup_executor()
+    first = _chat_record("a" * 64)
+    second = _chat_record(
+        "b"
+        * (
+            MAX_TURN_CONTINUATION_BYTES
+            - continuation_size(first)
+            - continuation_size(_chat_record("" + "x"))
+            + 1
+            + extra
+        )
+    )
+    assert (
+        continuation_size(first) + continuation_size(second)
+        == MAX_TURN_CONTINUATION_BYTES + extra
+    )
+    third = _chat_record("third") if extra else None
+    provider = _ScriptedProvider(
+        [
+            [
+                Finish(
+                    tool_calls=(ToolCall("call-1", "lookup", {"query": "x"}),),
+                    continuation=first,
+                )
+            ],
+            [
+                Finish(
+                    tool_calls=(ToolCall("call-2", "lookup", {"query": "x"}),),
+                    continuation=second,
+                )
+            ],
+            [Finish(continuation=third)],
+        ]
+    )
+    engine = AgentEngine(provider, tool_executor=executor)
+    received, snapshots = [], []
+    token = CancellationToken()
+
+    async def scenario():
+        events = []
+        async for event in engine.run(
+            ProviderRequest(
+                "test-model",
+                (Message(MessageRole.USER, "hi"),),
+                registry.specs(),
+                provider_id="source",
+            ),
+            completed_continuations_sink=received.append,
+            progress_sink=snapshots.append,
+            cancellation=token,
+        ):
+            events.append(event)
+            if (
+                interrupt
+                and isinstance(event, ToolStarted)
+                and event.call_id == "call-2"
+            ):
+                token.cancel()
+        return events
+
+    assert isinstance(
+        asyncio.run(scenario())[-1], RunCancelled if interrupt else RunCompleted
+    )
+    records = (
+        tuple(step.continuation for step in snapshots[0].progress)
+        if interrupt
+        else received[0]
+    )
+    if extra:
+        assert all(
+            record.status is ContinuationStatus.UNREPLAYABLE and record.items == ()
+            for record in records
+        )
+        if not interrupt:
+            assert all(
+                record.status is ContinuationStatus.UNREPLAYABLE
+                for record in provider.requests[2].continuations
+            )
+    else:
+        assert records[:2] == (first, second)
+        if not interrupt:
+            assert provider.requests[2].continuations == (first, second)
+            assert records[2] is None
+
+
+@pytest.mark.parametrize(
+    "binding", ["provider", "model", "api", "unreplayable", "unknown_source"]
+)
+def test_engine_filters_incompatible_history_without_losing_messages(binding) -> None:
+    record = _chat_record()
+    if binding == "provider":
+        record = _chat_record(provider_id="other")
+    elif binding == "model":
+        record = _chat_record(model="other")
+    elif binding == "api":
+        record = ModelStepContinuation(
+            "source",
+            "test-model",
+            ProviderApi.OPENAI_RESPONSES,
+            ContinuationStatus.REPLAYABLE,
+            (TextItem(None),),
+        )
+    elif binding == "unreplayable":
+        record = ModelStepContinuation(
+            "source",
+            "test-model",
+            ProviderApi.OPENAI_COMPLETIONS,
+            ContinuationStatus.UNREPLAYABLE,
+        )
+    provider = _ScriptedProvider([[ProviderTextDelta("done"), Finish()]])
+    request = ProviderRequest(
+        "test-model",
+        (Message(MessageRole.ASSISTANT, "old"), Message(MessageRole.USER, "hi")),
+        provider_id=None if binding == "unknown_source" else "source",
+        continuations=(record,),
+    )
+    assert isinstance(_run_collect(AgentEngine(provider), request)[-1], RunCompleted)
+    assert provider.requests[0].continuations == (None,)
+    assert provider.requests[0].messages == request.messages
+
+
+def test_multiple_history_turns_do_not_share_current_turn_budget() -> None:
+    records = (_chat_record("a" * 600000), _chat_record("b" * 600000))
+    provider = _ScriptedProvider([[Finish(continuation=_chat_record("new"))]])
+    received = []
+    request = ProviderRequest(
+        "test-model",
+        (
+            Message(MessageRole.ASSISTANT, "first"),
+            Message(MessageRole.USER, "next"),
+            Message(MessageRole.ASSISTANT, "second"),
+            Message(MessageRole.USER, "hi"),
+        ),
+        provider_id="source",
+        continuations=records,
+    )
+
+    async def scenario():
+        return [
+            event
+            async for event in AgentEngine(provider).run(
+                request, completed_continuations_sink=received.append
+            )
+        ]
+
+    assert isinstance(asyncio.run(scenario())[-1], RunCompleted)
+    assert provider.requests[0].continuations == records
+    assert received == [(_chat_record("new"),)]
+
+
+@pytest.mark.parametrize(
+    "invalid", ["provider", "model", "api", "association", "sensitive_association"]
+)
+def test_invalid_finish_continuation_stops_before_tools(invalid) -> None:
+    executor, registry = _lookup_executor()
+    record = _chat_record(
+        provider_id="other" if invalid == "provider" else "source",
+        model="other" if invalid == "model" else "test-model",
+    )
+    api = ProviderApi.OPENAI_COMPLETIONS
+    if invalid in {"api", "association", "sensitive_association"}:
+        record = ModelStepContinuation(
+            "source",
+            "test-model",
+            ProviderApi.OPENAI_RESPONSES,
+            ContinuationStatus.REPLAYABLE,
+            (ToolCallItem("wrong-call"),),
+        )
+        if invalid in {"association", "sensitive_association"}:
+            api = ProviderApi.OPENAI_RESPONSES
+    provider = _ScriptedProvider(
+        [
+            [
+                Finish(
+                    tool_calls=(
+                        ToolCall(
+                            "real-call",
+                            "lookup",
+                            {
+                                "query": "x",
+                                **(
+                                    {"api_key": "sk-fake-test-secret"}
+                                    if invalid == "sensitive_association"
+                                    else {}
+                                ),
+                            },
+                        ),
+                    ),
+                    continuation=record,
+                )
+            ]
+        ]
+    )
+    events = _run_collect(
+        AgentEngine(provider, tool_executor=executor),
+        ProviderRequest(
+            "test-model",
+            (Message(MessageRole.USER, "hi"),),
+            registry.specs(),
+            provider_id="source",
+            api=api,
+        ),
+    )
+    assert isinstance(events[-1], RunFailed)
+    assert events[-1].category is ErrorCategory.MALFORMED
+    assert events[-1].message == "provider produced an invalid continuation"
+    assert not any(isinstance(event, (ToolPrepared, ToolStarted)) for event in events)
+
+
+def test_continuation_sink_failure_has_one_safe_terminal_and_validates_callable() -> (
+    None
+):
+    record = _chat_record("private-thought")
+    request = ProviderRequest(
+        "test-model", (Message(MessageRole.USER, "hi"),), provider_id="source"
+    )
+    engine = AgentEngine(_ScriptedProvider([[Finish(continuation=record)]]))
+
+    def fail(records):
+        assert records == (record,)
+        raise RuntimeError("private-thought signature encrypted")
+
+    async def scenario():
+        return [
+            event
+            async for event in engine.run(request, completed_continuations_sink=fail)
+        ]
+
+    events = asyncio.run(scenario())
+    assert (
+        sum(
+            isinstance(event, (RunCompleted, RunFailed, RunCancelled))
+            for event in events
+        )
+        == 1
+    )
+    assert events[-1].message == "completed continuation handling failed"
+    assert "private-thought" not in repr(events)
+
+    async def invalid():
+        return [
+            event async for event in engine.run(request, completed_continuations_sink=1)
+        ]
+
+    with pytest.raises(TypeError, match="callable"):
+        asyncio.run(invalid())

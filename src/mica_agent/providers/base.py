@@ -8,11 +8,16 @@ from __future__ import annotations
 
 import re
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Protocol, runtime_checkable
 
-from ..models import Message
+from ..continuation_contracts import (
+    ModelStepContinuation,
+    ProviderApi,
+    check_step_association,
+)
+from ..models import Message, MessageRole
 from ..reasoning import ReasoningEffort
 from ..tool_contracts import ToolCall, ToolSpec
 
@@ -26,6 +31,10 @@ class ProviderRequest:
     are used so that neither the provider nor the caller can mutate the message
     history or the tool snapshot after construction. Connection details (URL, key,
     ...) belong to provider assembly, not to per-request data.
+
+    Continuation slots follow every assistant message, including input history;
+    an empty tuple supplies empty slots. ``provider_id`` and ``api`` bind replay
+    to the explicitly selected source; an unknown source disables private replay.
     """
 
     model: str
@@ -34,6 +43,11 @@ class ProviderRequest:
     reasoning_effort: ReasoningEffort = ReasoningEffort.OFF
     max_tokens: int | None = None
     thinking_level_map: Mapping[ReasoningEffort, str] | None = None
+    provider_id: str | None = None
+    api: ProviderApi = ProviderApi.OPENAI_COMPLETIONS
+    continuations: tuple[ModelStepContinuation | None, ...] = field(
+        default=(), repr=False
+    )
 
     def __post_init__(self) -> None:
         if self.max_tokens is not None and (
@@ -72,6 +86,29 @@ class ProviderRequest:
             raise TypeError("every item in tools must be a ToolSpec")
         if not isinstance(self.reasoning_effort, ReasoningEffort):
             raise TypeError("reasoning_effort must be a ReasoningEffort")
+        if self.provider_id is not None:
+            if not isinstance(self.provider_id, str):
+                raise TypeError("provider_id must be a str or None")
+            if not self.provider_id.strip():
+                raise ValueError("provider_id must be non-empty and non-blank")
+        if not isinstance(self.api, ProviderApi):
+            raise TypeError("api must be a ProviderApi")
+        if not isinstance(self.continuations, tuple):
+            raise TypeError("continuations must be a tuple")
+        assistants = tuple(
+            message
+            for message in self.messages
+            if message.role is MessageRole.ASSISTANT
+        )
+        if not self.continuations:
+            object.__setattr__(self, "continuations", (None,) * len(assistants))
+        if len(self.continuations) != len(assistants):
+            raise ValueError("continuations must match assistant message count")
+        for record, assistant in zip(self.continuations, assistants, strict=True):
+            if record is not None:
+                if not isinstance(record, ModelStepContinuation):
+                    raise TypeError("continuations contain an invalid item type")
+                check_step_association(record, assistant)
 
 
 _SENSITIVE_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -170,16 +207,23 @@ class Finish:
     ``reason`` is the provider finish reason (for example ``stop``); the default
     ``None`` means no specific reason. Complete tool calls are exposed through
     ``tool_calls`` only at finish and never contain provider-private fragments.
+    ``continuation`` is private replay data; Engine validates its binding and
+    association against the complete original assistant message before submission.
     """
 
     reason: str | None = None
     tool_calls: tuple[ToolCall, ...] = ()
+    continuation: ModelStepContinuation | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.tool_calls, tuple):
             raise TypeError("tool_calls must be a tuple")
         if not all(isinstance(call, ToolCall) for call in self.tool_calls):
             raise TypeError("every item in tool_calls must be a ToolCall")
+        if self.continuation is not None and not isinstance(
+            self.continuation, ModelStepContinuation
+        ):
+            raise TypeError("continuation must be a ModelStepContinuation or None")
 
 
 @dataclass(frozen=True, slots=True)
