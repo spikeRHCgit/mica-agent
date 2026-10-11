@@ -5,8 +5,16 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
+from dataclasses import replace
 from itertools import chain
 
+from .continuation_contracts import (
+    ChatReasoningItem,
+    ContinuationStatus,
+    MessagesThinkingItem,
+    ModelStepContinuation,
+    ResponsesReasoningItem,
+)
 from .models import Message, MessageRole
 from .tool_contracts import ToolCall, to_mutable_json
 
@@ -225,4 +233,43 @@ def sanitize_tool_message(message: Message) -> Message:
     raise ValueError("message must be tool-related")
 
 
-__all__ = ["REDACTED", "sanitize_presentation_text", "sanitize_tool_message"]
+def sanitize_step_continuation(
+    record: ModelStepContinuation, assistant_message: Message
+) -> ModelStepContinuation:
+    """Invalidate replay when the original tool message or plaintext needs sanitizing."""
+    if not isinstance(record, ModelStepContinuation):
+        raise TypeError("record must be a ModelStepContinuation")
+    if record.status is ContinuationStatus.UNREPLAYABLE:
+        return record
+    if not isinstance(assistant_message, Message):
+        raise TypeError("assistant_message must be a Message")
+    if assistant_message.tool_calls and (
+        sanitize_tool_message(assistant_message) != assistant_message
+    ):
+        return replace(record, status=ContinuationStatus.UNREPLAYABLE, items=())
+    for item in record.items:
+        plaintext: tuple[str | None, ...] = ()
+        if isinstance(item, ResponsesReasoningItem):
+            plaintext = item.summary
+        elif isinstance(item, MessagesThinkingItem):
+            plaintext = (item.thinking,)
+        elif isinstance(item, ChatReasoningItem):
+            plaintext = (item.reasoning_content, item.reasoning) + tuple(
+                value
+                for detail in item.reasoning_details
+                for value in (detail.summary, detail.text)
+            )
+        if any(
+            value is not None and sanitize_presentation_text(value) != value
+            for value in plaintext
+        ):
+            return replace(record, status=ContinuationStatus.UNREPLAYABLE, items=())
+    return record
+
+
+__all__ = [
+    "REDACTED",
+    "sanitize_presentation_text",
+    "sanitize_step_continuation",
+    "sanitize_tool_message",
+]

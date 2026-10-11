@@ -54,6 +54,7 @@
 - `src/mica_agent/tool_contracts.py`：工具定义、调用、请求、结果和状态。
 - `src/mica_agent/checkpoint_contracts.py`：中断运行的进度检查点。
 - `src/mica_agent/session_contracts.py`：会话元数据、轮次和 JSON wire 契约。
+- `src/mica_agent/continuation_contracts.py`：模型步骤续接项、严格 wire、关联校验与单轮体量上限。
 - `src/mica_agent/schema_validation.py`：ToolSpec Schema 和参数校验。
 - `src/mica_agent/message_sanitizer.py`：工具消息、展示和诊断的敏感信息清洗。
 - `tests/test_events.py`：事件构造和顺序契约。
@@ -62,6 +63,7 @@
 - `tests/test_reasoning_integration.py`：思考事件跨模块集成。
 - `tests/test_tool_contracts.py`：工具数据契约。
 - `tests/test_session_contracts.py`：会话 wire 契约。
+- `tests/test_continuation_contracts.py`：续接 wire、关联、体量与清洗回放判定契约。
 - `tests/test_schema_validation.py`：Schema 校验。
 - `tests/test_system_prompt.py`：提示词装配和清洗边界。
 
