@@ -110,7 +110,7 @@
 
 | 接口 | 要求 |
 |---|---|
-| `openai-completions` | 保留已验收行为；合并工具参数碎片，处理独立 reasoning 字段；渠道明确要求回传的续接数据在本项卡片中核实后接入；不依据正文标签猜思考 |
+| `openai-completions` | 保留已验收行为；合并工具参数碎片，处理独立 reasoning 字段；回传 DeepSeek 的 `reasoning_content`，解析并回传 OpenRouter 的 `reasoning`/`reasoning_details`（D-027）；OpenCode Go 的 Completions 模型暂不发送续接；不依据正文标签猜思考 |
 | `openai-responses` | 转换 input items，关联 function call 和 output，保留必要的 phase 与受支持的 reasoning items；failed、incomplete、流结束缺少正常终态不冒充 Finish |
 | `anthropic-messages` | 分离 system 和 messages，转换 tool_use/tool_result，完整组装 block 和 JSON 参数，处理 thinking/signature、输出上限（Messages 必须发送输出预算）和工具往返 |
 
@@ -118,15 +118,27 @@
 - 能力按手工声明、明确官方信息、默认值依次采用；未知上下文 200000 tokens，默认文本输入、不支持思考；图片能力只记录不实现；
 - `reasoning` 缺失或 false 时只允许 `off`，不发送思考强度参数；为 true 且 `thinkingLevelMap` 缺失或为空时用适配器经过测试的默认档位映射；非空时只展示明确列出的档位。
 
-**续接数据**：
+**续接数据**（D-027）：
 - 专属续接记录有明确字段、长度上限、来源绑定和校验，不保存 SDK 对象、整个原始响应或任意字典；绑定供应商 + 模型 + 接口 + 模型步骤，不能因接口名相同认定兼容；
-- Engine 在同轮工具往返中携带；App/SessionService 在安全边界提交；TUI 只使用允许展示的思考文字；
+- 每个模型步骤一条记录，按接口只存白名单字段：
+
+| 接口 | 白名单 |
+|---|---|
+| `openai-responses` | reasoning item 的 `id`、`summary`、`encrypted_content`；assistant message 的 `phase` |
+| `anthropic-messages` | thinking 的 `thinking`、`signature`；redacted_thinking 的 `data` |
+| `openai-completions` | DeepSeek 的 `reasoning_content`；OpenRouter 的 `reasoning`、`reasoning_details` |
+
+- 出现未识别的项类型或字段时，该步标为不可回放，只保留通用历史；
+- 续接随每轮持久化到会话（DeepSeek 带 tools 时要求回传此前所有轮次的思考）；每轮续接合计不超过 1 MiB，超出时丢弃该轮续接并标为不可回放，会话照常保存；
+- 回放条件：供应商 ID、模型 ID、接口 ID 都与保存时一致；不按账号绑定；
+- Engine 在同轮工具往返中携带，并按回放条件携带此前轮次的续接；App/SessionService 在安全边界提交；TUI 只使用允许展示的思考文字；
 - 活跃请求所需的原始协议内容只留在有界运行上下文，不进日志、repr 或普通持久化；签名或加密字段不能正则替换后仍声称有效；保存候选通过既有敏感边界且关联内容未被清洗改变，才可标记可回放，否则明确不可回放、只存清洗后的通用事实；不为签名绕过凭据、路径、工具参数清洗；
 - 纯思考、无正文的模型步骤也能保存续接。
 
 **跨接口与恢复**：
 - 兼容的原连接继续时完整回传协议要求的数据；跨模型、供应商或接口时过滤不兼容续接，重编码普通历史与真实工具事实，不承诺继承内部思考；
 - 不能合法转换的旧工具/思考组合用明确的 Mica 历史工作记录表示，保留实际结果，不伪造目标签名、思考或成功的工具结果；切回原连接时重新检查绑定，不保证旧签名在混合历史中仍有效；
+- 不使用 Messages 的 beta 选项 `prefix_mismatch_behavior: "drop_block"`；服务端以签名或绑定无效拒绝时报告真实错误，不自动剥离续接后重试；
 - 工具调用与结果在目标请求中一一关联；ID 形式不同时只建请求内映射，不改保存的调用身份；
 - 系统指引与历史分开转换；工具输出和历史正文不得提升为 system/developer 指令；
 - 中断检查点保留用户指令、已完成结果、部分正文和真实状态；跨接口恢复不自动执行旧工具，也不为未完成工具补结果；
@@ -162,8 +174,17 @@
 **注意事项**：
 - 不改写已验收的 Chat Completions 适配器的既有行为，新适配器独立实现；
 - 续接数据不改变 `Message`/`ToolCall` 的公共 API；
-- 精确白名单、关联顺序和失败降级先过设计审查再编码；
-- 跨接口兼容测试覆盖 completions、responses、messages 两两方向。
+- 白名单、保存范围、上限和回放条件已由 D-027 确定；v6 精确 wire 形状和关联顺序在第一张卡派发前过设计审查；
+- 跨接口兼容测试覆盖 completions、responses、messages 两两方向；
+- OpenCode Go 的自有 User-Agent 和会话头归 C1。
+
+**拆卡**（按顺序派发，共享契约不并行）：
+1. 续接契约、v6 格式和清洗判定（`continuation_contracts.py`、`message_sanitizer.py`）；
+2. JSONL v6 读写升级、TurnEntry 和检查点的续接字段、SessionService 返回续接；
+3. Provider 协议（`ProviderRequest`/`Finish`）、Engine 携带续接、Chat Completions 续接；
+4. Responses 适配器；
+5. Messages 适配器；
+6. 应用装配、续接提交、跨接口过滤；通过后用户做真实验收。
 
 ---
 
@@ -313,7 +334,7 @@
 
 ## 数据格式变更
 
-- 会话 JSONL 升级到 v6，新增模型步骤续接记录；v1～v5 只读兼容，首次业务写入锁内升级；精确形状在 B 的设计审查中确定；
+- 会话 JSONL 升级到 v6，新增模型步骤续接记录（白名单与上限见 D-027）；v1～v5 只读兼容，首次业务写入锁内升级；精确形状在 B 第一张卡派发前的设计审查中确定；
 - `models.json`、`auth.json` 开始由 Mica 写入（A1 只读），字段沿用 A1 已落地的格式；OAuth 记录的新增字段在 C2 的设计审查中确定。
 
 ## 测试要求

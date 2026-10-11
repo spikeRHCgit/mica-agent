@@ -209,3 +209,18 @@
 - 决定：界面文案尽量统一英文；T-025 新增文案立即采用英文，既有界面另行整理。模型菜单以蓝色名称、对勾和 `Current` 区分当前模型，其他模型名称灰色；`Default` 独立文字标记，导航位置单独使用 `›`；筛选行常驻，不显示容量列。用户批准其余菜单方案。`docs/tui_design.md` 后续按主题拆入 `docs/tui-design/`，当前优先完成 T-025 定稿和派发。
 - 理由：用户希望界面语言和视觉保持一致，并认为现有 TUI 规格过于膨胀；本轮先落实施工所需的具体呈现。
 - 影响：视觉规则写入 `docs/tui_design.md` §13.1，T-025 补充布局示意、英文文案和颜色断言；既有文案统一与文档拆分记入速记本，另行安排。
+
+## D-027 · 2026-10-11 · B 的续接按接口白名单保存、随会话持久化、按连接绑定回放
+
+- 背景：Phase 6 · T-026
+  调研确认：DeepSeek 带 tools 时要回传此前所有轮次的 `reasoning_content`；Messages 的签名绑定模型、账号和请求前缀；现有 Chat Completions 适配器只展示思考、不回传。B 编码前需要定续接的记录粒度、保存范围、回放条件，以及 Chat Completions 续接是否在 B 内接入。
+- 决定：
+  - 记录粒度：每个模型步骤一条续接记录，按接口类型只保存白名单字段。Responses 保存 reasoning item 的 `id`、`summary`、`encrypted_content` 和 assistant message 的 `phase`；Messages 保存 thinking 的 `thinking`、`signature` 和 redacted_thinking 的 `data`；Chat Completions 保存 DeepSeek 的 `reasoning_content`、OpenRouter 的 `reasoning`/`reasoning_details`。出现未识别的项类型或字段时，该步标为不可回放，只保留通用历史。不保存完整原始输出项。
+  - 保存范围与上限：续接随每轮持久化到会话，不只在当前 Run 内保留。每轮续接合计不超过 1 MiB，超出时丢弃该轮续接并标为不可回放，会话照常保存。
+  - 回放条件：供应商 ID、模型 ID、接口 ID 三者都与保存时一致才回放，否则过滤。不按账号绑定。不使用 Messages 的 beta 选项 `prefix_mismatch_behavior: "drop_block"`；服务端仍以签名或绑定无效拒绝时报告真实错误，不自动剥离续接后重试。
+  - Chat Completions：B 内接入 DeepSeek `reasoning_content` 的回传，以及 OpenRouter `reasoning`/`reasoning_details` 的解析和回传。OpenCode Go 走 Chat Completions 的模型，官方未说明续接字段，暂不发送。Go 的自有 User-Agent 和会话头仍归 C1。
+- 理由：用户选了推荐方案。白名单符合计划「不保存原始响应或任意字典」的边界，体量和清洗规则可控；DeepSeek 的全轮次回传要求决定了续接必须进会话；API Key 连接拿不到账号身份，账号失配时服务端按官方文档丢弃块而请求成功；自动剥离重试会掩盖真实协议错误；计划本就要求渠道明确要求的回传在 B 内接入。1 MiB 是 master 的估计值，官方未给密文和签名的体量上限。
+- 影响：
+  - `docs/phase6_plan.md` B 的「续接数据」「跨接口与恢复」「注意事项」写入以上规则；v6 精确 wire 形状和关联顺序仍在 B 第一张卡的设计审查中确定；
+  - B 按六张卡顺序派发：契约与清洗判定、JSONL v6 与会话服务、Provider 协议与 Engine 及 Chat Completions 续接、Responses 适配器、Messages 适配器、应用装配与跨接口过滤；
+  - STATUS 当前主线更新。
