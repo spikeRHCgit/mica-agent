@@ -7,7 +7,7 @@ import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields
 from enum import Enum
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 from .models import Message, MessageRole
 
@@ -65,7 +65,9 @@ def _require_opaque(value: object, name: str) -> None:
         raise ValueError(f"{name} must be non-empty and without control characters")
 
 
-def _freeze_sequence(value: object, name: str, item_type: type | tuple[type, ...]):
+def _freeze_sequence(
+    value: object, name: str, item_type: type | tuple[type, ...]
+) -> tuple[Any, ...]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         raise TypeError(f"{name} must be a sequence")
     result = tuple(value)

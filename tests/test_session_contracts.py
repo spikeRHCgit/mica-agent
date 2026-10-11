@@ -3,11 +3,24 @@
 from __future__ import annotations
 
 import json
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
+from mica_agent.continuation_contracts import (
+    MAX_TURN_CONTINUATION_BYTES,
+    ContinuationStatus,
+    MessagesRedactedThinkingItem,
+    MessagesThinkingItem,
+    ModelStepContinuation,
+    ProviderApi,
+    ResponsesReasoningItem,
+    TextItem,
+    ToolCallItem,
+    continuation_size,
+    serialize_continuation,
+)
 from mica_agent.message_sanitizer import (
     sanitize_presentation_text,
     sanitize_tool_message,
@@ -65,7 +78,7 @@ def test_session_meta_carries_validated_session_identity() -> None:
     )
 
     assert meta.session_id == "session-1"
-    assert meta.format_version == 5
+    assert meta.format_version == 6
     assert meta.workspace_id == "workspace-1"
     assert meta.workspace_path == r"C:\work\mica"
     assert meta.title == "Mica session"
@@ -89,7 +102,7 @@ def test_session_meta_rejects_non_integer_format_versions(version: object) -> No
         make_session_meta(format_version=version)
 
 
-@pytest.mark.parametrize("version", [0, 6, -1])
+@pytest.mark.parametrize("version", [0, 7, -1])
 def test_session_meta_rejects_unsupported_format_versions(version: int) -> None:
     with pytest.raises(ValueError, match="format_version"):
         make_session_meta(format_version=version)
@@ -198,7 +211,7 @@ def test_v4_tool_turn_keeps_presentations_separate_from_context_messages() -> No
     wire = serialize_session_record(turn)
     restored = deserialize_session_record(wire)
 
-    assert wire["format_version"] == 5
+    assert wire["format_version"] == 6
     assert wire["tool_presentations"] == [
         {
             "call_id": "call-1",
@@ -487,7 +500,7 @@ def test_session_meta_serializes_to_an_explicit_canonical_record() -> None:
 
     assert record == {
         "record_type": "session_meta",
-        "format_version": 5,
+        "format_version": 6,
         "session_id": "session-1",
         "workspace_id": "workspace-1",
         "workspace_path": r"C:\work\mica",
@@ -504,7 +517,7 @@ def test_turn_entry_serializes_to_an_explicit_canonical_record() -> None:
 
     assert record == {
         "record_type": "turn",
-        "format_version": 5,
+        "format_version": 6,
         "turn_id": "turn-1",
         "run_id": "run-1",
         "messages": [
@@ -512,6 +525,7 @@ def test_turn_entry_serializes_to_an_explicit_canonical_record() -> None:
             {"role": "assistant", "content": "hi"},
         ],
         "tool_presentations": [],
+        "continuations": [None],
         "completed_at": "2026-08-21T03:04:05.123456+00:00",
     }
     assert SessionRecordType.TURN.value == "turn"
@@ -542,7 +556,7 @@ def test_turn_record_round_trips_to_a_strong_type() -> None:
         serialize_session_record(make_turn_entry()),
     ],
 )
-@pytest.mark.parametrize("version", [0, 6, -1])
+@pytest.mark.parametrize("version", [0, 7, -1])
 def test_deserializer_rejects_unknown_versions(
     record: dict[str, object], version: int
 ) -> None:
@@ -846,11 +860,11 @@ def test_tool_result_sanitizer_preserves_url_and_redacts_file_path() -> None:
     wire = serialize_session_record(checkpoint)
     restored = deserialize_session_record(wire)
 
-    assert CURRENT_SESSION_FORMAT_VERSION == 5
+    assert CURRENT_SESSION_FORMAT_VERSION == 6
     assert SessionRecordType.RUN_CHECKPOINT.value == "run_checkpoint"
     assert wire == {
         "record_type": "run_checkpoint",
-        "format_version": 5,
+        "format_version": 6,
         "checkpoint_id": "checkpoint-1",
         "run_id": "run-checkpoint",
         "kind": "cancelled",
@@ -858,6 +872,7 @@ def test_tool_result_sanitizer_preserves_url_and_redacts_file_path() -> None:
         "progress": [
             {
                 "assistant_message": {"role": "assistant", "content": "checking"},
+                "continuation": None,
                 "tools": [
                     {
                         "call": {
@@ -1094,3 +1109,369 @@ def test_v5_selection_roundtrip_and_legacy_or_partial_fields_rejected():
             deserialize_session_record(partial)
     plain = serialize_session_record(make_session_meta())
     assert "provider_id" not in plain and "model_id" not in plain
+
+
+_CONTINUATION_PRIVATE = ("private-thinking", "private-signature", "private-cipher")
+
+
+def _messages_continuation(
+    call_ids: tuple[str, ...] = (),
+    *,
+    content: bool = True,
+    thinking: str = "private-thinking",
+) -> ModelStepContinuation:
+    return ModelStepContinuation(
+        "private-provider",
+        "private-model",
+        ProviderApi.ANTHROPIC_MESSAGES,
+        ContinuationStatus.REPLAYABLE,
+        (
+            MessagesThinkingItem(thinking, _CONTINUATION_PRIVATE[1]),
+            MessagesRedactedThinkingItem(_CONTINUATION_PRIVATE[2]),
+            *((TextItem(None),) if content else ()),
+            *(ToolCallItem(call_id) for call_id in call_ids),
+        ),
+    )
+
+
+def _turn_with_continuation() -> TurnEntry:
+    calls = (ToolCall("a", "read", {}), ToolCall("b", "read", {}))
+    return make_turn_entry(
+        intermediate_messages=(
+            Message(MessageRole.ASSISTANT, "checking", calls),
+            Message(MessageRole.TOOL, "a result", tool_call_id="a"),
+            Message(MessageRole.TOOL, "b result", tool_call_id="b"),
+        ),
+        continuations=(_messages_continuation(("a", "b")), None),
+    )
+
+
+def _progress_with_continuation() -> RunCheckpointProgress:
+    return RunCheckpointProgress(
+        Message(MessageRole.ASSISTANT, "checking"),
+        tuple(
+            RunCheckpointToolProgress(
+                ToolCall(call_id, "read", {}), RunCheckpointToolStatus.NOT_STARTED
+            )
+            for call_id in ("a", "b")
+        ),
+        _messages_continuation(("a", "b")),
+    )
+
+
+def _checkpoint_with_progress(
+    *progress: RunCheckpointProgress,
+) -> RunCheckpoint:
+    return RunCheckpoint(
+        "continuation-checkpoint",
+        "continuation-run",
+        RunCheckpointKind.CANCELLED,
+        Message(MessageRole.USER, "continue"),
+        UTC_NOW,
+        progress,
+    )
+
+
+def _assert_no_continuation_leak(error: Exception) -> None:
+    for private in _CONTINUATION_PRIVATE:
+        assert private not in str(error)
+        assert private not in repr(error)
+
+
+def test_continuation_slots_follow_assistant_order_and_are_hidden_in_repr() -> None:
+    turn = _turn_with_continuation()
+    progress = _progress_with_continuation()
+    checkpoint = _checkpoint_with_progress(progress)
+    assert replace(turn, continuations=()).continuations == (None, None)
+    assert make_turn_entry().continuations == (None,)
+    assert turn.continuations[0] == progress.continuation
+    for record in (turn, checkpoint):
+        assert deserialize_session_record(serialize_session_record(record)) == record
+    for record in (turn, progress, checkpoint):
+        for private in (*_CONTINUATION_PRIVATE, "private-provider", "private-model"):
+            assert private not in repr(record)
+
+
+@pytest.mark.parametrize("target", ["turn", "checkpoint"])
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "missing",
+        "wrong_type",
+        "unknown_item",
+        "extra_item_field",
+        "wrong_order",
+        "missing_text",
+        "oversize",
+    ],
+)
+def test_v6_reader_rejects_invalid_continuations_without_leaking(
+    target: str, fault: str
+) -> None:
+    record = serialize_session_record(
+        _turn_with_continuation()
+        if target == "turn"
+        else _checkpoint_with_progress(_progress_with_continuation())
+    )
+    owner = record if target == "turn" else record["progress"][0]
+    key = "continuations" if target == "turn" else "continuation"
+    continuation = owner[key][0] if target == "turn" else owner[key]
+    if fault == "missing":
+        del owner[key]
+    elif fault == "wrong_type":
+        owner[key] = "private-thinking"
+    elif fault == "unknown_item":
+        continuation["items"][0]["type"] = "private-thinking"
+    elif fault == "extra_item_field":
+        continuation["items"][0]["extra"] = "private-cipher"
+    elif fault == "wrong_order":
+        continuation["items"][-2:] = list(reversed(continuation["items"][-2:]))
+    elif fault == "missing_text":
+        continuation["items"] = [
+            item for item in continuation["items"] if item["type"] != "text"
+        ]
+    else:
+        continuation["items"][0]["thinking"] += "x" * MAX_TURN_CONTINUATION_BYTES
+    with pytest.raises(SessionFormatError) as caught:
+        deserialize_session_record(record)
+    _assert_no_continuation_leak(caught.value)
+
+
+@pytest.mark.parametrize("values", [[], [None], [None, None, None], {}, None])
+def test_v6_reader_rejects_turn_slot_count_and_container_type(values: object) -> None:
+    record = serialize_session_record(_turn_with_continuation())
+    record["continuations"] = values
+    with pytest.raises(SessionFormatError) as caught:
+        deserialize_session_record(record)
+    _assert_no_continuation_leak(caught.value)
+
+
+@pytest.mark.parametrize("version", [3, 4, 5])
+def test_legacy_turn_reader_keeps_exact_fields_and_empty_continuations(
+    version: int,
+) -> None:
+    record = _v3_tool_record()
+    record["format_version"] = version
+    turn = deserialize_session_record(record)
+    assert turn.continuations == (None, None)
+    record["continuations"] = [serialize_continuation(_messages_continuation()), None]
+    with pytest.raises(SessionFormatError, match="unexpected fields") as caught:
+        deserialize_session_record(record)
+    _assert_no_continuation_leak(caught.value)
+
+
+@pytest.mark.parametrize("version", [4, 5])
+def test_legacy_checkpoint_reader_rejects_continuation_even_when_null(
+    version: int,
+) -> None:
+    record = {
+        "record_type": "run_checkpoint",
+        "format_version": version,
+        "checkpoint_id": "old-checkpoint",
+        "run_id": "old-run",
+        "kind": "cancelled",
+        "user_message": {"role": "user", "content": "continue"},
+        "progress": [{"assistant_message": None, "tools": []}],
+        "partial_assistant_message": None,
+        "recorded_at": "2026-08-21T03:04:05.123456+00:00",
+    }
+    assert deserialize_session_record(record).progress[0].continuation is None
+    for value in (None, serialize_continuation(_messages_continuation())):
+        record["progress"][0]["continuation"] = value
+        with pytest.raises(SessionFormatError, match="unexpected fields") as caught:
+            deserialize_session_record(record)
+        _assert_no_continuation_leak(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("records", "error"),
+    [
+        ([], ValueError),
+        ([None, None], ValueError),
+        ((None,), ValueError),
+        ((None, None, None), ValueError),
+        (("private-thinking", None), TypeError),
+    ],
+)
+def test_turn_construction_rejects_invalid_continuation_slots(
+    records: object, error: type[Exception]
+) -> None:
+    with pytest.raises(error) as caught:
+        replace(_turn_with_continuation(), continuations=records)
+    _assert_no_continuation_leak(caught.value)
+
+
+def test_checkpoint_progress_rejects_wrong_continuation_type() -> None:
+    with pytest.raises(TypeError) as caught:
+        replace(_progress_with_continuation(), continuation="private-thinking")
+    _assert_no_continuation_leak(caught.value)
+
+
+@pytest.mark.parametrize("target", ["turn", "checkpoint"])
+@pytest.mark.parametrize("fault", ["order", "text"])
+def test_construction_rejects_mismatched_step_association(
+    target: str, fault: str
+) -> None:
+    record = _messages_continuation(
+        ("b", "a") if fault == "order" else ("a", "b"),
+        content=fault != "text",
+    )
+    with pytest.raises(ValueError) as caught:
+        if target == "turn":
+            replace(_turn_with_continuation(), continuations=(record, None))
+        else:
+            replace(_progress_with_continuation(), continuation=record)
+    _assert_no_continuation_leak(caught.value)
+
+
+@pytest.mark.parametrize("target", ["turn", "checkpoint"])
+def test_aggregate_continuation_budget_is_checked_on_construction_and_read(
+    target: str,
+) -> None:
+    record = _messages_continuation(thinking="思" * (MAX_TURN_CONTINUATION_BYTES // 6))
+    assert continuation_size(record) < MAX_TURN_CONTINUATION_BYTES
+    assert continuation_size(record) * 2 > MAX_TURN_CONTINUATION_BYTES
+    step = RunCheckpointProgress(
+        Message(MessageRole.ASSISTANT, "step"), continuation=record
+    )
+    if target == "turn":
+        turn = _turn_with_continuation()
+        tool_record = _messages_continuation(
+            ("a", "b"), thinking=record.items[0].thinking
+        )
+        with pytest.raises(ValueError) as caught:
+            replace(turn, continuations=(tool_record, record))
+        wire = serialize_session_record(turn)
+        wire["continuations"] = [
+            serialize_continuation(tool_record),
+            serialize_continuation(record),
+        ]
+    else:
+        with pytest.raises(ValueError) as caught:
+            _checkpoint_with_progress(step, step)
+        wire = serialize_session_record(_checkpoint_with_progress(step))
+        wire["progress"].append(wire["progress"][0])
+    _assert_no_continuation_leak(caught.value)
+    with pytest.raises(SessionFormatError) as caught:
+        deserialize_session_record(wire)
+    _assert_no_continuation_leak(caught.value)
+
+
+@pytest.mark.parametrize("target", ["turn", "checkpoint"])
+def test_continuation_budget_accepts_exact_limit_and_rejects_one_more_byte(
+    target: str,
+) -> None:
+    base = _messages_continuation(thinking="")
+    record = _messages_continuation(
+        thinking="x" * (MAX_TURN_CONTINUATION_BYTES - continuation_size(base))
+    )
+    assert continuation_size(record) == MAX_TURN_CONTINUATION_BYTES
+    oversized = replace(
+        record,
+        items=(
+            replace(record.items[0], thinking=record.items[0].thinking + "x"),
+            *record.items[1:],
+        ),
+    )
+    if target == "turn":
+        value = make_turn_entry(continuations=(record,))
+        with pytest.raises(ValueError) as caught:
+            make_turn_entry(continuations=(oversized,))
+    else:
+        value = _checkpoint_with_progress(
+            RunCheckpointProgress(
+                Message(MessageRole.ASSISTANT, "hi"), continuation=record
+            )
+        )
+        with pytest.raises(ValueError) as caught:
+            _checkpoint_with_progress(
+                replace(value.progress[0], continuation=oversized)
+            )
+    _assert_no_continuation_leak(caught.value)
+    assert deserialize_session_record(serialize_session_record(value)) == value
+
+
+@pytest.mark.parametrize("target", ["turn", "checkpoint"])
+@pytest.mark.parametrize("path", [r"C:\private\notes.txt", "/home/private/notes.txt"])
+@pytest.mark.parametrize("api", ["messages", "responses"])
+def test_plaintext_local_paths_invalidate_the_whole_continuation(
+    target: str, path: str, api: str
+) -> None:
+    record = (
+        _messages_continuation(thinking=path)
+        if api == "messages"
+        else ModelStepContinuation(
+            "local",
+            "chat",
+            ProviderApi.OPENAI_RESPONSES,
+            ContinuationStatus.REPLAYABLE,
+            (ResponsesReasoningItem("r1", (path,), "private-cipher"), TextItem(None)),
+        )
+    )
+    if target == "turn":
+        value = make_turn_entry(continuations=(record,))
+        cleaned = value.continuations[0]
+    else:
+        step = RunCheckpointProgress(
+            Message(MessageRole.ASSISTANT, "hi"), continuation=record
+        )
+        value = _checkpoint_with_progress(step)
+        cleaned = step.continuation
+    assert cleaned == replace(record, status=ContinuationStatus.UNREPLAYABLE, items=())
+    assert path not in json.dumps(serialize_session_record(value))
+    assert deserialize_session_record(serialize_session_record(value)) == value
+
+
+def test_turn_checks_original_tool_arguments_before_sanitizing_messages() -> None:
+    record = _messages_continuation(("a", "b"))
+    original = _turn_with_continuation()
+    assistant = replace(
+        original.intermediate_messages[0],
+        tool_calls=(
+            ToolCall("a", "read", {"path": r"C:\private\notes.txt"}),
+            ToolCall("b", "read", {}),
+        ),
+    )
+    turn = replace(
+        original,
+        intermediate_messages=(assistant, *original.intermediate_messages[1:]),
+        continuations=(record, None),
+    )
+    assert turn.continuations[0] == replace(
+        record, status=ContinuationStatus.UNREPLAYABLE, items=()
+    )
+    assert (
+        turn.intermediate_messages[0].tool_calls[0].arguments["path"]
+        == "[REDACTED_PATH]"
+    )
+    assert assistant.tool_calls[0].arguments["path"] == r"C:\private\notes.txt"
+
+
+def test_checkpoint_reconstructs_empty_content_and_ordered_tool_references() -> None:
+    step = replace(
+        _progress_with_continuation(),
+        assistant_message=None,
+        continuation=_messages_continuation(("a", "b"), content=False),
+    )
+    checkpoint = _checkpoint_with_progress(step)
+    assert (
+        deserialize_session_record(serialize_session_record(checkpoint)) == checkpoint
+    )
+    empty_step = RunCheckpointProgress(
+        continuation=_messages_continuation(content=False)
+    )
+    assert deserialize_session_record(
+        serialize_session_record(_checkpoint_with_progress(empty_step))
+    ).progress == (empty_step,)
+
+
+def test_invalid_api_item_is_rejected_before_turn_or_checkpoint_submission() -> None:
+    with pytest.raises(ValueError) as caught:
+        ModelStepContinuation(
+            "local",
+            "chat",
+            ProviderApi.OPENAI_RESPONSES,
+            ContinuationStatus.REPLAYABLE,
+            (MessagesThinkingItem(*_CONTINUATION_PRIVATE[:2]),),
+        )
+    _assert_no_continuation_leak(caught.value)

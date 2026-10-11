@@ -13,6 +13,17 @@ from pathlib import Path
 
 import pytest
 
+from mica_agent.continuation_contracts import (
+    ContinuationStatus,
+    MessagesRedactedThinkingItem,
+    MessagesThinkingItem,
+    ModelStepContinuation,
+    ProviderApi,
+    ResponsesReasoningItem,
+    TextItem,
+    TextPhase,
+    ToolCallItem,
+)
 from mica_agent.jsonl_store import (
     JsonlSessionStore,
     ScanResult,
@@ -30,9 +41,19 @@ from mica_agent.session_contracts import (
     CURRENT_SESSION_FORMAT_VERSION,
     RunCheckpoint,
     RunCheckpointKind,
+    RunCheckpointProgress,
+    RunCheckpointToolProgress,
+    RunCheckpointToolStatus,
     SessionMeta,
+    SessionSelection,
     TurnEntry,
     serialize_session_record,
+)
+from mica_agent.tool_contracts import ToolCall
+from mica_agent.tool_presentation import (
+    ToolPresentationKind,
+    ToolPresentationSnapshot,
+    ToolPresentationStatus,
 )
 from mica_agent.workspace import resolve_workspace
 
@@ -158,10 +179,10 @@ def test_fixed_v2_tool_jsonl_loads_without_reexecuting_tools(tmp_path: Path) -> 
     assert path.read_bytes() == original
     assert any(item.meta.session_id == session_id for item in store.scan().sessions)
     upgraded = store.append_turn(session_id, make_turn(2, NOW + timedelta(seconds=1)))
-    assert upgraded.meta.format_version == 5
+    assert upgraded.meta.format_version == 6
     assert {
         json.loads(line)["format_version"] for line in path.read_bytes().splitlines()
-    } == {5}
+    } == {6}
 
 
 def write_v3_fixture(
@@ -238,11 +259,11 @@ def test_fixed_v3_fixture_loads_without_upgrade_until_business_write(
     upgraded = store.append_checkpoint(
         "legacy-v3", make_checkpoint(3, NOW + timedelta(seconds=1))
     )
-    assert upgraded.meta.format_version == 5
+    assert upgraded.meta.format_version == 6
     assert {
         json.loads(line)["format_version"]
         for line in store.path_for_session("legacy-v3").read_bytes().splitlines()
-    } == {5}
+    } == {6}
 
 
 def test_fixed_v1_jsonl_loads_through_public_store(tmp_path: Path) -> None:
@@ -253,7 +274,7 @@ def test_fixed_v1_jsonl_loads_through_public_store(tmp_path: Path) -> None:
     original = path.read_bytes()
     loaded = store.load("legacy-session")
 
-    assert CURRENT_SESSION_FORMAT_VERSION == 5
+    assert CURRENT_SESSION_FORMAT_VERSION == 6
     assert loaded.meta.format_version == 1
     assert path.read_bytes() == original
     assert any(
@@ -345,7 +366,7 @@ def test_v3_upgrade_replace_failure_preserves_bytes_and_retries(
     retried = store.append_checkpoint(
         "legacy-v3-failure", make_checkpoint(4, NOW + timedelta(seconds=1))
     )
-    assert retried.meta.format_version == 5
+    assert retried.meta.format_version == 6
 
 
 def test_append_checkpoint_upgrades_v1_atomically(tmp_path: Path) -> None:
@@ -355,7 +376,7 @@ def test_append_checkpoint_upgrades_v1_atomically(tmp_path: Path) -> None:
 
     appended = store.append_checkpoint("legacy-checkpoint", checkpoint)
 
-    assert appended.meta.format_version == 5
+    assert appended.meta.format_version == 6
     assert appended.entries[-1] == checkpoint
     records = [
         json.loads(line)
@@ -363,7 +384,7 @@ def test_append_checkpoint_upgrades_v1_atomically(tmp_path: Path) -> None:
         .read_bytes()
         .splitlines()
     ]
-    assert {record["format_version"] for record in records} == {5}
+    assert {record["format_version"] for record in records} == {6}
     assert original != store.path_for_session("legacy-checkpoint").read_bytes()
 
     session_id = r"folder/..\secret:会话"
@@ -391,9 +412,9 @@ def test_append_turn_upgrades_v1_and_business_change_in_one_v3_snapshot(
 
     raw = store.path_for_session("legacy-append").read_bytes()
     records = [json.loads(line) for line in raw.splitlines()]
-    assert upgraded.meta.format_version == 5
+    assert upgraded.meta.format_version == 6
     assert len(upgraded.turns) == 2
-    assert {record["format_version"] for record in records} == {5}
+    assert {record["format_version"] for record in records} == {6}
     assert all("messages" in record for record in records[1:])
     assert all("user_message" not in record for record in records[1:])
 
@@ -422,10 +443,10 @@ def test_v1_upgrade_replace_failure_preserves_bytes_and_allows_retry(
     upgraded = store.append_turn(
         "legacy-failure", make_turn(2, NOW + timedelta(seconds=1))
     )
-    assert upgraded.meta.format_version == 5
+    assert upgraded.meta.format_version == 6
     assert {
         json.loads(line)["format_version"] for line in path.read_bytes().splitlines()
-    } == {5}
+    } == {6}
 
 
 def test_v3_plain_text_turn_has_canonical_messages_wire_bytes(tmp_path: Path) -> None:
@@ -444,7 +465,7 @@ def test_v3_plain_text_turn_has_canonical_messages_wire_bytes(tmp_path: Path) ->
     raw = store.path_for_session("v3-wire").read_bytes()
     expected_meta = (
         '{"created_at":"2026-08-21T03:04:05.000000+00:00",'
-        '"format_version":5,"record_type":"session_meta",'
+        '"format_version":6,"record_type":"session_meta",'
         '"session_id":"v3-wire","title":"title",'
         '"updated_at":"2026-08-21T03:04:05.000000+00:00",'
         f'"workspace_id":{json.dumps(identity.workspace_id)},'
@@ -452,7 +473,8 @@ def test_v3_plain_text_turn_has_canonical_messages_wire_bytes(tmp_path: Path) ->
     ).encode()
     expected_turn = (
         b'{"completed_at":"2026-08-21T03:04:05.000000+00:00",'
-        b'"format_version":5,"messages":['
+        b'"continuations":[null],'
+        b'"format_version":6,"messages":['
         b'{"content":"question","role":"user"},'
         b'{"content":"answer","role":"assistant"}],'
         b'"record_type":"turn","run_id":"run-v2","tool_presentations":[],'
@@ -929,9 +951,244 @@ def test_fixed_v4_checkpoint_read_preserves_bytes_and_first_write_upgrades_atomi
     assert len(loaded.checkpoints) == 1
     assert path.read_bytes() == original
     upgraded = store.append_turn(session_id, make_turn(2, NOW + timedelta(seconds=1)))
-    assert upgraded.meta.format_version == 5
+    assert upgraded.meta.format_version == 6
     assert upgraded.checkpoints == loaded.checkpoints
     assert upgraded.entries[0] == loaded.entries[0]
     assert {
         json.loads(line)["format_version"] for line in path.read_bytes().splitlines()
-    } == {5}
+    } == {6}
+
+
+def _read_presentation(call_id: str, path: str) -> ToolPresentationSnapshot:
+    return ToolPresentationSnapshot(
+        call_id,
+        "read",
+        ToolPresentationKind.READ,
+        ToolPresentationStatus.SUCCESS,
+        {"path": path},
+    )
+
+
+def test_v6_tool_turn_and_checkpoint_have_exact_canonical_wire_bytes(
+    tmp_path: Path,
+) -> None:
+    store, identity = make_store(tmp_path)
+    meta = make_meta(
+        identity, session_id="v6-wire", selection=SessionSelection("local", "chat")
+    )
+    call_a = ToolCall("a", "read", {"path": "a.txt"})
+    call_b = ToolCall("b", "read", {"path": "b.txt"})
+    turn = TurnEntry(
+        "turn-wire",
+        "run-wire",
+        Message(MessageRole.USER, "inspect"),
+        Message(MessageRole.ASSISTANT, "done"),
+        NOW,
+        (
+            Message(MessageRole.ASSISTANT, "checking", (call_a,)),
+            Message(MessageRole.TOOL, "one", tool_call_id="a"),
+            Message(MessageRole.ASSISTANT, "", (call_b,)),
+            Message(MessageRole.TOOL, "two", tool_call_id="b"),
+        ),
+        (_read_presentation("a", "a.txt"), _read_presentation("b", "b.txt")),
+        (
+            ModelStepContinuation(
+                "local",
+                "response-model",
+                ProviderApi.OPENAI_RESPONSES,
+                ContinuationStatus.REPLAYABLE,
+                (
+                    ResponsesReasoningItem(
+                        "r1", ("private-thought",), "private-cipher"
+                    ),
+                    TextItem(TextPhase.COMMENTARY),
+                    ToolCallItem("a"),
+                ),
+            ),
+            None,
+            ModelStepContinuation(
+                "local",
+                "response-model",
+                ProviderApi.OPENAI_RESPONSES,
+                ContinuationStatus.REPLAYABLE,
+                (TextItem(TextPhase.FINAL_ANSWER),),
+            ),
+        ),
+    )
+    call_c = ToolCall("c", "read", {"path": "c.txt"})
+    checkpoint = RunCheckpoint(
+        "checkpoint-wire",
+        "checkpoint-run-wire",
+        RunCheckpointKind.CANCELLED,
+        Message(MessageRole.USER, "continue"),
+        NOW,
+        (
+            RunCheckpointProgress(
+                Message(MessageRole.ASSISTANT, "checking"),
+                (
+                    RunCheckpointToolProgress(
+                        call_c,
+                        RunCheckpointToolStatus.SUCCESS,
+                        Message(MessageRole.TOOL, "three", tool_call_id="c"),
+                        _read_presentation("c", "c.txt"),
+                    ),
+                ),
+                ModelStepContinuation(
+                    "local",
+                    "message-model",
+                    ProviderApi.ANTHROPIC_MESSAGES,
+                    ContinuationStatus.REPLAYABLE,
+                    (
+                        MessagesThinkingItem("private-thinking", "private-signature"),
+                        MessagesRedactedThinkingItem("private-data"),
+                        TextItem(None),
+                        ToolCallItem("c"),
+                    ),
+                ),
+            ),
+            RunCheckpointProgress(
+                tools=(
+                    RunCheckpointToolProgress(
+                        ToolCall("d", "read", {}), RunCheckpointToolStatus.IN_PROGRESS
+                    ),
+                )
+            ),
+        ),
+    )
+    created = store.create(meta, (turn, checkpoint))
+    expected_meta = (
+        '{"created_at":"2026-08-21T03:04:05.000000+00:00","format_version":6,'
+        '"model_id":"chat","provider_id":"local","record_type":"session_meta",'
+        '"session_id":"v6-wire","title":"title","updated_at":"2026-08-21T03:04:05.000000+00:00",'
+        f'"workspace_id":{json.dumps(identity.workspace_id)},'
+        f'"workspace_path":{json.dumps(str(identity.workspace_path))}}}\n'
+    ).encode()
+    expected_turn = (
+        b'{"completed_at":"2026-08-21T03:04:05.000000+00:00","continuations":['
+        b'{"api":"openai-responses","items":['
+        b'{"encrypted_content":"private-cipher","id":"r1","summary":["private-thought"],"type":"reasoning"},'
+        b'{"phase":"commentary","type":"text"},{"call_id":"a","type":"tool_call"}],'
+        b'"model_id":"response-model","provider_id":"local","status":"replayable"},null,'
+        b'{"api":"openai-responses","items":[{"phase":"final_answer","type":"text"}],'
+        b'"model_id":"response-model","provider_id":"local","status":"replayable"}],'
+        b'"format_version":6,"messages":[{"content":"inspect","role":"user"},'
+        b'{"content":"checking","role":"assistant","tool_calls":[{"arguments":{"path":"a.txt"},"call_id":"a","name":"read"}]},'
+        b'{"content":"one","role":"tool","tool_call_id":"a"},'
+        b'{"content":"","role":"assistant","tool_calls":[{"arguments":{"path":"b.txt"},"call_id":"b","name":"read"}]},'
+        b'{"content":"two","role":"tool","tool_call_id":"b"},{"content":"done","role":"assistant"}],'
+        b'"record_type":"turn","run_id":"run-wire","tool_presentations":['
+        b'{"call_id":"a","kind":"read","message":null,"payload":{"path":"a.txt"},"status":"success","tool_name":"read"},'
+        b'{"call_id":"b","kind":"read","message":null,"payload":{"path":"b.txt"},"status":"success","tool_name":"read"}],'
+        b'"turn_id":"turn-wire"}\n'
+    )
+    expected_checkpoint = (
+        b'{"checkpoint_id":"checkpoint-wire","format_version":6,"kind":"cancelled","partial_assistant_message":null,"progress":['
+        b'{"assistant_message":{"content":"checking","role":"assistant"},"continuation":'
+        b'{"api":"anthropic-messages","items":['
+        b'{"signature":"private-signature","thinking":"private-thinking","type":"thinking"},'
+        b'{"data":"private-data","type":"redacted_thinking"},{"phase":null,"type":"text"},{"call_id":"c","type":"tool_call"}],'
+        b'"model_id":"message-model","provider_id":"local","status":"replayable"},"tools":['
+        b'{"call":{"arguments":{"path":"c.txt"},"call_id":"c","name":"read"},'
+        b'"presentation":{"call_id":"c","kind":"read","message":null,"payload":{"path":"c.txt"},"status":"success","tool_name":"read"},'
+        b'"result":{"content":"three","role":"tool","tool_call_id":"c"},"status":"success"}]},'
+        b'{"assistant_message":null,"continuation":null,"tools":['
+        b'{"call":{"arguments":{},"call_id":"d","name":"read"},"presentation":null,"result":null,"status":"in_progress"}]}],'
+        b'"record_type":"run_checkpoint","recorded_at":"2026-08-21T03:04:05.000000+00:00",'
+        b'"run_id":"checkpoint-run-wire","user_message":{"content":"continue","role":"user"}}\n'
+    )
+    assert (
+        store.path_for_session(meta.session_id).read_bytes()
+        == expected_meta + expected_turn + expected_checkpoint
+    )
+    loaded = store.load(meta.session_id)
+    assert loaded == created
+    assert loaded.entries == (turn, checkpoint)
+
+
+def write_v5_fixture(
+    store: JsonlSessionStore, identity: object, session_id: str
+) -> bytes:
+    meta = (
+        '{"created_at":"2026-08-21T03:04:05.000000+00:00","format_version":5,'
+        '"model_id":"chat","provider_id":"local","record_type":"session_meta",'
+        f'"session_id":{json.dumps(session_id)},"title":"legacy-v5",'
+        '"updated_at":"2026-08-21T03:04:05.000000+00:00",'
+        f'"workspace_id":{json.dumps(identity.workspace_id)},'
+        f'"workspace_path":{json.dumps(str(identity.workspace_path))}}}\n'
+    ).encode()
+    turn = (
+        b'{"completed_at":"2026-08-21T03:04:05.000000+00:00","format_version":5,"messages":['
+        b'{"content":"inspect","role":"user"},'
+        b'{"content":"checking","role":"assistant","tool_calls":[{"arguments":{"path":"a.txt"},"call_id":"a","name":"read"}]},'
+        b'{"content":"one","role":"tool","tool_call_id":"a"},{"content":"done","role":"assistant"}],'
+        b'"record_type":"turn","run_id":"legacy-turn-run","tool_presentations":['
+        b'{"call_id":"a","kind":"read","message":null,"payload":{"path":"a.txt"},"status":"success","tool_name":"read"}],'
+        b'"turn_id":"legacy-turn"}\n'
+    )
+    checkpoint = (
+        b'{"checkpoint_id":"legacy-checkpoint","format_version":5,"kind":"cancelled",'
+        b'"partial_assistant_message":{"content":"partial","role":"assistant"},"progress":['
+        b'{"assistant_message":{"content":"checking","role":"assistant"},"tools":['
+        b'{"call":{"arguments":{"path":"c.txt"},"call_id":"c","name":"read"},'
+        b'"presentation":{"call_id":"c","kind":"read","message":null,"payload":{"path":"c.txt"},"status":"success","tool_name":"read"},'
+        b'"result":{"content":"three","role":"tool","tool_call_id":"c"},"status":"success"}]}],'
+        b'"record_type":"run_checkpoint","recorded_at":"2026-08-21T03:04:05.000000+00:00",'
+        b'"run_id":"legacy-checkpoint-run","user_message":{"content":"continue","role":"user"}}\n'
+    )
+    payload = meta + turn + checkpoint
+    path = store.path_for_session(session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    return payload
+
+
+@pytest.mark.parametrize("business_write", ["turn", "checkpoint"])
+@pytest.mark.parametrize("replace_failure", [False, True])
+def test_fixed_v5_load_preserves_bytes_and_business_upgrade_can_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    business_write: str,
+    replace_failure: bool,
+) -> None:
+    store, identity = make_store(tmp_path)
+    session_id = "legacy-v5"
+    original = write_v5_fixture(store, identity, session_id)
+    path = store.path_for_session(session_id)
+    loaded = store.load(session_id)
+    assert loaded.meta.format_version == 5
+    assert loaded.meta.selection == SessionSelection("local", "chat")
+    assert loaded.turns[0].continuations == (None, None)
+    assert all(step.continuation is None for step in loaded.checkpoints[0].progress)
+    assert loaded.checkpoints[0].partial_assistant_message == Message(
+        MessageRole.ASSISTANT, "partial"
+    )
+    assert store.scan().sessions == (loaded,)
+    assert path.read_bytes() == original
+    entry = (
+        make_turn(2, NOW + timedelta(seconds=1))
+        if business_write == "turn"
+        else make_checkpoint(2, NOW + timedelta(seconds=1))
+    )
+    append = store.append_turn if business_write == "turn" else store.append_checkpoint
+    if replace_failure:
+
+        def fail_replace(source: Path, target: Path) -> None:
+            raise PermissionError("injected replace failure")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "replace", fail_replace)
+            with pytest.raises(SessionStorageIOError):
+                append(session_id, entry)
+        assert path.read_bytes() == original
+        assert store.load(session_id) == loaded
+        assert not list(path.parent.glob("*.tmp"))
+    upgraded = append(session_id, entry)
+    assert upgraded.meta == replace(
+        loaded.meta, format_version=6, updated_at=NOW + timedelta(seconds=1)
+    )
+    assert upgraded.entries == (*loaded.entries, entry)
+    assert store.load(session_id) == upgraded
+    wire = [json.loads(line) for line in path.read_bytes().splitlines()]
+    assert {record["format_version"] for record in wire} == {6}
+    assert wire[1]["continuations"] == [None, None]
+    assert wire[2]["progress"][0]["continuation"] is None

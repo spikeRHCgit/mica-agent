@@ -1146,7 +1146,7 @@ def test_installed_wheel_structured_ask_and_continue_restore_tool_history(
     raw = next(service.store.session_directory.glob("*.jsonl")).read_text(
         encoding="utf-8"
     )
-    assert '"format_version":5' in raw
+    assert '"format_version":6' in raw
     first_turn = listed.sessions[0].turns[0]
     stored_tool = first_turn.context_messages[2]
     assert json.loads(stored_tool.content)["data"] == {
@@ -1236,7 +1236,7 @@ def test_installed_wheel_write_and_continue_restore_complete_tool_history(
     assert fake_key not in observed_output
     assert sensitive not in observed_output
     assert str(workspace) not in observed_output
-    assert '"format_version":5' in raw
+    assert '"format_version":6' in raw
     assert server._thread.is_alive() is False
 
 
@@ -1347,7 +1347,7 @@ def test_installed_wheel_default_tui_tool_dialog_and_continue_restore(
     raw = next(service.store.session_directory.glob("*.jsonl")).read_text(
         encoding="utf-8"
     )
-    assert raw.count('"format_version":5') == 3
+    assert raw.count('"format_version":6') == 3
     assert fake_key not in raw
     assert str(workspace) not in observed
     assert server._thread.is_alive() is False

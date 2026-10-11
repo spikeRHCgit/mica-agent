@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import TypeAlias
@@ -15,7 +15,19 @@ from .checkpoint_contracts import (
     RunCheckpointToolProgress,
     RunCheckpointToolStatus,
 )
-from .message_sanitizer import sanitize_presentation_text, sanitize_tool_message
+from .continuation_contracts import (
+    MAX_TURN_CONTINUATION_BYTES,
+    ModelStepContinuation,
+    check_step_association,
+    continuation_size,
+    parse_continuation,
+    serialize_continuation,
+)
+from .message_sanitizer import (
+    sanitize_presentation_text,
+    sanitize_step_continuation,
+    sanitize_tool_message,
+)
 from .models import Message, MessageRole
 from .tool_contracts import ToolCall, to_mutable_json
 from .tool_presentation import (
@@ -26,10 +38,10 @@ from .tool_presentation import (
 )
 
 # Current JSONL format version used for session writes.
-CURRENT_SESSION_FORMAT_VERSION = 5
+CURRENT_SESSION_FORMAT_VERSION = 6
 
 _SUPPORTED_SESSION_FORMAT_VERSIONS = frozenset(
-    {1, 2, 3, 4, CURRENT_SESSION_FORMAT_VERSION}
+    {1, 2, 3, 4, 5, CURRENT_SESSION_FORMAT_VERSION}
 )
 
 
@@ -123,7 +135,11 @@ class SessionMeta:
 
 @dataclass(frozen=True, slots=True)
 class TurnEntry:
-    """Complete, immutable turn produced by one successful user instruction."""
+    """Complete, immutable turn produced by one successful user instruction.
+
+    Continuation sanitization is a fallback here; Engine must check the original
+    assistant message before submitting already sanitized tool arguments.
+    """
 
     turn_id: str
     run_id: str
@@ -132,6 +148,9 @@ class TurnEntry:
     completed_at: datetime
     intermediate_messages: tuple[Message, ...] = ()
     tool_presentations: tuple[ToolPresentationSnapshot, ...] = ()
+    continuations: tuple[ModelStepContinuation | None, ...] = field(
+        default=(), repr=False
+    )
 
     def __post_init__(self) -> None:
         _validate_non_blank_text(self.turn_id, "turn_id")
@@ -163,6 +182,37 @@ class TurnEntry:
                 "tool_presentations must contain only ToolPresentationSnapshot values"
             )
         self._validate_tool_presentations()
+        assistant_messages = tuple(
+            message
+            for message in self.context_messages
+            if message.role is MessageRole.ASSISTANT
+        )
+        if not isinstance(self.continuations, tuple):
+            # Slot shape violations use ValueError, including the container type.
+            raise ValueError("continuations must be a tuple")  # noqa: TRY004
+        records = self.continuations or (None,) * len(assistant_messages)
+        if len(records) != len(assistant_messages):
+            raise ValueError("continuations must match assistant messages")
+        cleaned_records: list[ModelStepContinuation | None] = []
+        for record, message in zip(records, assistant_messages, strict=True):
+            if record is not None:
+                if not isinstance(record, ModelStepContinuation):
+                    raise TypeError(
+                        "continuations must contain ModelStepContinuation or None"
+                    )
+                record = sanitize_step_continuation(record, message)
+                check_step_association(record, message)
+            cleaned_records.append(record)
+        if (
+            sum(
+                continuation_size(record)
+                for record in cleaned_records
+                if record is not None
+            )
+            > MAX_TURN_CONTINUATION_BYTES
+        ):
+            raise ValueError("continuations exceed the turn size limit")
+        object.__setattr__(self, "continuations", tuple(cleaned_records))
         object.__setattr__(
             self,
             "intermediate_messages",
@@ -598,6 +648,11 @@ def _serialize_checkpoint_progress(
             else _serialize_v2_message(step.assistant_message)
         ),
         "tools": [_serialize_checkpoint_tool(item) for item in step.tools],
+        "continuation": (
+            None
+            if step.continuation is None
+            else serialize_continuation(step.continuation)
+        ),
     }
 
 
@@ -647,12 +702,13 @@ def _parse_checkpoint_tool(value: object) -> RunCheckpointToolProgress:
         raise SessionFormatError("checkpoint tool progress is invalid") from None
 
 
-def _parse_checkpoint_progress(value: object) -> RunCheckpointProgress:
+def _parse_checkpoint_progress(value: object, version: int) -> RunCheckpointProgress:
     if not isinstance(value, Mapping):
         raise SessionFormatError("checkpoint progress must be a JSON object")
-    _require_exact_fields(
-        value, frozenset({"assistant_message", "tools"}), "checkpoint progress"
-    )
+    expected = frozenset({"assistant_message", "tools"})
+    if version >= 6:
+        expected = expected | {"continuation"}
+    _require_exact_fields(value, expected, "checkpoint progress")
     assistant_value = value["assistant_message"]
     assistant = None
     if assistant_value is not None:
@@ -675,6 +731,11 @@ def _parse_checkpoint_progress(value: object) -> RunCheckpointProgress:
         return RunCheckpointProgress(
             assistant_message=assistant,
             tools=tuple(_parse_checkpoint_tool(item) for item in tools_value),
+            continuation=(
+                parse_continuation(value["continuation"])
+                if version >= 6 and value["continuation"] is not None
+                else None
+            ),
         )
     except (TypeError, ValueError):
         raise SessionFormatError("checkpoint progress is invalid") from None
@@ -695,8 +756,9 @@ def _parse_checkpoint(record: Mapping[object, object]) -> RunCheckpoint:
         }
     )
     _require_exact_fields(record, expected, "run_checkpoint")
-    if _require_supported_version(record) not in {4, 5}:
-        raise SessionFormatError("run_checkpoint requires format_version 4 or 5")
+    version = _require_supported_version(record)
+    if version not in {4, 5, 6}:
+        raise SessionFormatError("run_checkpoint requires format_version 4, 5 or 6")
     try:
         kind = RunCheckpointKind(_require_record_text(record, "kind"))
     except ValueError:
@@ -723,7 +785,9 @@ def _parse_checkpoint(record: Mapping[object, object]) -> RunCheckpoint:
             run_id=_require_non_blank_record_text(record, "run_id"),
             kind=kind,
             user_message=_parse_message(record, "user_message", MessageRole.USER),
-            progress=tuple(_parse_checkpoint_progress(item) for item in progress_value),
+            progress=tuple(
+                _parse_checkpoint_progress(item, version) for item in progress_value
+            ),
             partial_assistant_message=partial,
             recorded_at=_parse_utc_datetime(record, "recorded_at"),
         )
@@ -766,6 +830,10 @@ def serialize_session_record(record: SessionRecord) -> dict[str, object]:
             "tool_presentations": [
                 _serialize_tool_presentation(presentation)
                 for presentation in record.tool_presentations
+            ],
+            "continuations": [
+                None if value is None else serialize_continuation(value)
+                for value in record.continuations
             ],
             "completed_at": _format_utc_datetime(record.completed_at),
         }
@@ -813,7 +881,7 @@ def deserialize_session_record(record: object) -> SessionRecord:
         )
         version = _require_supported_version(record)
         selection = None
-        if version == 5 and ("provider_id" in record or "model_id" in record):
+        if version >= 5 and ("provider_id" in record or "model_id" in record):
             expected = expected | {"provider_id", "model_id"}
             _require_exact_fields(record, expected, "session_meta")
             try:
@@ -913,6 +981,8 @@ def deserialize_session_record(record: object) -> SessionRecord:
                 "completed_at",
             }
         )
+        if version >= 6:
+            expected = expected | {"continuations"}
         _require_exact_fields(record, expected, "turn")
         messages_value = record["messages"]
         presentations_value = record["tool_presentations"]
@@ -929,6 +999,19 @@ def deserialize_session_record(record: object) -> SessionRecord:
             )
             if len(messages) < 2:
                 raise ValueError("turn messages must contain user and final assistant")
+            continuations = ()
+            if version >= 6:
+                values = record["continuations"]
+                if not isinstance(values, list):
+                    raise ValueError("continuations must be an array")
+                if len(values) != sum(
+                    message.role is MessageRole.ASSISTANT for message in messages
+                ):
+                    raise ValueError("continuations must match assistant messages")
+                continuations = tuple(
+                    None if value is None else parse_continuation(value)
+                    for value in values
+                )
             has_tool_calls = any(
                 message.role is MessageRole.ASSISTANT and message.tool_calls
                 for message in messages
@@ -947,6 +1030,7 @@ def deserialize_session_record(record: object) -> SessionRecord:
                 completed_at=_parse_utc_datetime(record, "completed_at"),
                 intermediate_messages=messages[1:-1],
                 tool_presentations=presentations,
+                continuations=continuations,
             )
         except SessionFormatError:
             raise

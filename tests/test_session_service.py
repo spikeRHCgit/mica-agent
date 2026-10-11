@@ -94,10 +94,10 @@ def test_update_selection_upgrades_real_v4_checkpoint_session(tmp_path):
     target = SessionSelection("local", "new")
     service.update_selection(session_id, target)
     after = service.load_session(session_id)
-    assert after.meta == replace(before.meta, format_version=5, selection=target)
+    assert after.meta == replace(before.meta, format_version=6, selection=target)
     assert after.entries == before.entries
     assert all(
-        json.loads(line)["format_version"] == 5
+        json.loads(line)["format_version"] == 6
         for line in path.read_text().splitlines()
     )
 
@@ -109,7 +109,7 @@ def test_update_selection_upgrades_real_v1_session(tmp_path):
     target = SessionSelection("local", "new")
     service.update_selection("legacy-v1", target)
     after = service.load_session("legacy-v1")
-    assert after.meta == replace(before.meta, format_version=5, selection=target)
+    assert after.meta == replace(before.meta, format_version=6, selection=target)
     assert after.entries == before.entries
 
 
@@ -203,13 +203,13 @@ def test_v1_mutations_upgrade_and_branch_keeps_source_unchanged(tmp_path: Path) 
     for session_id in ("rename-v1", "rewind-v1", "clear-v1", "source-v1"):
         write_v1_session(store, session_id)
 
-    assert service.rename_session("rename-v1", "renamed").meta.format_version == 5
-    assert service.rewind_session("rewind-v1", "turn-1").meta.format_version == 5
-    assert service.clear_session("clear-v1").meta.format_version == 5
+    assert service.rename_session("rename-v1", "renamed").meta.format_version == 6
+    assert service.rewind_session("rewind-v1", "turn-1").meta.format_version == 6
+    assert service.clear_session("clear-v1").meta.format_version == 6
 
     source_bytes = store.path_for_session("source-v1").read_bytes()
     branch = service.branch_session("source-v1")
-    assert branch.meta.format_version == 5
+    assert branch.meta.format_version == 6
     assert branch.turns[0].completed_at == NOW
     assert store.path_for_session("source-v1").read_bytes() == source_bytes
     assert store.load("source-v1").meta.format_version == 1

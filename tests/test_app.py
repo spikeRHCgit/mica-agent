@@ -466,7 +466,7 @@ def test_tool_run_commits_one_complete_turn_and_restores_full_history() -> None:
     ]
     assert len(service.load_session(session_id).turns) == 1
     stored = service.load_session(session_id)
-    assert stored.meta.format_version == 5
+    assert stored.meta.format_version == 6
     assert len(stored.turns[0].tool_presentations) == 1
     presentation = stored.turns[0].tool_presentations[0]
     assert presentation.kind is ToolPresentationKind.READ

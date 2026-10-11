@@ -6,7 +6,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 
-from .message_sanitizer import sanitize_tool_message
+from .continuation_contracts import (
+    MAX_TURN_CONTINUATION_BYTES,
+    ModelStepContinuation,
+    check_step_association,
+    continuation_size,
+)
+from .message_sanitizer import sanitize_step_continuation, sanitize_tool_message
 from .models import Message, MessageRole
 from .tool_contracts import ToolCall
 from .tool_presentation import ToolPresentationSnapshot, ToolPresentationStatus
@@ -108,10 +114,15 @@ class RunCheckpointToolProgress:
 
 @dataclass(frozen=True, slots=True)
 class RunCheckpointProgress:
-    """One model step stored in occurrence order."""
+    """One model step stored in occurrence order.
+
+    Continuation sanitization is a fallback here; Engine must check the original
+    assistant message before tool arguments are sanitized into progress objects.
+    """
 
     assistant_message: Message | None = field(default=None, repr=False)
     tools: tuple[RunCheckpointToolProgress, ...] = field(default=(), repr=False)
+    continuation: ModelStepContinuation | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.assistant_message is not None:
@@ -142,6 +153,19 @@ class RunCheckpointProgress:
                 RunCheckpointToolStatus.NOT_STARTED,
             }:
                 incomplete_seen = True
+        if self.continuation is not None:
+            if not isinstance(self.continuation, ModelStepContinuation):
+                raise TypeError("continuation must be a ModelStepContinuation or None")
+            assistant = Message(
+                MessageRole.ASSISTANT,
+                ""
+                if self.assistant_message is None
+                else self.assistant_message.content,
+                tuple(item.call for item in self.tools),
+            )
+            cleaned = sanitize_step_continuation(self.continuation, assistant)
+            check_step_association(cleaned, assistant)
+            object.__setattr__(self, "continuation", cleaned)
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +194,15 @@ class RunCheckpoint:
             raise TypeError("progress must be a tuple")
         if not all(isinstance(step, RunCheckpointProgress) for step in self.progress):
             raise TypeError("progress must contain only RunCheckpointProgress values")
+        if (
+            sum(
+                continuation_size(step.continuation)
+                for step in self.progress
+                if step.continuation is not None
+            )
+            > MAX_TURN_CONTINUATION_BYTES
+        ):
+            raise ValueError("checkpoint continuations exceed the turn size limit")
         if self.partial_assistant_message is not None:
             if not isinstance(self.partial_assistant_message, Message):
                 raise TypeError("partial_assistant_message must be a Message or None")

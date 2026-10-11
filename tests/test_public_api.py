@@ -478,7 +478,7 @@ def test_p4_01_contract_modules_import_without_runtime_cycles() -> None:
 
 
 def test_top_level_exports_session_contracts() -> None:
-    assert CURRENT_SESSION_FORMAT_VERSION == ContractsFormatVersion == 5
+    assert CURRENT_SESSION_FORMAT_VERSION == ContractsFormatVersion == 6
     assert mica_agent.SessionMeta is ContractsSessionMeta
     assert mica_agent.RunCheckpoint is RunCheckpoint is ContractsRunCheckpoint
     assert mica_agent.RunCheckpointKind is RunCheckpointKind
