@@ -146,7 +146,59 @@
 
 **会话格式**：
 - 新增 v6：v1～v5 继续只读可用，读入时续接为空；第一次业务写入时在锁内整文件升级到 v6，和 v4、v5 的升级方式一致；旧版 Mica 无法读取 v6 会话；
-- 精确 wire 形状在本项卡片的设计审查中确定，不预塞未定义的占位字段。
+- 精确 wire 形状见下方「续接与 v6 wire」，不预塞未定义的占位字段。
+
+### 续接与 v6 wire（设计审查稿）
+
+**模型步骤续接记录**：一个模型步骤（一次 Provider 请求到 Finish）最多一条，不产出续接的步骤记为空：
+
+```json
+{
+  "provider_id": "<供应商 ID>",
+  "model_id": "<模型 ID>",
+  "api": "openai-completions | openai-responses | anthropic-messages",
+  "status": "replayable | unreplayable",
+  "items": [<项>, ...]
+}
+```
+
+- `unreplayable` 时 `items` 为空数组，只表示「这一步有过续接但不能回放」；`replayable` 时至少一项；
+- `items` 按原始输出顺序排列；正文和工具调用不重复保存，用引用项标出位置，内容从同一步的通用消息取。
+
+**项**（每种项的字段都必须齐全，缺省值写 `null`，不允许多余字段）：
+
+| `type` | 字段 | 允许的接口 |
+|---|---|---|
+| `reasoning` | `id`、`summary`（字符串数组，可为空）、`encrypted_content`（非空） | responses |
+| `thinking` | `thinking`（可为空串）、`signature`（非空） | messages |
+| `redacted_thinking` | `data`（非空） | messages |
+| `text` | `phase`：`commentary`、`final_answer` 或 `null`；messages 只能为 `null` | responses、messages |
+| `tool_call` | `call_id` | responses、messages |
+| `chat_reasoning` | `reasoning_content`、`reasoning`（字符串或 `null`）、`reasoning_details`（数组）；三者至少一个有内容 | completions，且只能有这一项 |
+
+`reasoning_details` 的元素字段为 `type`、`id`、`format`、`index`、`summary`、`data`、`text`、`signature`：
+
+- `type` 为 `reasoning.summary` 时 `summary` 必填；
+- `type` 为 `reasoning.encrypted` 时 `data` 必填；
+- `type` 为 `reasoning.text` 时 `text` 必填，`signature` 可选；
+- 与 `type` 无关的内容字段必须为 `null`；`id`、`format` 为字符串或 `null`，`index` 为非负整数或 `null`。
+
+**校验与关联**：
+- `id`、`call_id` 非空，不含空白和控制字符，不超过 256 个字符；`provider_id`、`model_id` 非空；
+- 同一步 `text` 至多一项（原始输出有多段正文时整步不可回放）；`tool_call` 的 `call_id` 不重复；
+- 关联：`tool_call` 项的顺序和集合与这一步 assistant 消息的 `tool_calls` 完全一致；这一步正文非空时恰有一个 `text` 项，正文为空时没有；completions 不使用引用项。
+
+**清洗判定**：
+- 这一步的 assistant 消息经过既有工具消息清洗后有任何改变（正文或工具参数），续接改为不可回放；
+- 明文字段（`summary`、`thinking`、`reasoning_content`、`reasoning`、details 的 `summary`、`text`）经过既有文本清洗后有任何改变，整步不可回放；
+- 不透明字段（`encrypted_content`、`signature`、`data`、details 的 `data`、`signature`）不做正则清洗，只校验为不含控制字符的非空字符串；
+- 单轮上限：同一 Turn 或检查点内全部续接记录按紧凑 JSON（UTF-8、`sort_keys`）计算合计超过 1 MiB 时，全部改为不可回放。
+
+**v6 会话记录**：
+- `session_meta`：只把 `format_version` 升到 6，字段不变；
+- `turn`：新增 `continuations` 数组，长度等于 `messages` 中 assistant 消息的条数，按顺序一一对应，每个元素为续接记录或 `null`；
+- `run_checkpoint`：`progress` 的每个元素新增 `continuation`，为续接记录或 `null`；`partial_assistant_message` 没有 Finish，不带续接；
+- v1～v5 读入时续接全部为空；v6 读取时续接违反上述校验或超过单轮上限，按格式错误拒绝。
 
 ### 实现方式
 
@@ -174,17 +226,17 @@
 **注意事项**：
 - 不改写已验收的 Chat Completions 适配器的既有行为，新适配器独立实现；
 - 续接数据不改变 `Message`/`ToolCall` 的公共 API；
-- 白名单、保存范围、上限和回放条件已由 D-027 确定；v6 精确 wire 形状和关联顺序在第一张卡派发前过设计审查；
+- 白名单、保存范围、上限和回放条件已由 D-027 确定；v6 wire 和关联规则见「续接与 v6 wire」，第一张卡派发前随卡过用户审查；
 - 跨接口兼容测试覆盖 completions、responses、messages 两两方向；
 - OpenCode Go 的自有 User-Agent 和会话头归 C1。
 
 **拆卡**（按顺序派发，共享契约不并行）：
-1. 续接契约、v6 格式和清洗判定（`continuation_contracts.py`、`message_sanitizer.py`）；
-2. JSONL v6 读写升级、TurnEntry 和检查点的续接字段、SessionService 返回续接；
+1. 续接契约、记录 wire、清洗判定和单轮上限（`continuation_contracts.py`、`message_sanitizer.py`）；
+2. 会话 v6：TurnEntry 和检查点的续接字段、v6 读写和旧版升级（`session_contracts.py`、`checkpoint_contracts.py`，及 JSONL 升级回归）；
 3. Provider 协议（`ProviderRequest`/`Finish`）、Engine 携带续接、Chat Completions 续接；
 4. Responses 适配器；
 5. Messages 适配器；
-6. 应用装配、续接提交、跨接口过滤；通过后用户做真实验收。
+6. 应用装配：按接口选适配器、SessionService 返回续接、提交和跨接口过滤；通过后用户做真实验收。
 
 ---
 
