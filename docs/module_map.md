@@ -110,11 +110,13 @@
 - `src/mica_agent/providers/base.py`：Provider 请求、事件、错误和生命周期协议。
 - `src/mica_agent/providers/openai_compatible.py`：OpenAI-compatible Chat Completions SSE 适配器。
 - `src/mica_agent/providers/openai_responses.py`：API Key Responses 请求编码、SSE 输出项关联、真实终态和有界续接。
+- `src/mica_agent/providers/anthropic_messages.py`：Messages 历史和工具结果编码、SSE 内容块校验、真实终态及有界签名续接。
 - `src/mica_agent/providers/__init__.py`：Provider 公共出口。
 - `src/mica_agent/engine.py`：模型、工具、交互、取消和终态的单一 Agent Loop。
 - `tests/test_provider_contract.py`：Provider 公共协议。
 - `tests/test_openai_provider.py`：OpenAI-compatible Provider。
 - `tests/test_openai_responses_provider.py`：Responses 请求、续接回放、工具往返、SSE 终态及资源边界。
+- `tests/test_anthropic_messages_provider.py`：Messages 请求、思考和签名回放、Engine 工具往返、SSE 终态、预算及资源边界。
 - `tests/test_engine.py`：Engine 运行循环和终态。
 - `tests/sse_transport_helpers.py`：Provider 测试共用的 SSE 传输辅助。
 

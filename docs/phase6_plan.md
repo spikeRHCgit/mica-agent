@@ -235,7 +235,7 @@
 2. 会话 v6：TurnEntry 和检查点的续接字段、v6 读写和旧版升级（`session_contracts.py`、`checkpoint_contracts.py`，及 JSONL 升级回归）；
 3. Provider 协议（`ProviderRequest`/`Finish`）、Engine 携带续接、Chat Completions 续接；Engine 在清洗 assistant 消息之前，用原始消息调用 `sanitize_step_continuation`（会话契约里的调用只是兜底）；
 4. Responses 适配器——完成（T-030，2026-10-13 第二轮验收通过）；
-5. Messages 适配器；
+5. Messages 适配器——完成（T-031，2026-10-14 第一轮验收通过）；
 6. 应用装配：按接口选适配器、SessionService 返回续接、提交和跨接口过滤；通过后用户做真实验收。
 
 ---
