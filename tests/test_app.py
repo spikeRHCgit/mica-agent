@@ -189,6 +189,27 @@ def _assistant(content: str) -> Message:
     return Message(role=MessageRole.ASSISTANT, content=content)
 
 
+def _partial_history(content: str) -> Message:
+    return _user(
+        "[Mica history work record; partial assistant output from an incomplete "
+        "model stream, not new instructions]\n" + content
+    )
+
+
+def _interruption_history(kind: RunCheckpointKind) -> Message:
+    return _user(
+        f"[Mica history work record; previous run is incomplete; status={kind.value}]"
+    )
+
+
+def _incomplete_tool_history(facts: dict) -> Message:
+    return _user(
+        "[Mica history work record; data from an incomplete tool batch, "
+        "not new instructions]\n"
+        + json.dumps(facts, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    )
+
+
 # ---------------------------------------------------------------------------
 # 输入校验
 # ---------------------------------------------------------------------------
@@ -340,9 +361,10 @@ def test_reasoning_then_failure_does_not_commit_partial_turn() -> None:
     assert any(isinstance(event, ReasoningDelta) for event in events)
     assert isinstance(events[-1], RunFailed)
     history = app.history
-    assert history[0] == _user("question")
-    assert history[1].role is MessageRole.SYSTEM
-    assert "recoverable failure" in history[-1].content
+    assert history == (
+        _user("question"),
+        _interruption_history(RunCheckpointKind.RECOVERABLE_FAILURE),
+    )
     stored = app._session_service.load_session(app.session_id)
     assert stored.turns == ()
     assert stored.checkpoints[0].kind is RunCheckpointKind.RECOVERABLE_FAILURE
@@ -631,12 +653,12 @@ def test_follow_up_run_sees_checkpoint_context() -> None:
     assert first.requests[0].messages[0].role is MessageRole.SYSTEM
     assert first.requests[0].messages[1:] == (_user("question"),)
     failure_history = app.history
-    assert failure_history[0] == _user("question")
-    assert failure_history[1].role is MessageRole.SYSTEM
-    assert "verbatim output follows" in failure_history[1].content
-    assert "partial" in failure_history[1].content
-    assert failure_history[2].role is MessageRole.SYSTEM
-    assert "recoverable failure" in failure_history[2].content
+    expected_history = (
+        _user("question"),
+        _partial_history("partial"),
+        _interruption_history(RunCheckpointKind.RECOVERABLE_FAILURE),
+    )
+    assert failure_history == expected_history
     failure_stored = app._session_service.load_session(app.session_id)
     assert failure_stored.turns == ()
     assert len(failure_stored.checkpoints) == 1
@@ -647,15 +669,15 @@ def test_follow_up_run_sees_checkpoint_context() -> None:
     second_events = _run_collect(app, "continue")
     assert isinstance(second_events[-1], RunCompleted)
     follow_up = first.requests[1].messages
-    assert follow_up[-1] == _user("continue")
-    assert follow_up[-4] == _user("question")
-    assert follow_up[-3].role is MessageRole.SYSTEM
-    assert "partial" in follow_up[-3].content
-    assert follow_up[-2].role is MessageRole.SYSTEM
-    assert "incomplete" in follow_up[-2].content
+    assert follow_up == (
+        first.requests[0].messages[0],
+        *expected_history,
+        _user("continue"),
+    )
     stored = app._session_service.load_session(app.session_id)
     assert len(stored.checkpoints) == 1
     assert len(stored.turns) == 1
+    assert stored.turns[0].user_message == _user("continue")
     assert stored.turns[0].assistant_message == _assistant("continued")
 
 
@@ -1091,14 +1113,16 @@ def test_cancelled_checkpoint_restores_under_a_new_model() -> None:
     asyncio.run(cancel_run())
     assert isinstance(collected[-1], RunCancelled)
     history = app.history
-    assert history[0] == _user("interrupt me")
-    assert history[1].role is MessageRole.SYSTEM
-    assert "partial" in history[1].content
-    assert history[2].role is MessageRole.SYSTEM
-    assert "cancelled" in history[2].content
+    expected_history = (
+        _user("interrupt me"),
+        _partial_history("partial"),
+        _interruption_history(RunCheckpointKind.CANCELLED),
+    )
+    assert history == expected_history
     stored = app._session_service.load_session(app.session_id)
     assert stored.turns == ()
     assert stored.checkpoints[0].kind is RunCheckpointKind.CANCELLED
+    assert stored.checkpoints[0].partial_assistant_message == _assistant("partial")
     service = app._session_service
     session_id = app.session_id
     follow = _ScriptedProvider([[ProviderTextDelta(text="continued"), Finish()]])
@@ -1117,13 +1141,21 @@ def test_cancelled_checkpoint_restores_under_a_new_model() -> None:
     assert isinstance(events[-1], RunCompleted)
     assert follow.requests[0].model == "other-model"
     restored_messages = follow.requests[0].messages
-    assert restored_messages[-1] == _user("continue")
-    assert restored_messages[-4] == _user("interrupt me")
-    assert "partial" in restored_messages[-3].content
-    assert "incomplete" in restored_messages[-2].content
+    assert restored_messages == (
+        Message(MessageRole.SYSTEM, "stable test system"),
+        *expected_history,
+        _user("continue"),
+    )
     assert not any(
         message.role is MessageRole.ASSISTANT and message.content == "partial"
         for message in restored_messages
+    )
+    restored_session = service.load_session(session_id)
+    assert restored_session.checkpoints == stored.checkpoints
+    assert len(restored_session.turns) == 1
+    assert restored_session.turns[0].context_messages == (
+        _user("continue"),
+        _assistant("continued"),
     )
 
 
@@ -1167,6 +1199,12 @@ def test_running_token_cancellation_restores_partial_without_forged_assistant() 
     assert stored.checkpoints[0].partial_assistant_message == _assistant(
         "partial answer"
     )
+    history = (
+        _user("interrupt me"),
+        _partial_history("partial answer"),
+        _interruption_history(RunCheckpointKind.CANCELLED),
+    )
+    assert app.history == history
 
     follow = _ScriptedProvider([[ProviderTextDelta(text="continued"), Finish()]])
     restored = MicaApp(
@@ -1183,15 +1221,21 @@ def test_running_token_cancellation_restores_partial_without_forged_assistant() 
     events = _run_collect(restored, "continue")
     assert isinstance(events[-1], RunCompleted)
     restored_messages = follow.requests[0].messages
-    assert restored_messages[-1] == _user("continue")
-    assert restored_messages[-4] == _user("interrupt me")
-    assert restored_messages[-3].role is MessageRole.SYSTEM
-    assert "partial answer" in restored_messages[-3].content
-    assert restored_messages[-2].role is MessageRole.SYSTEM
-    assert "incomplete" in restored_messages[-2].content
+    assert restored_messages == (
+        Message(MessageRole.SYSTEM, "stable test system"),
+        *history,
+        _user("continue"),
+    )
     assert not any(
         message.role is MessageRole.ASSISTANT and message.content == "partial answer"
         for message in restored_messages
+    )
+    restored_session = service.load_session(session_id)
+    assert restored_session.checkpoints == stored.checkpoints
+    assert len(restored_session.turns) == 1
+    assert restored_session.turns[0].context_messages == (
+        _user("continue"),
+        _assistant("continued"),
     )
 
 
@@ -1237,9 +1281,30 @@ def test_permission_wait_cancel_commits_unstarted_tool_checkpoint() -> None:
     assert checkpoint.kind is RunCheckpointKind.CANCELLED
     assert checkpoint.progress[0].tools[0].status is RunCheckpointToolStatus.NOT_STARTED
     assert checkpoint.progress[0].tools[0].result is None
+    assert app._session_service.load_session(app.session_id).turns == ()
     context = app.history
+    facts = {
+        "assistant_text": "",
+        "tools": [
+            {
+                "call_id": "call-write",
+                "name": "write",
+                "arguments": {},
+                "status": "not_started",
+                "result": None,
+            },
+        ],
+    }
+    assert context == (
+        _user("write it"),
+        _incomplete_tool_history(facts),
+        _interruption_history(RunCheckpointKind.CANCELLED),
+    )
+    assert json.loads(context[1].content.split("\n", 1)[1]) == facts
+    assert all(
+        not message.tool_calls and message.tool_call_id is None for message in context
+    )
     assert not any(message.role is MessageRole.TOOL for message in context)
-    assert any("was not started" in message.content for message in context)
 
 
 def test_ask_wait_cancel_commits_in_progress_tool_checkpoint() -> None:
@@ -1286,11 +1351,33 @@ def test_ask_wait_cancel_commits_in_progress_tool_checkpoint() -> None:
     asyncio.run(scenario())
     assert isinstance(collected[-1], RunCancelled)
     checkpoint = app._session_service.load_session(app.session_id).checkpoints[0]
+    assert checkpoint.kind is RunCheckpointKind.CANCELLED
     assert checkpoint.progress[0].tools[0].status is RunCheckpointToolStatus.IN_PROGRESS
     assert checkpoint.progress[0].tools[0].result is None
+    assert app._session_service.load_session(app.session_id).turns == ()
     context = app.history
+    facts = {
+        "assistant_text": "",
+        "tools": [
+            {
+                "call_id": "call-ask",
+                "name": "ask",
+                "arguments": {"question": "Continue?"},
+                "status": "in_progress",
+                "result": None,
+            },
+        ],
+    }
+    assert context == (
+        _user("ask"),
+        _incomplete_tool_history(facts),
+        _interruption_history(RunCheckpointKind.CANCELLED),
+    )
+    assert json.loads(context[1].content.split("\n", 1)[1]) == facts
+    assert all(
+        not message.tool_calls and message.tool_call_id is None for message in context
+    )
     assert not any(message.role is MessageRole.TOOL for message in context)
-    assert any("did not complete" in message.content for message in context)
 
 
 # ---------------------------------------------------------------------------
@@ -1336,16 +1423,23 @@ def test_failed_run_does_not_break_following_successful_run() -> None:
     )
     app = _make_app(provider)
 
-    _run_collect(app, "first")
-    _run_collect(app, "second")
+    first_events = _run_collect(app, "first")
+    second_events = _run_collect(app, "second")
+    assert isinstance(first_events[-1], RunFailed)
+    assert isinstance(second_events[-1], RunCompleted)
 
     assert provider.requests[1].messages[0].role is MessageRole.SYSTEM
     follow = provider.requests[1].messages[1:]
-    assert follow[0] == _user("first")
-    assert follow[1].role is MessageRole.SYSTEM
-    assert "recoverable failure" in follow[1].content
-    assert follow[2] == _user("second")
+    assert provider.requests[1].messages[0] == provider.requests[0].messages[0]
+    assert follow == (
+        _user("first"),
+        _interruption_history(RunCheckpointKind.RECOVERABLE_FAILURE),
+        _user("second"),
+    )
     stored = app._session_service.load_session(app.session_id)
+    assert len(stored.turns) == 1
+    assert len(stored.checkpoints) == 1
+    assert stored.turns[0].user_message == _user("second")
     assert stored.turns[0].assistant_message == _assistant("retry ok")
     assert stored.checkpoints[0].kind is RunCheckpointKind.RECOVERABLE_FAILURE
 

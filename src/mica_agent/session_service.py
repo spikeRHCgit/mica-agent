@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -9,9 +10,10 @@ from uuid import uuid4
 
 from .checkpoint_contracts import (
     RunCheckpoint,
-    RunCheckpointKind,
+    RunCheckpointProgress,
     RunCheckpointToolStatus,
 )
+from .continuation_contracts import ModelStepContinuation, check_step_association
 from .jsonl_store import (
     JsonlSessionStore,
     ScanProblem,
@@ -28,6 +30,7 @@ from .session_contracts import (
     SessionSelection,
     TurnEntry,
 )
+from .tool_contracts import to_mutable_json
 
 
 class SessionServiceError(SessionError):
@@ -56,6 +59,14 @@ class SessionListResult:
 
     sessions: tuple[StoredSession, ...]
     problems: tuple[ScanProblem, ...]
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class SessionContextSnapshot:
+    """History and assistant-aligned continuations from one session read."""
+
+    messages: tuple[Message, ...]
+    continuations: tuple[ModelStepContinuation | None, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,97 +282,115 @@ class SessionService:
         self.store.delete(session_id)
 
     @staticmethod
-    def _recorded_output_message(label: str, content: str) -> Message:
-        return Message(
-            MessageRole.SYSTEM,
-            f"[Mica checkpoint {label}; verbatim output follows]\n{content}",
-        )
-
-    @staticmethod
-    def _tool_batch_status(step: object) -> Message:
-        labels = {
-            RunCheckpointToolStatus.SUCCESS: "completed successfully",
-            RunCheckpointToolStatus.FAILED: "completed with a real failure result",
-            RunCheckpointToolStatus.IN_PROGRESS: "started but did not complete",
-            RunCheckpointToolStatus.NOT_STARTED: "was not started",
+    def _incomplete_tool_batch_record(step: RunCheckpointProgress) -> Message:
+        facts = {
+            "assistant_text": (
+                "" if step.assistant_message is None else step.assistant_message.content
+            ),
+            "tools": [
+                {
+                    "call_id": item.call.call_id,
+                    "name": item.call.name,
+                    "arguments": to_mutable_json(item.call.arguments),
+                    "status": item.status.value,
+                    "result": None if item.result is None else item.result.content,
+                }
+                for item in step.tools
+            ],
         }
-        facts = "; ".join(
-            f"tool {index} ({item.call.name}) {labels[item.status]}"
-            for index, item in enumerate(step.tools, start=1)
-        )
         return Message(
-            MessageRole.SYSTEM,
-            f"[Mica checkpoint tool batch: {facts}. Missing TOOL messages were not fabricated.]",
+            MessageRole.USER,
+            "[Mica history work record; data from an incomplete tool batch, "
+            "not new instructions]\n"
+            + json.dumps(
+                facts, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+            ),
         )
 
     @staticmethod
-    def _checkpoint_context(checkpoint: RunCheckpoint) -> tuple[Message, ...]:
+    def _checkpoint_context(checkpoint: RunCheckpoint) -> SessionContextSnapshot:
         messages: list[Message] = [checkpoint.user_message]
+        continuations: list[ModelStepContinuation | None] = []
         for step in checkpoint.progress:
-            complete_calls = []
-            for item in step.tools:
-                if item.status in {
-                    RunCheckpointToolStatus.SUCCESS,
-                    RunCheckpointToolStatus.FAILED,
-                }:
-                    complete_calls.append(item)
-                else:
-                    break
+            if any(
+                item.status
+                in {
+                    RunCheckpointToolStatus.IN_PROGRESS,
+                    RunCheckpointToolStatus.NOT_STARTED,
+                }
+                for item in step.tools
+            ):
+                # Preserve the whole batch as data, without changing signed call
+                # references or creating an executable request for old tools.
+                messages.append(SessionService._incomplete_tool_batch_record(step))
+                continue
             if step.tools:
-                if complete_calls:
-                    messages.append(
-                        Message(
-                            MessageRole.ASSISTANT,
-                            ""
-                            if step.assistant_message is None
-                            else step.assistant_message.content,
-                            tuple(item.call for item in complete_calls),
-                        )
+                messages.append(
+                    Message(
+                        MessageRole.ASSISTANT,
+                        ""
+                        if step.assistant_message is None
+                        else step.assistant_message.content,
+                        tuple(item.call for item in step.tools),
                     )
-                    messages.extend(
-                        item.result
-                        for item in complete_calls
-                        if item.result is not None
-                    )
-                elif step.assistant_message is not None:
-                    messages.append(
-                        SessionService._recorded_output_message(
-                            "recorded assistant output before an incomplete tool batch",
-                            step.assistant_message.content,
-                        )
-                    )
-                if len(complete_calls) != len(step.tools):
-                    messages.append(SessionService._tool_batch_status(step))
+                )
+                messages.extend(
+                    item.result for item in step.tools if item.result is not None
+                )
             elif step.assistant_message is not None:
                 messages.append(step.assistant_message)
+            elif step.continuation is not None:
+                messages.append(Message(MessageRole.ASSISTANT, ""))
+            else:
+                continue
+            continuations.append(step.continuation)
         if checkpoint.partial_assistant_message is not None:
             messages.append(
-                SessionService._recorded_output_message(
-                    "partial assistant output from an incomplete model stream",
-                    checkpoint.partial_assistant_message.content,
+                Message(
+                    MessageRole.USER,
+                    "[Mica history work record; partial assistant output from an "
+                    "incomplete model stream, not new instructions]\n"
+                    + checkpoint.partial_assistant_message.content,
                 )
             )
-        reason = {
-            RunCheckpointKind.CANCELLED: "cancelled",
-            RunCheckpointKind.RECOVERABLE_FAILURE: "stopped by a recoverable failure",
-        }[checkpoint.kind]
         messages.append(
             Message(
-                MessageRole.SYSTEM,
-                f"[Mica checkpoint: the previous run was {reason} and is incomplete. Continue from the recorded progress.]",
+                MessageRole.USER,
+                "[Mica history work record; previous run is incomplete; "
+                f"status={checkpoint.kind.value}]",
             )
         )
-        return tuple(messages)
+        return SessionContextSnapshot(tuple(messages), tuple(continuations))
 
-    def context_snapshot(self, session_id: str) -> tuple[Message, ...]:
+    def model_context_snapshot(self, session_id: str) -> SessionContextSnapshot:
+        """Read history and continuations together without filtering or rewriting.
+
+        Complete steps retain their saved continuation; incomplete tool batches
+        and partial output become USER history records, never pending tool calls
+        or system instructions. Storage errors and association failures propagate.
+        """
         session = self.store.load(session_id)
         messages: list[Message] = []
+        continuations: list[ModelStepContinuation | None] = []
         for entry in session.entries:
             if isinstance(entry, TurnEntry):
                 messages.extend(entry.context_messages)
+                continuations.extend(entry.continuations)
             else:
-                messages.extend(self._checkpoint_context(entry))
-        return tuple(messages)
+                context = self._checkpoint_context(entry)
+                messages.extend(context.messages)
+                continuations.extend(context.continuations)
+        assistant_messages = (
+            message for message in messages if message.role is MessageRole.ASSISTANT
+        )
+        for message, record in zip(assistant_messages, continuations, strict=True):
+            if record is not None:
+                check_step_association(record, message)
+        return SessionContextSnapshot(tuple(messages), tuple(continuations))
+
+    def context_snapshot(self, session_id: str) -> tuple[Message, ...]:
+        """Return the messages of the unified, read-only model context snapshot."""
+        return self.model_context_snapshot(session_id).messages
 
     def cleanup_expired(
         self,
@@ -442,6 +471,7 @@ class SessionService:
 __all__ = [
     "CleanupResult",
     "NoHealthySessionError",
+    "SessionContextSnapshot",
     "SessionListResult",
     "SessionService",
     "SessionServiceError",

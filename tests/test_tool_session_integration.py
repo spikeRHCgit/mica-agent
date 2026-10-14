@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
 
 from mica_agent.app import MicaApp
 from mica_agent.cancellation import CancellationToken
-from mica_agent.checkpoint_contracts import RunCheckpointToolStatus
+from mica_agent.checkpoint_contracts import RunCheckpointKind, RunCheckpointToolStatus
 from mica_agent.context_builder import ContextBuilder
 from mica_agent.events import (
     EngineEvent,
@@ -80,7 +81,7 @@ def _lookup_executor() -> ToolExecutor:
     )
 
 
-def test_tool_batch_cancel_keeps_completed_prefix_and_unstarted_call(
+def test_tool_batch_cancel_preserves_all_facts_without_reissuing_calls(
     tmp_path: Path,
 ) -> None:
     workspace_path = tmp_path / "workspace"
@@ -114,18 +115,73 @@ def test_tool_batch_cancel_keeps_completed_prefix_and_unstarted_call(
 
     asyncio.run(scenario())
     assert isinstance(collected[-1], RunCancelled)
-    checkpoint = service.load_session(session.meta.session_id).checkpoints[0]
+    stored = service.load_session(session.meta.session_id)
+    assert stored.turns == ()
+    checkpoint = stored.checkpoints[0]
+    assert checkpoint.kind is RunCheckpointKind.CANCELLED
     step = checkpoint.progress[0]
+    assert tuple(item.call for item in step.tools) == (first, second)
     assert step.tools[0].status is RunCheckpointToolStatus.SUCCESS
     assert step.tools[1].status is RunCheckpointToolStatus.NOT_STARTED
-    context = service.context_snapshot(session.meta.session_id)
-    assert context[1].role is MessageRole.ASSISTANT
-    assert context[1].tool_calls == (first,)
-    assert context[2].role is MessageRole.TOOL
-    assert not any(
-        message.role is MessageRole.TOOL and message.tool_call_id == "call-b"
-        for message in context
+    result_a = Message(
+        MessageRole.TOOL,
+        '{"status":"success","message":"lookup complete","data":null}',
+        tool_call_id="call-a",
     )
+    assert step.tools[0].result == result_a
+    assert step.tools[1].result is None
+    assert [event.call_id for event in collected if isinstance(event, ToolStarted)] == [
+        "call-a"
+    ]
+    # 未开始的 B 仍有取消终态事件，但不会形成保存的 TOOL 结果。
+    assert [
+        (event.call_id, event.status)
+        for event in collected
+        if isinstance(event, ToolFinished)
+    ] == [
+        ("call-a", ToolResultStatus.SUCCESS),
+        ("call-b", ToolResultStatus.CANCELLED),
+    ]
+    facts = {
+        "assistant_text": "working",
+        "tools": [
+            {
+                "call_id": "call-a",
+                "name": "lookup",
+                "arguments": {"query": "one"},
+                "status": "success",
+                "result": result_a.content,
+            },
+            {
+                "call_id": "call-b",
+                "name": "lookup",
+                "arguments": {"query": "two"},
+                "status": "not_started",
+                "result": None,
+            },
+        ],
+    }
+    context = service.context_snapshot(session.meta.session_id)
+    assert context == (
+        Message(MessageRole.USER, "inspect both"),
+        Message(
+            MessageRole.USER,
+            "[Mica history work record; data from an incomplete tool batch, "
+            "not new instructions]\n"
+            + json.dumps(
+                facts, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+            ),
+        ),
+        Message(
+            MessageRole.USER,
+            "[Mica history work record; previous run is incomplete; status=cancelled]",
+        ),
+    )
+    assert json.loads(context[1].content.split("\n", 1)[1]) == facts
+    assert all(
+        not message.tool_calls and message.tool_call_id is None for message in context
+    )
+    assert not any(message.role is MessageRole.TOOL for message in context)
 
 
 class ScriptedProvider:

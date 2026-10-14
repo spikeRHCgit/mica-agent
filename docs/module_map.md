@@ -73,12 +73,12 @@
 - `src/mica_agent/workspace_paths.py`：工作区相对路径及敏感路径分类。
 - `src/mica_agent/context_builder.py`：AGENTS 上下文读取、快照和安全诊断。
 - `src/mica_agent/jsonl_store.py`：JSONL 会话保存、读取、锁和版本迁移。
-- `src/mica_agent/session_service.py`：会话选择、修改、上下文和检查点业务。
+- `src/mica_agent/session_service.py`：会话选择、修改和检查点业务；一次读取统一投影通用消息与逐 assistant 对齐的续接，完整步骤保留原记录，不完整批次、部分输出及中断状态作为 USER 历史工作记录。
 - `tests/test_workspace.py`：工作区身份和根目录。
 - `tests/test_workspace_paths.py`：路径解析和越界边界。
 - `tests/test_context_builder.py`：AGENTS 读取和上下文快照。
 - `tests/test_jsonl_store.py`：JSONL 存储、损坏和原子写入。
-- `tests/test_session_service.py`：会话业务操作。
+- `tests/test_session_service.py`：会话业务操作、统一恢复快照与续接对齐、检查点历史工作记录和只读旧格式恢复。
 - `tests/test_session_integration.py`：会话与应用/存储集成。
 
 ## 工具与权限

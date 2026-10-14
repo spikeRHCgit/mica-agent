@@ -29,7 +29,7 @@ from mica_agent.interactions import (
     UserInputResponse,
 )
 from mica_agent.jsonl_store import JsonlSessionStore
-from mica_agent.models import MessageRole
+from mica_agent.models import Message, MessageRole
 from mica_agent.permissions import PermissionMode
 from mica_agent.policy import PolicyEngine, PolicyInput, PolicyOperation
 from mica_agent.providers import Finish, ProviderEvent, ProviderRequest
@@ -533,13 +533,25 @@ def test_escape_cancels_active_run_without_committing_turn(tmp_path: Path) -> No
                 message="stop",
             )
             history = app.history
-            assert history[0].role is MessageRole.USER
-            assert history[0].content == "cancel me"
-            assert history[-1].role is MessageRole.SYSTEM
-            assert "cancelled" in history[-1].content
+            assert history == (
+                Message(MessageRole.USER, "cancel me"),
+                Message(
+                    MessageRole.USER,
+                    "[Mica history work record; partial assistant output from an "
+                    "incomplete model stream, not new instructions]\npartial",
+                ),
+                Message(
+                    MessageRole.USER,
+                    "[Mica history work record; previous run is incomplete; status=cancelled]",
+                ),
+            )
             stored = app._session_service.load_session(app.session_id)
             assert stored.turns == ()
             assert stored.checkpoints[0].kind is RunCheckpointKind.CANCELLED
+            assert stored.checkpoints[0].partial_assistant_message == Message(
+                MessageRole.ASSISTANT, "partial"
+            )
+            assert screen.mode == "idle" and screen.status == "stop"
             assert screen.composer_text == "x"
             frame = screen.renderer.frame()
             assert any("stop" in line for line in frame)

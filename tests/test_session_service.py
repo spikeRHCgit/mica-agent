@@ -5,12 +5,27 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+from mica_agent.continuation_contracts import (
+    MAX_TURN_CONTINUATION_BYTES,
+    ChatReasoningItem,
+    ContinuationStatus,
+    MessagesRedactedThinkingItem,
+    MessagesThinkingItem,
+    ModelStepContinuation,
+    ProviderApi,
+    ResponsesReasoningItem,
+    TextItem,
+    TextPhase,
+    ToolCallItem,
+    check_step_association,
+    continuation_size,
+)
 from mica_agent.jsonl_store import (
     JsonlSessionStore,
     SessionDeleteStatus,
@@ -29,6 +44,7 @@ from mica_agent.session_contracts import (
 )
 from mica_agent.session_service import (
     NoHealthySessionError,
+    SessionContextSnapshot,
     SessionService,
     TurnNotFoundError,
 )
@@ -41,6 +57,90 @@ from mica_agent.tool_presentation import (
 from mica_agent.workspace import resolve_workspace
 
 NOW = datetime(2026, 8, 22, 3, 4, 5, tzinfo=UTC)
+
+
+def partial_history_record(content: str) -> Message:
+    return Message(
+        MessageRole.USER,
+        "[Mica history work record; partial assistant output from an "
+        "incomplete model stream, not new instructions]\n" + content,
+    )
+
+
+def interruption_record(kind: RunCheckpointKind) -> Message:
+    return Message(
+        MessageRole.USER,
+        f"[Mica history work record; previous run is incomplete; status={kind.value}]",
+    )
+
+
+def incomplete_batch_record(facts: dict) -> Message:
+    return Message(
+        MessageRole.USER,
+        "[Mica history work record; data from an incomplete tool batch, "
+        "not new instructions]\n"
+        + json.dumps(facts, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+    )
+
+
+def step_continuation(
+    api: ProviderApi,
+    message: Message,
+    *,
+    provider: str = "saved-provider",
+    model: str = "saved-model",
+    status: ContinuationStatus = ContinuationStatus.REPLAYABLE,
+) -> ModelStepContinuation:
+    if status is ContinuationStatus.UNREPLAYABLE:
+        return ModelStepContinuation(provider, model, api, status)
+    if api is ProviderApi.OPENAI_COMPLETIONS:
+        items = (ChatReasoningItem("private-reasoning", "private-reasoning-alt", ()),)
+    else:
+        items = (
+            (
+                ResponsesReasoningItem(
+                    "reasoning-id", ("private-summary",), "opaque-cipher"
+                ),
+            )
+            if api is ProviderApi.OPENAI_RESPONSES
+            else (
+                MessagesThinkingItem("private-thinking", "opaque-signature"),
+                MessagesRedactedThinkingItem("opaque-data"),
+            )
+        )
+        if message.content:
+            phase = (
+                TextPhase.COMMENTARY if api is ProviderApi.OPENAI_RESPONSES else None
+            )
+            items += (TextItem(phase),)
+        items += tuple(ToolCallItem(call.call_id) for call in message.tool_calls)
+    return ModelStepContinuation(provider, model, api, status, items)
+
+
+def recorded_tool(
+    call: ToolCall, status: RunCheckpointToolStatus
+) -> RunCheckpointToolProgress:
+    if status in {
+        RunCheckpointToolStatus.IN_PROGRESS,
+        RunCheckpointToolStatus.NOT_STARTED,
+    }:
+        return RunCheckpointToolProgress(call, status)
+    return RunCheckpointToolProgress(
+        call,
+        status,
+        Message(
+            MessageRole.TOOL, "真实结果 " + call.call_id, tool_call_id=call.call_id
+        ),
+        ToolPresentationSnapshot(
+            call.call_id,
+            call.name,
+            ToolPresentationKind.READ,
+            ToolPresentationStatus.SUCCESS
+            if status is RunCheckpointToolStatus.SUCCESS
+            else ToolPresentationStatus.FAILED,
+            {"path": "presentation-only.txt"},
+        ),
+    )
 
 
 def test_update_selection_preserves_all_other_metadata_and_entries(tmp_path):
@@ -660,69 +760,137 @@ def test_checkpoint_timeline_context_and_lifecycle_operations(tmp_path: Path) ->
     assert committed.entries == (first, checkpoint, last)
     assert committed.turns == (first, last)
     assert committed.checkpoints == (checkpoint,)
-    context = service.context_snapshot("session")
-    assert context[0:2] == first.context_messages
-    assert context[2] == checkpoint.user_message
-    assert context[3].role is MessageRole.SYSTEM
-    assert "verbatim output follows" in context[3].content
-    assert "cancelled" in context[4].content
-    assert context[-2:] == last.context_messages
-    assert service.context_snapshot("session") == context
+    expected = SessionContextSnapshot(
+        (
+            *first.context_messages,
+            checkpoint.user_message,
+            partial_history_record("partial output"),
+            interruption_record(RunCheckpointKind.CANCELLED),
+            *last.context_messages,
+        ),
+        (None, None),
+    )
+    assert service.model_context_snapshot("session") == expected
+    assert service.context_snapshot("session") == expected.messages
 
     branched = service.branch_session("session")
     assert branched.entries == committed.entries
+    assert service.model_context_snapshot("branch") == expected
     clock.value = NOW + timedelta(seconds=3)
     rewound = service.rewind_session("session", "turn-2")
     assert rewound.entries == (first, checkpoint)
-    assert service.clear_session("session").entries == ()
-
-
-def test_tool_batch_context_keeps_a_and_does_not_fabricate_b(tmp_path: Path) -> None:
-    service, _, _ = make_service(tmp_path, session_ids=["session"])
-    service.create_session()
-    call_a = ToolCall("call-a", "read", {"path": "a.txt"})
-    call_b = ToolCall("call-b", "write", {"path": "b.txt", "content": "x"})
-    result_a = Message(MessageRole.TOOL, '{"status":"success"}', tool_call_id="call-a")
-    presentation_a = ToolPresentationSnapshot(
-        "call-a",
-        "read",
-        ToolPresentationKind.READ,
-        ToolPresentationStatus.SUCCESS,
-        {"path": "a.txt"},
+    assert service.model_context_snapshot("session") == SessionContextSnapshot(
+        expected.messages[:-2], (None,)
     )
+    assert service.clear_session("session").entries == ()
+    assert service.model_context_snapshot("session") == SessionContextSnapshot((), ())
+    assert service.model_context_snapshot("branch") == expected
+
+
+@pytest.mark.parametrize(
+    "statuses",
+    [
+        (RunCheckpointToolStatus.SUCCESS, RunCheckpointToolStatus.NOT_STARTED),
+        (RunCheckpointToolStatus.FAILED, RunCheckpointToolStatus.IN_PROGRESS),
+        (RunCheckpointToolStatus.IN_PROGRESS, RunCheckpointToolStatus.NOT_STARTED),
+        (RunCheckpointToolStatus.NOT_STARTED, RunCheckpointToolStatus.NOT_STARTED),
+    ],
+)
+@pytest.mark.parametrize("assistant_text", ["working", ""])
+def test_incomplete_tool_batch_preserves_all_facts_without_reissuing_calls(
+    tmp_path: Path,
+    statuses,
+    assistant_text: str,
+) -> None:
+    service, store, _ = make_service(tmp_path, session_ids=["session"])
+    service.create_session(selection=SessionSelection("different", "current"))
+    calls = (
+        ToolCall("call-a", "read", {"path": "a.txt", "options": [1, {"flag": True}]}),
+        ToolCall("call-b", "write", {"path": "b.txt", "content": "x"}),
+    )
+    assistant = Message(MessageRole.ASSISTANT, assistant_text, calls)
+    record = step_continuation(ProviderApi.ANTHROPIC_MESSAGES, assistant)
     checkpoint = RunCheckpoint(
         "checkpoint-tools",
-        "run-tools-checkpoint",
+        "run-tools",
         RunCheckpointKind.RECOVERABLE_FAILURE,
         Message(MessageRole.USER, "run both tools"),
         NOW,
         progress=(
             RunCheckpointProgress(
-                assistant_message=Message(MessageRole.ASSISTANT, "working"),
-                tools=(
-                    RunCheckpointToolProgress(
-                        call_a,
-                        RunCheckpointToolStatus.SUCCESS,
-                        result_a,
-                        presentation_a,
-                    ),
-                    RunCheckpointToolProgress(
-                        call_b, RunCheckpointToolStatus.NOT_STARTED
-                    ),
+                Message(MessageRole.ASSISTANT, assistant_text)
+                if assistant_text
+                else None,
+                tuple(
+                    recorded_tool(call, status)
+                    for call, status in zip(calls, statuses, strict=True)
                 ),
+                record,
             ),
         ),
     )
-
     service.commit_checkpoint("session", checkpoint)
-    context = service.context_snapshot("session")
-
-    assert context[1].role is MessageRole.ASSISTANT
-    assert context[1].tool_calls == (call_a,)
-    assert context[2] == result_a
-    assert all(message.tool_call_id != "call-b" for message in context)
-    assert "write" in context[3].content and "was not started" in context[3].content
-    assert "recoverable failure" in context[-1].content
+    following = replace(
+        make_turn(1),
+        continuations=(
+            step_continuation(
+                ProviderApi.OPENAI_RESPONSES,
+                make_turn(1).assistant_message,
+            ),
+        ),
+    )
+    service.commit_turn("session", following)
+    original = store.path_for_session("session").read_bytes()
+    facts = {
+        "assistant_text": assistant_text,
+        "tools": [
+            {
+                "call_id": "call-a",
+                "name": "read",
+                "arguments": {"path": "a.txt", "options": [1, {"flag": True}]},
+                "status": statuses[0].value,
+                "result": "真实结果 call-a"
+                if statuses[0]
+                in {RunCheckpointToolStatus.SUCCESS, RunCheckpointToolStatus.FAILED}
+                else None,
+            },
+            {
+                "call_id": "call-b",
+                "name": "write",
+                "arguments": {"path": "b.txt", "content": "x"},
+                "status": statuses[1].value,
+                "result": None,
+            },
+        ],
+    }
+    expected = SessionContextSnapshot(
+        (
+            checkpoint.user_message,
+            incomplete_batch_record(facts),
+            interruption_record(checkpoint.kind),
+            *following.context_messages,
+        ),
+        following.continuations,
+    )
+    assert service.model_context_snapshot("session") == expected
+    assert service.context_snapshot("session") == expected.messages
+    assert json.loads(expected.messages[1].content.split("\n", 1)[1]) == facts
+    assert all(
+        not message.tool_calls and message.tool_call_id is None
+        for message in expected.messages
+    )
+    for private in (
+        "presentation-only.txt",
+        "private-thinking",
+        "opaque-signature",
+        "opaque-data",
+    ):
+        assert all(private not in message.content for message in expected.messages)
+    assert store.path_for_session("session").read_bytes() == original
+    assert (
+        service.load_session("session").checkpoints[0].progress[0].continuation
+        == record
+    )
 
 
 def test_only_checkpoint_session_is_healthy_and_activity_uses_checkpoint(
@@ -793,8 +961,12 @@ def test_context_snapshot_redacts_checkpoint_absolute_paths(tmp_path: Path) -> N
         "path": "[REDACTED_PATH]",
         "url": url,
     }
-    assert context[3].content.endswith("partial output")
-    assert "partial output" in context[3].content
+    assert context[3] == partial_history_record("partial output")
+    assert context[4] == interruption_record(RunCheckpointKind.CANCELLED)
+    assert all(message.role is not MessageRole.SYSTEM for message in context)
+    assert service.model_context_snapshot("session") == SessionContextSnapshot(
+        context, (None,)
+    )
 
 
 def test_store_nonblocking_delete_distinguishes_statuses(tmp_path: Path) -> None:
@@ -818,3 +990,415 @@ def test_selection_survives_business_metadata_operations_and_timeline_writes(tmp
     assert service.rewind_session("selected", "turn-1").meta.selection == selection
     assert service.clear_session("selected").meta.selection == selection
     assert store.load("selected").entries == ()
+
+
+def test_model_context_snapshot_is_empty_frozen_and_content_free_in_repr(tmp_path):
+    service, store, _ = make_service(tmp_path, session_ids=["session"])
+    service.create_session()
+    assert service.model_context_snapshot("session") == SessionContextSnapshot((), ())
+    call = ToolCall("private-call", "read", {"path": "private-argument.txt"})
+    assistant = Message(MessageRole.ASSISTANT, "private-content", (call,))
+    record = step_continuation(ProviderApi.ANTHROPIC_MESSAGES, assistant)
+    checkpoint = RunCheckpoint(
+        "cp",
+        "run",
+        RunCheckpointKind.CANCELLED,
+        Message(MessageRole.USER, "private-user"),
+        NOW,
+        (
+            RunCheckpointProgress(
+                Message(MessageRole.ASSISTANT, assistant.content),
+                (recorded_tool(call, RunCheckpointToolStatus.SUCCESS),),
+                record,
+            ),
+        ),
+    )
+    service.commit_checkpoint("session", checkpoint)
+    snapshot = service.model_context_snapshot("session")
+    assert isinstance(snapshot.messages, tuple) and isinstance(
+        snapshot.continuations, tuple
+    )
+    assert "SessionContextSnapshot" in repr(snapshot)
+    for private in (
+        "private-user",
+        "private-content",
+        "private-call",
+        "private-argument.txt",
+        "saved-provider",
+        "saved-model",
+        "private-thinking",
+        "opaque-signature",
+        "opaque-data",
+    ):
+        assert private not in repr(snapshot)
+    with pytest.raises(FrozenInstanceError):
+        snapshot.messages = ()
+    assert not hasattr(snapshot, "__dict__")
+    assert store.load("session").checkpoints == (checkpoint,)
+
+
+def test_model_context_snapshot_loads_once_and_old_entry_delegates(
+    tmp_path, monkeypatch
+):
+    service, store, _ = make_service(tmp_path, session_ids=["session"])
+    service.create_session()
+    turn = replace(
+        make_turn(1),
+        continuations=(
+            step_continuation(
+                ProviderApi.OPENAI_RESPONSES,
+                make_turn(1).assistant_message,
+            ),
+        ),
+    )
+    service.commit_turn("session", turn)
+    original_load = store.load
+    reads = []
+
+    def load_once(session_id):
+        reads.append(session_id)
+        assert reads == ["session"]
+        return original_load(session_id)
+
+    monkeypatch.setattr(store, "load", load_once)
+    expected = SessionContextSnapshot(turn.context_messages, turn.continuations)
+    assert service.model_context_snapshot("session") == expected
+    assert reads == ["session"]
+    delegated = []
+
+    def snapshot(session_id):
+        delegated.append(session_id)
+        return expected
+
+    monkeypatch.setattr(service, "model_context_snapshot", snapshot)
+    assert service.context_snapshot("session") == expected.messages
+    assert delegated == ["session"] and reads == ["session"]
+
+
+@pytest.mark.parametrize("api", list(ProviderApi))
+@pytest.mark.parametrize("text", ["working", ""])
+def test_complete_checkpoint_batch_keeps_all_calls_real_results_and_continuation(
+    tmp_path, api, text
+):
+    service, store, _ = make_service(tmp_path, session_ids=["session"])
+    service.create_session(selection=SessionSelection("current", "different"))
+    calls = (
+        ToolCall("a", "read", {"path": "a.txt"}),
+        ToolCall("b", "read", {"path": "b.txt"}),
+    )
+    tools = (
+        recorded_tool(calls[0], RunCheckpointToolStatus.SUCCESS),
+        recorded_tool(calls[1], RunCheckpointToolStatus.FAILED),
+    )
+    assistant = Message(MessageRole.ASSISTANT, text, calls)
+    record = step_continuation(api, assistant)
+    checkpoint = RunCheckpoint(
+        "cp",
+        "run",
+        RunCheckpointKind.CANCELLED,
+        Message(MessageRole.USER, "inspect"),
+        NOW,
+        (
+            RunCheckpointProgress(),
+            RunCheckpointProgress(
+                Message(MessageRole.ASSISTANT, text) if text else None, tools, record
+            ),
+            RunCheckpointProgress(Message(MessageRole.ASSISTANT, "after failed tool")),
+        ),
+    )
+    service.commit_checkpoint("session", checkpoint)
+    path = store.path_for_session("session")
+    original = path.read_bytes()
+    expected = SessionContextSnapshot(
+        (
+            checkpoint.user_message,
+            assistant,
+            tools[0].result,
+            tools[1].result,
+            Message(MessageRole.ASSISTANT, "after failed tool"),
+            interruption_record(checkpoint.kind),
+        ),
+        (record, None),
+    )
+    assert service.model_context_snapshot("session") == expected
+    assert service.context_snapshot("session") == expected.messages
+    check_step_association(expected.continuations[0], expected.messages[1])
+    assert path.read_bytes() == original
+
+
+def test_mixed_timeline_preserves_sources_statuses_thinking_and_lifecycle(tmp_path):
+    service, store, _ = make_service(tmp_path, session_ids=["source", "branch"])
+    service.create_session(
+        selection=SessionSelection("current", "ignored-for-projection")
+    )
+    call = ToolCall("turn-call", "read", {"path": "turn.txt"})
+    tool_message = Message(MessageRole.ASSISTANT, "", (call,))
+    chat_record = step_continuation(
+        ProviderApi.OPENAI_COMPLETIONS,
+        tool_message,
+        provider="chat-provider",
+        model="chat-model",
+    )
+    first = replace(
+        make_turn(1),
+        intermediate_messages=(
+            tool_message,
+            Message(MessageRole.TOOL, "turn fact", tool_call_id=call.call_id),
+        ),
+        continuations=(chat_record, None),
+    )
+    service.commit_turn("source", first)
+    empty = Message(MessageRole.ASSISTANT, "")
+    thinking_record = step_continuation(
+        ProviderApi.ANTHROPIC_MESSAGES,
+        empty,
+        provider="messages-provider",
+        model="messages-model",
+    )
+    text = Message(MessageRole.ASSISTANT, "completed text")
+    responses_record = step_continuation(
+        ProviderApi.OPENAI_RESPONSES,
+        text,
+        provider="responses-provider",
+        model="responses-model",
+    )
+    checkpoint = RunCheckpoint(
+        "cp",
+        "run-cp",
+        RunCheckpointKind.CANCELLED,
+        Message(MessageRole.USER, "continue"),
+        NOW,
+        (
+            RunCheckpointProgress(),
+            RunCheckpointProgress(empty),
+            RunCheckpointProgress(continuation=thinking_record),
+            RunCheckpointProgress(text, continuation=responses_record),
+        ),
+        partial_assistant_message=Message(MessageRole.ASSISTANT, "unfinished text"),
+    )
+    service.commit_checkpoint("source", checkpoint)
+    last = replace(
+        make_turn(2),
+        assistant_message=empty,
+        continuations=(
+            step_continuation(
+                ProviderApi.OPENAI_RESPONSES,
+                empty,
+                provider="another-provider",
+                model="another-model",
+                status=ContinuationStatus.UNREPLAYABLE,
+            ),
+        ),
+    )
+    service.commit_turn("source", last)
+    expected = SessionContextSnapshot(
+        (
+            *first.context_messages,
+            checkpoint.user_message,
+            empty,
+            empty,
+            text,
+            partial_history_record("unfinished text"),
+            interruption_record(checkpoint.kind),
+            *last.context_messages,
+        ),
+        (
+            *first.continuations,
+            None,
+            thinking_record,
+            responses_record,
+            *last.continuations,
+        ),
+    )
+    path = store.path_for_session("source")
+    original = path.read_bytes()
+    assert service.model_context_snapshot("source") == expected
+    assert service.context_snapshot("source") == expected.messages
+    assert len(expected.continuations) == sum(
+        m.role is MessageRole.ASSISTANT for m in expected.messages
+    )
+    for message, record in zip(
+        (m for m in expected.messages if m.role is MessageRole.ASSISTANT),
+        expected.continuations,
+        strict=True,
+    ):
+        if record is not None:
+            check_step_association(record, message)
+    assert path.read_bytes() == original
+    service.branch_session("source")
+    assert service.model_context_snapshot("branch") == expected
+    service.rewind_session("branch", last.turn_id)
+    assert service.model_context_snapshot("branch") == SessionContextSnapshot(
+        expected.messages[:-2], expected.continuations[:-1]
+    )
+    service.clear_session("branch")
+    assert service.model_context_snapshot("branch") == SessionContextSnapshot((), ())
+    assert service.model_context_snapshot("source") == expected
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("kind", list(RunCheckpointKind))
+@pytest.mark.parametrize("partial", [None, ""])
+def test_checkpoint_without_progress_records_real_interruption_as_user(
+    tmp_path, kind, partial
+):
+    service, _, _ = make_service(tmp_path, session_ids=["session"])
+    service.create_session()
+    checkpoint = RunCheckpoint(
+        "cp",
+        "run",
+        kind,
+        Message(MessageRole.USER, "request"),
+        NOW,
+        partial_assistant_message=None
+        if partial is None
+        else Message(MessageRole.ASSISTANT, partial),
+    )
+    service.commit_checkpoint("session", checkpoint)
+    messages = (checkpoint.user_message,)
+    if partial is not None:
+        messages += (partial_history_record(partial),)
+    expected = SessionContextSnapshot((*messages, interruption_record(kind)), ())
+    assert service.model_context_snapshot("session") == expected
+    assert service.context_snapshot("session") == expected.messages
+
+
+def test_snapshot_does_not_apply_one_turn_limit_to_entire_session(tmp_path):
+    service, _, _ = make_service(tmp_path, session_ids=["session"])
+    service.create_session()
+    record = ModelStepContinuation(
+        "provider",
+        "model",
+        ProviderApi.OPENAI_RESPONSES,
+        ContinuationStatus.REPLAYABLE,
+        (
+            ResponsesReasoningItem("reasoning", (), "x" * 600_000),
+            TextItem(TextPhase.FINAL_ANSWER),
+        ),
+    )
+    assert (
+        continuation_size(record)
+        < MAX_TURN_CONTINUATION_BYTES
+        < continuation_size(record) * 2
+    )
+    turns = tuple(replace(make_turn(n), continuations=(record,)) for n in (1, 2))
+    for turn in turns:
+        service.commit_turn("session", turn)
+    assert service.model_context_snapshot("session") == SessionContextSnapshot(
+        tuple(message for turn in turns for message in turn.context_messages),
+        (record, record),
+    )
+
+
+@pytest.mark.parametrize("entry_point", ["model_context_snapshot", "context_snapshot"])
+def test_snapshot_keeps_missing_corrupt_and_invalid_association_errors_safe(
+    tmp_path, entry_point
+):
+    service, store, _ = make_service(tmp_path, session_ids=["session"])
+    snapshot = getattr(service, entry_point)
+    with pytest.raises(SessionNotFoundError):
+        snapshot("missing")
+    service.create_session()
+    call = ToolCall("expected-call", "read", {"path": "a.txt"})
+    assistant = Message(MessageRole.ASSISTANT, "", (call,))
+    checkpoint = RunCheckpoint(
+        "cp",
+        "run",
+        RunCheckpointKind.CANCELLED,
+        Message(MessageRole.USER, "request"),
+        NOW,
+        (
+            RunCheckpointProgress(
+                tools=(recorded_tool(call, RunCheckpointToolStatus.SUCCESS),),
+                continuation=step_continuation(
+                    ProviderApi.ANTHROPIC_MESSAGES, assistant
+                ),
+            ),
+        ),
+    )
+    service.commit_checkpoint("session", checkpoint)
+    path = store.path_for_session("session")
+    records = [json.loads(line) for line in path.read_bytes().splitlines()]
+    records[1]["progress"][0]["continuation"]["items"][-1]["call_id"] = (
+        "private-wrong-call"
+    )
+    invalid = b"".join(json.dumps(r).encode() + b"\n" for r in records)
+    for payload in (
+        invalid,
+        b"private corrupt content https://private.test sk-test-private",
+    ):
+        path.write_bytes(payload)
+        with pytest.raises(SessionFormatError) as caught:
+            snapshot("session")
+        for private in (
+            "private-wrong-call",
+            "private corrupt",
+            "https://private.test",
+            "sk-test-private",
+        ):
+            assert private not in str(caught.value)
+        assert path.read_bytes() == payload
+
+
+@pytest.mark.parametrize("version", [1, 2, 3, 4, 5])
+def test_snapshot_reads_fixed_legacy_wire_without_migration(tmp_path, version):
+    service, store, _ = make_service(tmp_path)
+    session_id = f"legacy-v{version}"
+    path = store.path_for_session(session_id)
+    if version == 1:
+        original = write_v1_session(store, session_id)
+        expected = SessionContextSnapshot(
+            (
+                Message(MessageRole.USER, "legacy user"),
+                Message(MessageRole.ASSISTANT, "legacy answer"),
+            ),
+            (None,),
+        )
+    else:
+        # 按实际旧版字段手写固定记录，不调用新 serializer 或改写其版本号。
+        entries = {
+            2: b'{"record_type":"turn","format_version":2,"turn_id":"old-turn","run_id":"old-run","messages":[{"role":"user","content":"inspect"},{"role":"assistant","content":"","tool_calls":[{"call_id":"a","name":"read","arguments":{"path":"a.txt"}}]},{"role":"tool","content":"one","tool_call_id":"a"},{"role":"assistant","content":"done"}],"completed_at":"2026-08-22T03:04:05.000000+00:00"}\n',
+            3: b'{"record_type":"turn","format_version":3,"turn_id":"old-turn","run_id":"old-run","messages":[{"role":"user","content":"inspect"},{"role":"assistant","content":"","tool_calls":[{"call_id":"a","name":"read","arguments":{"path":"a.txt"}}]},{"role":"tool","content":"one","tool_call_id":"a"},{"role":"assistant","content":"done"}],"tool_presentations":[{"call_id":"a","tool_name":"read","kind":"read","status":"success","payload":{"path":"a.txt"},"message":null}],"completed_at":"2026-08-22T03:04:05.000000+00:00"}\n',
+            4: b'{"record_type":"run_checkpoint","format_version":4,"checkpoint_id":"old-checkpoint","run_id":"old-run","kind":"cancelled","user_message":{"role":"user","content":"continue"},"progress":[{"assistant_message":{"role":"assistant","content":"old step"},"tools":[]}],"partial_assistant_message":{"role":"assistant","content":"partial"},"recorded_at":"2026-08-22T03:04:05.000000+00:00"}\n',
+            5: b'{"record_type":"turn","format_version":5,"turn_id":"old-turn","run_id":"old-run","messages":[{"role":"user","content":"inspect"},{"role":"assistant","content":"","tool_calls":[{"call_id":"a","name":"read","arguments":{"path":"a.txt"}}]},{"role":"tool","content":"one","tool_call_id":"a"},{"role":"assistant","content":"done"}],"tool_presentations":[{"call_id":"a","tool_name":"read","kind":"read","status":"success","payload":{"path":"a.txt"},"message":null}],"completed_at":"2026-08-22T03:04:05.000000+00:00"}\n'
+            b'{"record_type":"run_checkpoint","format_version":5,"checkpoint_id":"old-checkpoint","run_id":"old-checkpoint-run","kind":"cancelled","user_message":{"role":"user","content":"continue"},"progress":[{"assistant_message":{"role":"assistant","content":"old step"},"tools":[]}],"partial_assistant_message":{"role":"assistant","content":"partial"},"recorded_at":"2026-08-22T03:04:05.000000+00:00"}\n',
+        }
+        meta = {
+            "record_type": "session_meta",
+            "format_version": version,
+            "session_id": session_id,
+            "workspace_id": store.workspace.workspace_id,
+            "workspace_path": str(store.workspace.workspace_path),
+            "title": "legacy",
+            "created_at": NOW.isoformat(timespec="microseconds"),
+            "updated_at": NOW.isoformat(timespec="microseconds"),
+        }
+        if version == 5:
+            meta.update(provider_id="old-provider", model_id="old-model")
+        original = json.dumps(meta).encode() + b"\n" + entries[version]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(original)
+        tool_history = (
+            Message(MessageRole.USER, "inspect"),
+            Message(
+                MessageRole.ASSISTANT, "", (ToolCall("a", "read", {"path": "a.txt"}),)
+            ),
+            Message(MessageRole.TOOL, "one", tool_call_id="a"),
+            Message(MessageRole.ASSISTANT, "done"),
+        )
+        checkpoint_history = (
+            Message(MessageRole.USER, "continue"),
+            Message(MessageRole.ASSISTANT, "old step"),
+            partial_history_record("partial"),
+            interruption_record(RunCheckpointKind.CANCELLED),
+        )
+        messages = checkpoint_history if version == 4 else tool_history
+        if version == 5:
+            messages += checkpoint_history
+        expected = SessionContextSnapshot(
+            messages, (None,) * (1 if version == 4 else 3 if version == 5 else 2)
+        )
+    assert service.model_context_snapshot(session_id) == expected
+    assert service.context_snapshot(session_id) == expected.messages
+    assert service.load_session(session_id).meta.format_version == version
+    assert path.read_bytes() == original
