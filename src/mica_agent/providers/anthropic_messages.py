@@ -43,6 +43,7 @@ from .base import (
     TextDelta,
 )
 
+DEFAULT_MAX_TOKENS = 4096
 _EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
 DEFAULT_THINKING_LEVEL_MAP = MappingProxyType(
     {effort: effort.value for effort in ReasoningEffort if effort.value in _EFFORTS}
@@ -683,7 +684,7 @@ class AnthropicMessagesProvider:
             "model": request.model,
             "messages": messages,
             "stream": True,
-            "max_tokens": request.max_tokens or 4096,
+            "max_tokens": request.max_tokens or DEFAULT_MAX_TOKENS,
         }
         if system:
             payload["system"] = system

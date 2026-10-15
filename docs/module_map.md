@@ -39,11 +39,11 @@
 
 - `src/mica_agent/config_contracts.py`：不可变设置、能力、来源与独立连接绑定。
 - `src/mica_agent/config_store.py`：配置 JSON 读取及默认目标项锁内原子保存。
-- `src/mica_agent/config_service.py`：配置校验合并、启动选择及每轮有效能力。
+- `src/mica_agent/config_service.py`：配置校验合并、三接口连接绑定与启动选择，按实际接口计算每轮默认预算和有效思考能力，保留显式声明、偏好及来源。
 - `src/mica_agent/_credential_permissions.py`：凭据文件及父目录的实际权限保护与只读访问。
 - `tests/test_config_contracts.py`：配置类型、预算及映射不可变性。
 - `tests/test_config_store.py`：严格 JSON、并发保存及失败字节保护。
-- `tests/test_config_service.py`：来源选择、能力降级与敏感诊断。
+- `tests/test_config_service.py`：三接口继承与覆盖、连接可用性与来源选择、接口默认/显式能力、偏好降级、预算保护及敏感诊断。
 - `tests/test_credential_permissions.py`：隔离文件/目录真实权限与查询失败验证。
 
 ## 公共契约

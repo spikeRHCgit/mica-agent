@@ -22,15 +22,35 @@ from .config_contracts import (
 )
 from .config_store import ConfigStore
 from .permissions import PermissionMode
+from .providers.anthropic_messages import (
+    DEFAULT_MAX_TOKENS as MESSAGES_MAX_TOKENS,
+)
+from .providers.anthropic_messages import (
+    DEFAULT_THINKING_LEVEL_MAP as MESSAGES_THINKING_LEVEL_MAP,
+)
 from .providers.openai_compatible import (
-    DEFAULT_MAX_TOKENS,
-    DEFAULT_THINKING_LEVEL_MAP,
+    DEFAULT_MAX_TOKENS as COMPLETIONS_MAX_TOKENS,
+)
+from .providers.openai_compatible import (
+    DEFAULT_THINKING_LEVEL_MAP as COMPLETIONS_THINKING_LEVEL_MAP,
+)
+from .providers.openai_compatible import (
     resolve_endpoint,
+)
+from .providers.openai_responses import (
+    DEFAULT_MAX_TOKENS as RESPONSES_MAX_TOKENS,
+)
+from .providers.openai_responses import (
+    DEFAULT_THINKING_LEVEL_MAP as RESPONSES_THINKING_LEVEL_MAP,
 )
 from .reasoning import ReasoningDisplayMode, ReasoningEffort
 from .session_contracts import SessionSelection
 
-_APIS = {"openai-completions", "openai-responses", "anthropic-messages"}
+_API_DEFAULTS = {
+    "openai-completions": (COMPLETIONS_MAX_TOKENS, COMPLETIONS_THINKING_LEVEL_MAP),
+    "openai-responses": (RESPONSES_MAX_TOKENS, RESPONSES_THINKING_LEVEL_MAP),
+    "anthropic-messages": (MESSAGES_MAX_TOKENS, MESSAGES_THINKING_LEVEL_MAP),
+}
 _CHANNELS = {"custom", "chatgpt-subscription", "openrouter", "deepseek", "opencode-go"}
 _SETTINGS = {
     "reasoningEffort": (ReasoningEffort, ReasoningEffort.OFF),
@@ -283,7 +303,7 @@ class ConfigService:
                 channel = "custom"
                 warnings.append("invalid channel; custom default used")
             api = raw.get("api", "openai-completions")
-            if not isinstance(api, str) or api not in _APIS:
+            if not isinstance(api, str) or api not in _API_DEFAULTS:
                 warnings.append("invalid provider protocol; connection unavailable")
                 continue
             try:
@@ -336,7 +356,7 @@ class ConfigService:
                     warnings,
                 )
                 model_api = model_raw.get("api", api)
-                if not isinstance(model_api, str) or model_api not in _APIS:
+                if not isinstance(model_api, str) or model_api not in _API_DEFAULTS:
                     warnings.append("invalid model protocol; model unavailable")
                     continue
                 model_name = model_raw.get("name", model_raw["id"])
@@ -351,7 +371,7 @@ class ConfigService:
                     self._capabilities(model_raw, warnings),
                 )
                 parsed.append(model)
-                if enabled and key is not None and model_api == "openai-completions":
+                if enabled and key is not None:
                     connections[selection] = ConnectionBinding(
                         selection, address, key, model, "saved directory"
                     )
@@ -466,10 +486,11 @@ class ConfigService:
         ):
             raise ConfigError("connection changed on disk; restart before submitting")
         capabilities = connection.model.capabilities
+        default_budget, default_mapping = _API_DEFAULTS[connection.model.api]
         budget = (
             capabilities.max_tokens
             if capabilities.max_tokens is not None
-            else DEFAULT_MAX_TOKENS
+            else default_budget
         )
         if (
             capabilities.sources.get("contextWindow") == "explicit"
@@ -478,7 +499,7 @@ class ConfigService:
             raise ConfigError(
                 "output budget conflicts with the explicit context capacity"
             )
-        mapping = capabilities.thinking_level_map or DEFAULT_THINKING_LEVEL_MAP
+        mapping = capabilities.thinking_level_map or default_mapping
         effort = snapshot.settings.reasoning_effort
         if not capabilities.reasoning or effort not in mapping:
             effort = ReasoningEffort.OFF

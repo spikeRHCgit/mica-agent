@@ -1833,7 +1833,7 @@ def test_model_choices_filter_sort_and_refresh_flags(tmp_path):
     local["models"] = [
         {"id": "a", "name": "Same", "contextWindow": 123456},
         {"id": "b", "name": "Alpha"},
-        {"id": "unsupported", "api": "anthropic-messages"},
+        {"id": "unsupported", "api": "unknown-protocol"},
     ]
     directory["providers"]["other"] = {
         "name": "Beta",
@@ -1939,7 +1939,7 @@ def test_failed_switch_preserves_connection_selection_and_file(
         if failure == "disabled":
             directory["providers"]["local"]["enabled"] = False
         else:
-            directory["providers"]["local"]["models"][1]["api"] = "anthropic-messages"
+            directory["providers"]["local"]["models"][1]["api"] = "unknown-protocol"
         directory_path.write_text(json.dumps(directory))
     elif failure == "config":
         monkeypatch.setattr(configuration, "load", fail)
