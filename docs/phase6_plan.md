@@ -207,7 +207,8 @@
 - 新建 `src/mica_agent/continuation_contracts.py`（公共契约组）：独立的模型步骤续接记录契约，和 `Message`/`ToolCall` 分开；
 - 扩充 `src/mica_agent/providers/base.py`：`ProviderRequest` 新增续接输入、`Finish` 返回续接；三个适配器共用的 SSE 读取和错误分类，只在确实重复时抽到这里；
 - 扩充 `src/mica_agent/engine.py`：在本轮工具往返中携带续接；
-- 扩充 `src/mica_agent/app.py`：按接口 ID 从一张固定表选适配器；
+- 扩充 `src/mica_agent/app.py`：按接口 ID 从一张固定表选适配器；ProviderFactory 接收完整 ConnectionBinding，CLI 与空闲切换共用该选型入口（D-028）；
+- 扩充 `src/mica_agent/config_contracts.py`、`src/mica_agent/config_service.py`：将已校验的供应商 channel 透传到连接绑定，供 Completions 显式启用 DeepSeek/OpenRouter 续接；保留临时 custom/Completions 身份。已有连接的 URL、Key、接口或渠道在磁盘变化时拒绝继续发送，要求重启，不让旧 Provider 混用新来源；普通能力与设置仍在下一轮刷新（D-028）；
 - 扩充 `src/mica_agent/session_contracts.py`、`src/mica_agent/checkpoint_contracts.py`、`src/mica_agent/jsonl_store.py`：v6 格式、TurnEntry 和中断检查点的续接字段、读取升级写入；
 - 扩充 `src/mica_agent/session_service.py`：恢复时返回消息加续接；
 - 扩充 `src/mica_agent/message_sanitizer.py`：续接数据的安全判定。
