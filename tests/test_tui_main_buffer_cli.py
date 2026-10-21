@@ -185,7 +185,7 @@ def test_plain_route_never_builds_main_buffer_screen(
             session_mode="new",
             permission_mode=PermissionMode.DEFAULT,
             plain=True,
-            provider_factory=lambda url, key: provider,
+            provider_factory=lambda connection: provider,
             read_line=read_line,
             write_out=out,
             write_err=err,
@@ -233,7 +233,7 @@ def test_default_route_uses_main_buffer_screen(
             session_mode="new",
             permission_mode=PermissionMode.DEFAULT,
             plain=False,
-            provider_factory=lambda url, key: provider,
+            provider_factory=lambda connection: provider,
             workspace=workspace,
             session_service=service,
             context_builder=builder,
@@ -275,7 +275,7 @@ def test_startup_failure_uses_fixed_diagnostic(
             session_mode="new",
             permission_mode=PermissionMode.DEFAULT,
             plain=False,
-            provider_factory=lambda url, key: provider,
+            provider_factory=lambda connection: provider,
             write_err=written.append,
             workspace=workspace,
             session_service=service,
@@ -318,7 +318,7 @@ def test_run_failure_closes_app_once_with_fixed_diagnostic(
             session_mode="new",
             permission_mode=PermissionMode.DEFAULT,
             plain=False,
-            provider_factory=lambda url, key: provider,
+            provider_factory=lambda connection: provider,
             write_err=written.append,
             workspace=workspace,
             session_service=service,
@@ -362,7 +362,7 @@ def test_normal_exit_never_double_closes_the_provider(
             session_mode="new",
             permission_mode=PermissionMode.DEFAULT,
             plain=False,
-            provider_factory=lambda url, key: provider,
+            provider_factory=lambda connection: provider,
             workspace=workspace,
             session_service=service,
             context_builder=builder,
@@ -400,7 +400,7 @@ def test_cancelled_screen_propagates_and_closes_provider_once(
                 session_mode="new",
                 permission_mode=PermissionMode.DEFAULT,
                 plain=False,
-                provider_factory=lambda url, key: provider,
+                provider_factory=lambda connection: provider,
                 workspace=workspace,
                 session_service=service,
                 context_builder=builder,
@@ -440,7 +440,7 @@ def test_already_closed_screen_failure_does_not_double_close(
             session_mode="new",
             permission_mode=PermissionMode.DEFAULT,
             plain=False,
-            provider_factory=lambda url, key: provider,
+            provider_factory=lambda connection: provider,
             write_err=written.append,
             workspace=workspace,
             session_service=service,
@@ -489,7 +489,7 @@ def test_default_route_passes_continue_or_resume_session_to_screen(
             "fake-model",
             session_mode=session_mode,  # type: ignore[arg-type]
             plain=False,
-            provider_factory=lambda _url, _key: provider,
+            provider_factory=lambda connection: provider,
             read_line=InputScript("1"),
             write_out=Recorder(),
             write_err=Recorder(),
@@ -563,7 +563,7 @@ def test_default_route_drives_the_assembled_app(
             session_mode="new",
             permission_mode=PermissionMode.SOLO,
             plain=False,
-            provider_factory=lambda _url, _key: provider,
+            provider_factory=lambda connection: provider,
             read_line=InputScript(),
             write_out=out,
             write_err=err,
@@ -684,9 +684,12 @@ def test_configured_http_stream_reaches_screen_and_session(
 
         transport = RecordingTransport(handler)
 
-        def factory(url: str, key: str) -> OpenAICompatibleProvider:
+        def factory(connection) -> OpenAICompatibleProvider:
             return OpenAICompatibleProvider(
-                key, url, transport=transport, max_retries=2
+                connection.api_key,
+                connection.api_url,
+                transport=transport,
+                max_retries=2,
             )
 
         class ObservedScreen(main_buffer.MainBufferScreen):

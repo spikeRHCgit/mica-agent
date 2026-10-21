@@ -202,7 +202,7 @@ def _run_cli_with_injected_session(
     err = Recorder()
     provider_created: list[bool] = []
 
-    def factory(_url: str, _key: str) -> ScriptedProvider:
+    def factory(connection) -> ScriptedProvider:
         provider_created.append(True)
         return provider
 
@@ -495,7 +495,7 @@ def test_cli_activation_builds_each_header_once(
             "fake-key",
             "test-model",
             session_mode=mode,  # type: ignore[arg-type]
-            provider_factory=lambda _url, _key: provider,
+            provider_factory=lambda connection: provider,
             read_line=HeaderInputScript(*inputs),
             write_out=Recorder(),
             write_err=Recorder(),
@@ -579,7 +579,7 @@ def test_system_prompt_failure_is_safe_and_precedes_provider(
     def fail_prompt(_workspace: WorkspaceIdentity) -> str:
         raise SystemPromptError("private template C:/secret API_KEY=value")
 
-    def forbidden_provider(_url: str, _key: str) -> ProviderStub:
+    def forbidden_provider(connection) -> ProviderStub:
         nonlocal provider_created
         provider_created = True
         raise AssertionError("provider must not be created")
@@ -635,8 +635,8 @@ def test_saved_default_initializes_session_and_cli_override_preserves_restore_ch
     )
     constructed = []
 
-    def factory(url, key):
-        constructed.append((url, key))
+    def factory(connection):
+        constructed.append(connection)
         return provider
 
     async def scenario():
@@ -676,7 +676,10 @@ def test_saved_default_initializes_session_and_cli_override_preserves_restore_ch
 
     asyncio.run(scenario())
     assert [request.model for request in provider.requests] == ["a", "b", "a"]
-    assert constructed == [("https://example.test/v1", "TEST_ONLY_SECRET")] * 3
+    assert [(c.api_url, c.api_key) for c in constructed] == [
+        ("https://example.test/v1", "TEST_ONLY_SECRET")
+    ] * 3
+    assert [c.selection.model_id for c in constructed] == ["a", "b", "a"]
     raw = service.store.path_for_session(
         service.last_active_session().meta.session_id
     ).read_text()
@@ -730,7 +733,7 @@ def test_manual_configuration_reaches_actual_http_payload(tmp_path, monkeypatch)
         run_interactive(
             workspace=resolve_workspace(configuration.store.workspace),
             data_root=root,
-            provider_factory=lambda url, key: provider,
+            provider_factory=lambda connection: provider,
             read_line=InputScript("question"),
             write_out=out,
             write_err=err,
@@ -790,8 +793,8 @@ def test_unprotected_auth_does_not_block_independent_startup_source(
     provider = ScriptedProvider([[ProviderTextDelta("independent reply"), Finish()]])
     connections = []
 
-    def factory(url, key):
-        connections.append((url, key))
+    def factory(connection):
+        connections.append(connection)
         return provider
 
     out, err = Recorder(), Recorder()
@@ -810,7 +813,9 @@ def test_unprotected_auth_does_not_block_independent_startup_source(
         )
         assert code == 0
         assert out.text == "independent reply\n"
-        assert connections == [values[:2]]
+        assert [(c.api_url, c.api_key) for c in connections] == [values[:2]]
+        assert connections[0].model.api == "openai-completions"
+        assert connections[0].channel == "custom"
         assert "credential" in err.text and "protect" in err.text
         assert "TEST_ONLY_SECRET" not in out.text + err.text
         assert "INDEPENDENT_TEST_KEY" not in out.text + err.text
@@ -854,7 +859,7 @@ def test_auth_file_errors_remain_fatal_with_independent_connection(
             "chat",
             workspace=resolve_workspace(configuration.store.workspace),
             data_root=root,
-            provider_factory=lambda url, key: provider,
+            provider_factory=lambda connection: provider,
             read_line=InputScript("hello"),
             write_out=Recorder(),
             write_err=err,
@@ -896,7 +901,7 @@ def test_unprotected_saved_credentials_keep_reference_without_environment_fallba
             workspace=workspace,
             session_service=service,
             session_mode="continue",
-            provider_factory=lambda url, key: provider,
+            provider_factory=lambda connection: provider,
             read_line=InputScript("hello"),
             write_out=Recorder(),
             write_err=err,

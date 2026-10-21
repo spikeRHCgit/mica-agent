@@ -3,9 +3,8 @@
 Public contract: running with no arguments prints help; ``--help``, ``--version``, and
 exit code 2 for invalid arguments are supported; the ``mica`` and
 ``python -m mica_agent`` entry points behave identically. ``mica cli`` starts the
-interactive chat: it reads connection settings from environment variables, assembles
-``OpenAICompatibleProvider`` and ``MicaApp``, and renders ``EngineEvent`` values as they
-arrive.
+interactive chat: it resolves saved or temporary connections, assembles the selected
+adapter and ``MicaApp``, and renders ``EngineEvent`` values as they arrive.
 
 ``run_interactive`` is the injectable interaction core: tests drive it with stand-ins
 (provider factory, stdin reader, stdout/stderr writers), while the product defaults
@@ -62,7 +61,6 @@ from .workspace import (
 if TYPE_CHECKING:
     from .app import MicaApp, ProviderFactory
     from .config_service import ConfigService
-    from .providers import Provider
 
 ReadLine: TypeAlias = Callable[[], Awaitable[str]]
 Write: TypeAlias = Callable[[str], None]
@@ -251,7 +249,9 @@ async def run_interactive(
         raise ValueError("session_mode must be new, continue, or resume")
     if permission_mode is not None and not isinstance(permission_mode, PermissionMode):
         raise TypeError("permission_mode must be a PermissionMode")
-    factory = provider_factory or _default_provider_factory
+    from .app import default_provider_factory
+
+    factory = provider_factory or default_provider_factory
     read = read_line or _default_read_line
     out = write_out or _default_write
     err = write_err or _default_write_err
@@ -509,9 +509,12 @@ async def _run_selected_session(
         session_snapshot = TuiSessionSnapshot(
             workspace=_workspace_display_value(workspace.workspace_path),
             session_label=selected.meta.title.strip() or selected.meta.session_id,
-            model=(model + " (" + resolution.source + ")")
-            if model is not None and resolution.source not in {"direct", "environment"}
-            else model or "unconfigured",
+            model=(connection.selection.model_id + " (" + resolution.source + ")")
+            if connection is not None
+            and resolution.source not in {"direct", "environment"}
+            else connection.selection.model_id
+            if connection is not None
+            else "unconfigured",
         )
     except Exception:  # noqa: BLE001 - TUI startup diagnostics stay safe
         await _close_app(app, err)
@@ -889,12 +892,6 @@ async def _read_permission_answer(
         if normalized in {"", "n", "no"}:
             return PermissionAnswer.DENY
         write_err("please answer y or n\n")
-
-
-def _default_provider_factory(api_url: str, api_key: str) -> Provider:
-    from .providers import OpenAICompatibleProvider
-
-    return OpenAICompatibleProvider(api_key=api_key, base_url=api_url)
 
 
 def _default_read_line() -> Awaitable[str]:

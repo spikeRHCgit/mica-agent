@@ -1817,7 +1817,7 @@ def _make_switch_app(tmp_path, *, configured=True, factory=None, old=None):
         config_service=configuration,
         connection=connection,
         startup_settings=snapshot.settings,
-        provider_factory=factory or (lambda url, key: new),
+        provider_factory=factory or (lambda connection: new),
         close_timeout=0.01,
     )
     return app, configuration, service, old, new
@@ -1902,7 +1902,7 @@ def test_switch_persists_uses_new_provider_and_preserves_headers_history(tmp_pat
             Message(MessageRole.USER, "after"),
         )
         assert len(old.requests) == 1
-        app._provider_factory = lambda url, key: _ScriptedProvider([[Finish()]])
+        app._provider_factory = lambda connection: _ScriptedProvider([[Finish()]])
         back = await app.switch_model(SessionSelection("local", "a"))
         assert back.switched
         assert "Reasoning: high (preference high" in app.connection_summary
@@ -1978,7 +1978,7 @@ def test_switch_cleanup_failure_keeps_committed_or_original_selection(
         app, _, service, old, new = _make_switch_app(tmp_path, old=closing_provider)
     else:
         app, _, service, old, _ = _make_switch_app(
-            tmp_path, factory=lambda url, key: closing_provider
+            tmp_path, factory=lambda connection: closing_provider
         )
         new = closing_provider
 
@@ -2092,7 +2092,7 @@ def test_switch_in_progress_blocks_run_and_second_switch_until_cleanup(
             await release.wait()
 
     new = ClosingProvider([[Finish()]])
-    app, _, service, old, _ = _make_switch_app(tmp_path, factory=lambda url, key: new)
+    app, _, service, old, _ = _make_switch_app(tmp_path, factory=lambda connection: new)
     app._close_timeout = 0.5
 
     def fail_save(*args):
@@ -2162,8 +2162,8 @@ def test_app_constructs_provider_from_connection_and_factory_failure_is_safe(tmp
     app, configuration, service, _, new = _make_switch_app(tmp_path)
     calls = []
 
-    def factory(url, key):
-        calls.append((url, key))
+    def factory(connection):
+        calls.append(connection)
         return new
 
     arguments = {
@@ -2175,13 +2175,13 @@ def test_app_constructs_provider_from_connection_and_factory_failure_is_safe(tmp
         "connection": app._connection,
     }
     constructed = MicaApp(None, None, provider_factory=factory, **arguments)
-    assert calls == [(_MODEL_URL, _MODEL_KEY)]
+    assert calls == [app._connection]
     binding = constructed.prepare_run()
     assert binding.model == "a"
     constructed.release_run(binding)
     asyncio.run(constructed.aclose())
 
-    def fail(url, key):
+    def fail(connection):
         raise RuntimeError(_MODEL_RAW_ERROR)
 
     with pytest.raises(MicaAppError) as caught:
@@ -2246,3 +2246,22 @@ def test_model_operations_without_configuration_report_safe_failure():
         app.save_default_model(target)
     _assert_model_text_safe(caught.value)
     asyncio.run(app.aclose())
+
+
+@pytest.mark.parametrize(
+    "records", [[], [()], [(None,), (None,)], [("invalid-record",)]]
+)
+def test_completed_turn_rejects_missing_duplicate_or_misaligned_continuation_sink(
+    records,
+):
+    app = _make_app(_ScriptedProvider([[Finish()]]))
+    path = app._session_service.store.path_for_session(app.session_id)
+    before = path.read_bytes()
+    assert not app._commit_completed_turn(
+        RunCompleted(run_id="run-test", seq=1),
+        _user("question"),
+        [(_assistant("answer"),)],
+        [()],
+        records,
+    )
+    assert path.read_bytes() == before

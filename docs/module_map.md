@@ -22,11 +22,12 @@
 
 ## 应用入口
 
-- `src/mica_agent/app.py`：连接装配、模型目录/空闲切换/默认保存、每轮冻结和运行持久化边界。
-- `src/mica_agent/cli.py`：命令行覆盖、配置启动、会话选择和前端路由。
+- `src/mica_agent/app.py`：完整连接默认工厂与三接口选型、模型目录/空闲切换/默认保存、每轮来源和能力冻结；统一历史续接输入、本轮续接及中断持久化边界。
+- `src/mica_agent/cli.py`：命令行覆盖、三接口配置启动、会话选择和前端路由；与 App 共用默认工厂，模型标签取自实际解析连接。
 - `src/mica_agent/__main__.py`：`python -m mica_agent` 入口。
 - `src/mica_agent/cancellation.py`：Provider、Engine、工具和交互共用的取消令牌。
 - `tests/test_app.py`：应用装配、运行提交和失败边界。
+- `tests/test_app_interfaces.py`：默认工厂及三接口 CLI/App 实际适配器链路、工具事实与续接持久化、接口/来源切换过滤、能力显示与来源冻结、中断恢复及保存失败。
 - `tests/test_cli.py`：CLI 参数、输出和退出码。
 - `tests/test_cli_interactive.py`：基础文字交互入口。
 - `tests/test_cli_startup.py`：启动诊断和资源初始化。
@@ -39,7 +40,7 @@
 
 - `src/mica_agent/config_contracts.py`：不可变设置、能力、来源与独立连接绑定。
 - `src/mica_agent/config_store.py`：配置 JSON 读取及默认目标项锁内原子保存。
-- `src/mica_agent/config_service.py`：配置校验合并、三接口连接绑定与启动选择，按实际接口计算每轮默认预算和有效思考能力，保留显式声明、偏好及来源。
+- `src/mica_agent/config_service.py`：配置校验合并、三接口与渠道连接绑定及启动选择；共享纯函数计算展示和每轮预算/有效思考，保留显式声明、偏好及来源；保护已装配连接的 URL/Key/接口/渠道不发生来源漂移。
 - `src/mica_agent/_credential_permissions.py`：凭据文件及父目录的实际权限保护与只读访问。
 - `tests/test_config_contracts.py`：配置类型、预算及映射不可变性。
 - `tests/test_config_store.py`：严格 JSON、并发保存及失败字节保护。

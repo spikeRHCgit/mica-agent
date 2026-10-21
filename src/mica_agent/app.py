@@ -19,8 +19,9 @@ from .config_contracts import (
     EffectiveSettings,
     ModelCapabilities,
 )
-from .config_service import ConfigService
+from .config_service import ConfigService, effective_model_options
 from .context_builder import ContextBuilder, ContextBuildResult
+from .continuation_contracts import ModelStepContinuation, ProviderApi
 from .engine import AgentEngine, RunIdFactory, RunProgressSnapshot
 from .events import (
     EngineEvent,
@@ -32,7 +33,9 @@ from .events import (
 from .interactions import PermissionResponse, UserInputResponse
 from .models import Message, MessageRole
 from .providers import Provider, ProviderRequest
-from .providers.openai_compatible import DEFAULT_MAX_TOKENS, DEFAULT_THINKING_LEVEL_MAP
+from .providers.anthropic_messages import AnthropicMessagesProvider
+from .providers.openai_compatible import DEFAULT_MAX_TOKENS, OpenAICompatibleProvider
+from .providers.openai_responses import OpenAIResponsesProvider
 from .reasoning import ReasoningEffort
 from .session_contracts import SessionSelection, TurnEntry
 from .session_service import SessionService
@@ -43,7 +46,12 @@ from .tool_presentation import ToolPresentationSnapshot
 TurnIdFactory = Callable[[], str]
 CheckpointIdFactory = Callable[[], str]
 Clock = Callable[[], datetime]
-ProviderFactory: TypeAlias = Callable[[str, str], Provider]
+ProviderFactory: TypeAlias = Callable[[ConnectionBinding], Provider]
+_PROVIDER_TYPES = {
+    ProviderApi.OPENAI_COMPLETIONS: OpenAICompatibleProvider,
+    ProviderApi.OPENAI_RESPONSES: OpenAIResponsesProvider,
+    ProviderApi.ANTHROPIC_MESSAGES: AnthropicMessagesProvider,
+}
 _STORAGE_FAILURE_MESSAGE = "session persistence failed"
 _STORAGE_FAILURE_AFTER_TOOL_MESSAGE = (
     "session persistence failed; tool changes may have occurred; check the workspace"
@@ -58,6 +66,20 @@ _RECOVERABLE_ERROR_CATEGORIES = frozenset(
         ErrorCategory.MALFORMED,
     }
 )
+
+
+def default_provider_factory(connection: ConnectionBinding) -> Provider:
+    """Select the adapter from the explicit API and channel of a full binding."""
+    api = ProviderApi(connection.model.api)
+    options = {}
+    if api is ProviderApi.OPENAI_COMPLETIONS and connection.channel in {
+        "deepseek",
+        "openrouter",
+    }:
+        options["continuation_channel"] = connection.channel
+    return _PROVIDER_TYPES[api](
+        api_key=connection.api_key, base_url=connection.api_url, **options
+    )
 
 
 class MicaAppError(Exception):
@@ -103,6 +125,8 @@ class RunBinding:
     settings: EffectiveSettings
     tools: tuple
     capabilities: ModelCapabilities | None
+    provider_id: str | None
+    api: ProviderApi
 
 
 class MicaApp:
@@ -178,7 +202,7 @@ class MicaApp:
         )
         if create_provider:
             try:
-                provider = provider_factory(connection.api_url, connection.api_key)
+                provider = provider_factory(connection)
             except Exception:  # noqa: BLE001 - factory details may contain credentials
                 raise MicaAppError("unable to initialize provider") from None
         self._model = model
@@ -203,7 +227,11 @@ class MicaApp:
             None if connection is None else connection.model.capabilities
         )
         self._selection_source = selection_source
-        self._effective_effort = self._resolve_effort()
+        self._effective_budget, _, self._effective_effort = effective_model_options(
+            "openai-completions" if connection is None else connection.model.api,
+            self._capabilities or ModelCapabilities(),
+            self._settings,
+        )
         self._connection_status = (
             connection_status
             if provider is not None
@@ -226,15 +254,6 @@ class MicaApp:
         )
         self._active_run = False
         self._closed = False
-
-    def _resolve_effort(self) -> ReasoningEffort:
-        if self._capabilities is not None and self._capabilities.reasoning:
-            available = (
-                self._capabilities.thinking_level_map or DEFAULT_THINKING_LEVEL_MAP
-            )
-            if self._settings.reasoning_effort in available:
-                return self._settings.reasoning_effort
-        return ReasoningEffort.OFF
 
     @property
     def current_selection(self) -> SessionSelection | None:
@@ -314,12 +333,21 @@ class MicaApp:
             if self._provider_factory is None:
                 return ModelSwitchResult(False, "provider factory is unavailable")
             try:
-                provider = self._provider_factory(
-                    connection.api_url, connection.api_key
+                budget, _, effort = effective_model_options(
+                    connection.model.api,
+                    connection.model.capabilities,
+                    snapshot.settings,
                 )
+                provider = self._provider_factory(connection)
             except Exception:  # noqa: BLE001 - factory details stay private
                 return ModelSwitchResult(False, "unable to initialize provider")
             try:
+                engine = AgentEngine(
+                    provider,
+                    run_id_factory=self._run_id_factory,
+                    tool_executor=self._tool_executor,
+                    presentation_workspace=self._workspace,
+                )
                 self._session_service.update_selection(self._session_id, selection)
             except asyncio.CancelledError:
                 await self._close_candidate(provider)
@@ -331,17 +359,14 @@ class MicaApp:
             self._provider = provider
             self._model = connection.selection.model_id
             self._connection = connection
-            self._engine = AgentEngine(
-                provider,
-                run_id_factory=self._run_id_factory,
-                tool_executor=self._tool_executor,
-                presentation_workspace=self._workspace,
-            )
+            self._engine = engine
             self._capabilities = connection.model.capabilities
+            self._settings = snapshot.settings
+            self._effective_budget = budget
             self._selection_source = "session"
             self._connection_status = "ready"
             self._connection_diagnostic = None
-            self._effective_effort = self._resolve_effort()
+            self._effective_effort = effort
             warning = (
                 None if previous is None else await self._close_candidate(previous)
             )
@@ -387,7 +412,7 @@ class MicaApp:
         if self._capabilities is None:
             return None
         caps = self._capabilities
-        budget = caps.max_tokens if caps.max_tokens is not None else DEFAULT_MAX_TOKENS
+        budget = self._effective_budget
         source = caps.sources.get("maxTokens", "adapter default")
         context_source = caps.sources.get("contextWindow", "program default; estimated")
         return f"Source: {self._selection_source}. Output budget: {budget} ({source}). Context: {caps.context_window} ({context_source}). Reasoning: {self._effective_effort.value} (preference {self._settings.reasoning_effort.value}; {self._settings.sources.get('reasoningEffort', 'program default')}). Permissions: {self._settings.permission_mode.value} ({self._settings.sources.get('permissionMode', 'program default')})."
@@ -427,6 +452,13 @@ class MicaApp:
                     self._connection.selection, current=self._connection
                 )
             )
+        elif self._connection is not None:
+            settings = self._settings
+            capabilities = self._connection.model.capabilities
+            budget, mapping, effort = effective_model_options(
+                self._connection.model.api, capabilities, settings
+            )
+        if self._connection is not None:
             if reasoning_effort is not None:
                 effort = (
                     reasoning_effort
@@ -454,11 +486,18 @@ class MicaApp:
             settings,
             () if executor is None else executor.tool_specs,
             capabilities,
+            None
+            if self._connection is None
+            else self._connection.selection.provider_id,
+            ProviderApi.OPENAI_COMPLETIONS
+            if self._connection is None
+            else ProviderApi(self._connection.model.api),
         )
         self._reservation = binding
         self._settings = settings
         self._capabilities = capabilities
         self._effective_effort = effort
+        self._effective_budget = budget
         return binding
 
     def release_run(self, binding: RunBinding) -> None:
@@ -545,17 +584,21 @@ class MicaApp:
         user_message = Message(role=MessageRole.USER, content=prompt)
         completed_messages: list[tuple[Message, ...]] = []
         completed_tool_presentations: list[tuple[ToolPresentationSnapshot, ...]] = []
+        completed_continuations: list[tuple[ModelStepContinuation | None, ...]] = []
         progress_snapshots: list[RunProgressSnapshot] = []
         submitted = False
         try:
-            session_messages = self._session_service.context_snapshot(self._session_id)
+            context = self._session_service.model_context_snapshot(self._session_id)
             request = ProviderRequest(
                 model=binding.model,
-                messages=self._header_messages + session_messages + (user_message,),
+                messages=self._header_messages + context.messages + (user_message,),
                 tools=binding.tools,
                 reasoning_effort=binding.reasoning_effort,
                 max_tokens=binding.max_tokens,
                 thinking_level_map=binding.thinking_level_map,
+                provider_id=binding.provider_id,
+                api=binding.api,
+                continuations=context.continuations,
             )
             async with aclosing(
                 binding.engine.run(
@@ -563,6 +606,7 @@ class MicaApp:
                     cancellation=cancellation,
                     completed_messages_sink=completed_messages.append,
                     completed_tool_presentations_sink=completed_tool_presentations.append,
+                    completed_continuations_sink=completed_continuations.append,
                     progress_sink=progress_snapshots.append,
                 )
             ) as events:
@@ -573,6 +617,7 @@ class MicaApp:
                             user_message,
                             completed_messages,
                             completed_tool_presentations,
+                            completed_continuations,
                         ):
                             yield RunFailed(
                                 run_id=event.run_id,
@@ -644,16 +689,23 @@ class MicaApp:
         user_message: Message,
         completed_messages: list[tuple[Message, ...]],
         completed_tool_presentations: list[tuple[ToolPresentationSnapshot, ...]],
+        completed_continuations: list[tuple[ModelStepContinuation | None, ...]],
     ) -> bool:
         try:
             if (
                 len(completed_messages) != 1
                 or not completed_messages[0]
                 or len(completed_tool_presentations) != 1
+                or len(completed_continuations) != 1
             ):
                 return False
             transcript = completed_messages[0]
             presentations = completed_tool_presentations[0]
+            continuations = completed_continuations[0]
+            if len(continuations) != sum(
+                message.role is MessageRole.ASSISTANT for message in transcript
+            ):
+                return False
             turn = TurnEntry(
                 turn_id=self._turn_id_factory(),
                 run_id=event.run_id,
@@ -662,6 +714,7 @@ class MicaApp:
                 completed_at=self._clock(),
                 intermediate_messages=transcript[:-1],
                 tool_presentations=presentations,
+                continuations=continuations,
             )
             self._session_service.commit_turn(self._session_id, turn)
         except asyncio.CancelledError:
@@ -706,4 +759,5 @@ __all__ = [
     "ModelChoice",
     "ModelSwitchResult",
     "ProviderFactory",
+    "default_provider_factory",
 ]

@@ -168,7 +168,7 @@ async def run_core(
         "https://api.example.test/v1",
         SECRET_KEY,
         "test-model",
-        provider_factory=lambda url, key: provider,  # type: ignore[return-value]
+        provider_factory=lambda connection: provider,  # type: ignore[return-value]
         read_line=InputScript(*inputs),
         write_out=out,
         write_err=err,
@@ -610,7 +610,7 @@ def test_ctrl_c_during_active_run_cancels_stream_and_exits() -> None:
                 "https://api.example.test/v1",
                 SECRET_KEY,
                 "test-model",
-                provider_factory=lambda url, key: provider,
+                provider_factory=lambda connection: provider,
                 read_line=InputScript("question"),
                 write_out=write_out,
                 write_err=err,
@@ -754,7 +754,7 @@ def test_cancelled_run_without_text_keeps_stdout_empty() -> None:
                 "https://api.example.test/v1",
                 SECRET_KEY,
                 "test-model",
-                provider_factory=lambda url, key: provider,
+                provider_factory=lambda connection: provider,
                 read_line=InputScript("question"),
                 write_out=out,
                 write_err=err,

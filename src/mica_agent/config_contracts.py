@@ -112,6 +112,7 @@ class ConnectionBinding:
     api_key: str
     model: ModelConfig
     source: str
+    channel: str = "custom"
 
     def __repr__(self) -> str:
         return "ConnectionBinding(<redacted>)"

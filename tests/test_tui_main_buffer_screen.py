@@ -1791,8 +1791,8 @@ def model_screen_app(tmp_path, *, old=None, factory=None):
     old = old or ScriptedProvider([[ProviderTextDelta("old answer"), Finish()]])
     created = []
 
-    def make_provider(url, key):
-        assert (url, key) == (MODEL_URL, MODEL_KEY)
+    def make_provider(connection):
+        assert (connection.api_url, connection.api_key) == (MODEL_URL, MODEL_KEY)
         provider = ScriptedProvider([[ProviderTextDelta("new answer"), Finish()]])
         created.append(provider)
         return provider
@@ -2014,7 +2014,7 @@ def test_menu_switch_updates_real_app_facts_history_and_next_provider(
 
 
 def test_failed_menu_switch_retains_menu_old_connection_and_safe_reason(tmp_path):
-    def fail_factory(url, key):
+    def fail_factory(connection):
         raise RuntimeError(MODEL_PRIVATE_ERROR)
 
     async def scenario():
@@ -2397,7 +2397,7 @@ def test_switching_gates_input_ignores_stale_menu_result_and_cleans_exit(
 def test_closed_menu_switch_failure_recovers_draft_and_safe_submission(
     tmp_path, monkeypatch, failure, hint
 ):
-    def fail_factory(url, key):
+    def fail_factory(connection):
         raise RuntimeError(MODEL_PRIVATE_ERROR)
 
     async def scenario():

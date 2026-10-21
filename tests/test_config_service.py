@@ -7,7 +7,7 @@ import pytest
 from test_credential_permissions import protect
 
 from mica_agent.config_contracts import ConfigError
-from mica_agent.config_service import ConfigService
+from mica_agent.config_service import ConfigService, effective_model_options
 from mica_agent.config_store import ConfigStore
 from mica_agent.permissions import PermissionMode
 from mica_agent.reasoning import ReasoningEffort
@@ -623,7 +623,7 @@ def test_unprotected_saved_credentials_do_not_fall_back_to_workspace(api_service
         protect(auth)
 
 
-def test_for_run_reloads_actual_model_interface_without_changing_preference(tmp_path):
+def test_for_run_rejects_interface_drift_without_changing_preference(tmp_path):
     service = make_service(tmp_path)
     config = service.store.data_root / "config.json"
     config.write_text('{"reasoningEffort":"minimal"}')
@@ -634,7 +634,9 @@ def test_for_run_reloads_actual_model_interface_without_changing_preference(tmp_
     directory = json.loads(path.read_text())
     directory["providers"]["local"]["models"][0]["api"] = "anthropic-messages"
     path.write_text(json.dumps(directory))
-    settings, _, budget, mapping, effort = service.for_run(target, current=current)
+    with pytest.raises(ConfigError, match="connection changed on disk"):
+        service.for_run(target, current=current)
+    settings, _, budget, mapping, effort = service.for_run(target)
     assert budget == 4096 and effort is ReasoningEffort.OFF
     assert {
         key.value: value for key, value in mapping.items()
@@ -653,6 +655,7 @@ def test_temporary_run_retains_completions_identity_and_defaults(tmp_path, envir
         current.selection, current=current
     )
     assert current.model.api == "openai-completions"
+    assert current.channel == "custom"
     assert current.source == ("environment" if environment else "direct")
     assert current.selection.provider_id.startswith(
         "mica-env:" if environment else "mica-direct:"
@@ -660,3 +663,69 @@ def test_temporary_run_retains_completions_identity_and_defaults(tmp_path, envir
     assert caps is current.model.capabilities and budget == 4096
     assert mapping == {} and effort is ReasoningEffort.OFF
     assert settings.reasoning_effort is ReasoningEffort.OFF
+
+
+@pytest.mark.parametrize(
+    "channel",
+    ["custom", "deepseek", "openrouter", "opencode-go", "chatgpt-subscription"],
+)
+def test_validated_channel_reaches_saved_binding_without_changing_sources(
+    tmp_path, channel
+):
+    service = make_service(tmp_path)
+    path = service.store.data_root / "models.json"
+    raw = json.loads(path.read_text())
+    raw["providers"]["local"]["channel"] = channel
+    path.write_text(json.dumps(raw))
+    before = path.read_bytes()
+    snapshot = service.load()
+    connection = service.resolve(
+        snapshot, explicit=SessionSelection("local", "a")
+    ).connection
+    assert connection.channel == snapshot.providers[0].channel == channel
+    assert path.read_bytes() == before
+    assert repr(connection) == "ConnectionBinding(<redacted>)"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("channel", "openrouter"), ("baseUrl", "https://changed.example.test/v1")],
+)
+def test_for_run_rejects_connection_drift_and_keeps_preferences(tmp_path, field, value):
+    service = make_service(tmp_path)
+    config = service.store.data_root / "config.json"
+    config.write_text('{"reasoningEffort":"minimal"}')
+    target = SessionSelection("local", "a")
+    current = service.resolve(service.load(), explicit=target).connection
+    path = service.store.data_root / "models.json"
+    raw = json.loads(path.read_text())
+    raw["providers"]["local"][field] = value
+    path.write_text(json.dumps(raw))
+    before = path.read_bytes()
+    with pytest.raises(ConfigError, match="connection changed on disk"):
+        service.for_run(target, current=current)
+    assert service.for_run(target)[0].reasoning_effort is ReasoningEffort.MINIMAL
+    assert config.read_text() == '{"reasoningEffort":"minimal"}'
+    assert path.read_bytes() == before
+
+
+def test_effective_options_share_computation_without_early_capacity_validation(
+    tmp_path,
+):
+    service = make_service(tmp_path)
+    path = service.store.data_root / "models.json"
+    raw = json.loads(path.read_text())
+    raw["providers"]["local"]["models"][0].update(contextWindow=100, maxTokens=100)
+    path.write_text(json.dumps(raw))
+    snapshot = service.load()
+    connection = service.resolve(
+        snapshot, explicit=SessionSelection("local", "a")
+    ).connection
+    assert (
+        effective_model_options(
+            connection.model.api, connection.model.capabilities, snapshot.settings
+        )[0]
+        == 100
+    )
+    with pytest.raises(ConfigError, match="output budget conflicts"):
+        service.for_run(connection.selection, current=connection)

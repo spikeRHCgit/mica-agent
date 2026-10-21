@@ -70,6 +70,23 @@ _SECRET_KEYS = {
 }
 
 
+def effective_model_options(
+    api: str, capabilities: ModelCapabilities, settings: EffectiveSettings
+) -> tuple[int, Mapping[ReasoningEffort, str], ReasoningEffort]:
+    """Derive display and request options without changing preferences or sources."""
+    default_budget, default_mapping = _API_DEFAULTS[api]
+    budget = (
+        capabilities.max_tokens
+        if capabilities.max_tokens is not None
+        else default_budget
+    )
+    mapping = capabilities.thinking_level_map or default_mapping
+    effort = settings.reasoning_effort
+    if not capabilities.reasoning or effort not in mapping:
+        effort = ReasoningEffort.OFF
+    return budget, mapping if capabilities.reasoning else {}, effort
+
+
 def _text(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip()) and value.isprintable()
 
@@ -373,7 +390,7 @@ class ConfigService:
                 parsed.append(model)
                 if enabled and key is not None:
                     connections[selection] = ConnectionBinding(
-                        selection, address, key, model, "saved directory"
+                        selection, address, key, model, "saved directory", channel
                     )
             result.append(
                 ProviderConfig(provider_id, name, channel, enabled, api, tuple(parsed))
@@ -482,15 +499,14 @@ class ConfigService:
             and (
                 current.api_url != connection.api_url
                 or current.api_key != connection.api_key
+                or current.model.api != connection.model.api
+                or current.channel != connection.channel
             )
         ):
             raise ConfigError("connection changed on disk; restart before submitting")
         capabilities = connection.model.capabilities
-        default_budget, default_mapping = _API_DEFAULTS[connection.model.api]
-        budget = (
-            capabilities.max_tokens
-            if capabilities.max_tokens is not None
-            else default_budget
+        budget, mapping, effort = effective_model_options(
+            connection.model.api, capabilities, snapshot.settings
         )
         if (
             capabilities.sources.get("contextWindow") == "explicit"
@@ -499,15 +515,11 @@ class ConfigService:
             raise ConfigError(
                 "output budget conflicts with the explicit context capacity"
             )
-        mapping = capabilities.thinking_level_map or default_mapping
-        effort = snapshot.settings.reasoning_effort
-        if not capabilities.reasoning or effort not in mapping:
-            effort = ReasoningEffort.OFF
         return (
             snapshot.settings,
             capabilities,
             budget,
-            mapping if capabilities.reasoning else {},
+            mapping,
             effort,
         )
 
