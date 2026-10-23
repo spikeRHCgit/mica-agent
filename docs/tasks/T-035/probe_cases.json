@@ -1,0 +1,54 @@
+{
+  "checked_on": "2026-10-23",
+  "purpose": "Hand-authored Messages protocol baseline; never send before separate real-channel authorization. No endpoint or authentication value is included.",
+  "headers": {
+    "Content-Type": "application/json",
+    "anthropic-version": "2023-06-01"
+  },
+  "authentication": "Operator supplies authentication in memory after authorization; no value in this artifact.",
+  "baseline": {
+    "model": "MODEL_PLACEHOLDER",
+    "max_tokens": 1024,
+    "stream": true,
+    "thinking": {"type": "disabled"},
+    "messages": [
+      {"role": "user", "content": [{"type": "text", "text": "Use read exactly once on probe.txt and report its contents. Do not guess."}]}
+    ],
+    "tools": [
+      {
+        "name": "read",
+        "description": "Read a UTF-8 text file from the workspace.",
+        "input_schema": {
+          "type": "object",
+          "properties": {"path": {"type": "string", "minLength": 1}},
+          "required": ["path"],
+          "additionalProperties": false
+        }
+      }
+    ]
+  },
+  "synthetic_history_suffix": [
+    {"role": "assistant", "content": [{"type": "tool_use", "id": "probe_call_1", "name": "read", "input": {"path": "probe.txt"}}]},
+    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "probe_call_1", "content": "{\"status\":\"success\",\"message\":\"file read\",\"data\":\"SYNTHETIC_ONLY\"}"}]}
+  ],
+  "history_warning": "Suffix is synthetic offline data, not a claim of real execution. Real follow-ups must use the newly observed assistant blocks and actual read result, never this suffix.",
+  "history_followup_prompt": "Using only the previous actual read result, repeat its contents. Do not call tools again.",
+  "forced_case_followup_rule": "A3 forces read on the first request only. After the one actual read, omit tool_choice on the result request to allow final text. Reusing forced choice would demand another tool call and violate the one-read boundary.",
+  "cases": [
+    {"id": "A1", "base": "baseline", "change": {}, "side": "independent direct Messages", "max_requests": 2, "stop": "Stop on error, no tool_use, unexpected tool/path, second tool call, missing terminal, or after first successful round-trip."},
+    {"id": "A2", "base": "baseline", "change": {}, "side": "Mica Provider + Engine + read; align request fields, declare system differences", "max_requests": 2, "stop": "Same as A1. Run once; outcome differences alone do not establish a Mica bug."},
+    {"id": "A3", "base": "baseline", "change": {"tool_choice": {"type": "tool", "name": "read"}}, "side": "independent diagnostic request only", "requires": "A1 or A2 returned no tool_use and exact target model/channel supports forced choice with thinking disabled", "max_requests": 2, "stop": "Same as A1; no unsupported-mode retries; do not change product defaults."},
+    {"id": "H0", "base": "baseline plus synthetic_history_suffix", "side": "offline native-slot versus generic Completions-facts comparison", "max_requests": 0, "stop": "Compare id/input object/role/block order/result linkage. Never upload synthetic success as a real tool fact."},
+    {"id": "H1", "base": "baseline plus newly observed native Messages tool round-trip", "side": "independent direct history request", "max_requests": 1, "requires": "New-session round-trip established; history generated in a new authorized isolated experiment", "stop": "Stop on first status/terminal; no extra tool execution."},
+    {"id": "H2", "base": "new Completions tool facts with same task/schema as H1; append history_followup_prompt after completed round-trip", "side": "Messages encoding of generic facts from newly isolated Completions run", "max_requests": 3, "requires": "One Completions read round-trip (at most two requests), then one Messages history request; record content/result-envelope differences", "stop": "Stop on first Messages status/terminal; no additional tool execution, no retry after 400."}
+  ],
+  "total_request_ceiling": 10,
+  "runtime_rules": [
+    "All live cases are NOT executed by this worker.",
+    "Keep the same authorized model, schema, prompt, output budget, thinking configuration and API version; default auto means omit tool_choice on both sides.",
+    "Use a fresh isolated workspace and exactly one designated random-content UTF-8 file; no existing user sessions.",
+    "Capture only field names/types/counts/link-match booleans/status/tool events/terminal flags; never persist raw live bodies, keys, endpoints or absolute paths.",
+    "No Responses requests. No blind retries. No write/edit/bash/ask execution. Each request uses a 30-second bound and zero automatic retries.",
+    "If H1 cannot reuse an authorized successful A1/A2 history, stop for a revised budget; do not silently add requests."
+  ]
+}

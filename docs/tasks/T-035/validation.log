@@ -1,0 +1,66 @@
+T-035 / 2026-10-23 / Windows / main / HEAD 061110f
+Initial git status --short: clean.
+git diff --stat 47b7ef1 HEAD: docs/STATUS.md and task dispatch only; product baseline unchanged.
+
+Isolation before every pytest process starts:
+  Fresh OS temporary directory; process HOME and USERPROFILE point to it.
+  XDG_CONFIG_HOME, APPDATA, LOCALAPPDATA point under that temporary directory.
+  PYTHONDONTWRITEBYTECODE=1; PYTEST_DISABLE_PLUGIN_AUTOLOAD=1.
+  UV_OFFLINE=true; UV_NO_SYNC=true. Existing project environment, no dependency install.
+  Remove process environment entries matching API.?KEY|TOKEN|SECRET|PASSWORD|^MICA_ by NAME; do not print or consume their values.
+  No real config/session is loaded. New tests use fake-probe-key and RecordingTransport.
+  Pytest cache disabled. Runtime temporary directories are pytest/OS-owned; no recursive deletion performed.
+
+uv run ruff format docs/tasks/T-035/test_messages_probe.py
+  Initial draft formatted.
+uv run ruff check docs/tasks/T-035/test_messages_probe.py
+  Initial failure: RUF100, 18 unused noqa E402 annotations (E402 not enabled).
+uv run ruff check docs/tasks/T-035/test_messages_probe.py --fix
+  Removed only these unused annotations; 18 fixed, 0 remaining. No rule disabled.
+uv run ruff format docs/tasks/T-035/test_messages_probe.py
+  1 file left unchanged.
+
+uv run pytest tests/test_anthropic_messages_provider.py -q -W error -p no:cacheprovider
+  171 passed in 2.43s.
+uv run pytest docs/tasks/T-035/test_messages_probe.py -q -W error -p no:cacheprovider
+  First run: 3 failed in 0.95s.
+  First error: AssertionError("Unexpected real network access") during asyncio.run ->
+  Windows ProactorEventLoop._make_self_pipe -> socket.socketpair ->
+  _fallback_socketpair -> connect to IPv4 loopback.
+  Coroutine/unraisable cleanup warnings followed failed loop initialization.
+  Cause: diagnostic network guard blocked Windows event-loop wakeup, before Provider ran.
+  Correction: permit IPv4 loopback only; keep external connects and DNS prohibited.
+  Task explicitly permits local loopback. No product change; external rejection unchanged; no skip or swallowed exception.
+uv run pytest docs/tasks/T-035/test_messages_probe.py -q -W error -p no:cacheprovider --tb=short
+  Final: 3 passed in 0.27s. Each read round-trip made two mock HTTP requests and one actual product read.
+uv run ruff check docs/tasks/T-035/test_messages_probe.py
+  All checks passed!
+uv run ruff format --check docs/tasks/T-035/test_messages_probe.py
+  1 file already formatted.
+uv run pytest tests/test_app_interfaces.py -k 'all_interface_switch_directions or tool_round_trip_persists' -q -W error -p no:cacheprovider --tb=short
+  9 passed, 55 deselected in 8.66s. Explicit scoped selection, no skipped failed test.
+  All model transports simulated; includes Responses locally only, no real Responses request.
+
+Official public-document retrieval was separate from all model transports.
+  Read tool overview, define-tools, handle-tool-calls, thinking-tool-workflows,
+  streaming, working-with-messages, API create, overview and versioning.
+  /docs/en/api/messages failed: fetch response too large (4194305+).
+  /docs/en/api/messages/text-block-param inaccessible via web tool.
+  Neither failure blocks the accessible core references; exact empty text-block server constraints remain unverified.
+  No private input, project code, user data or credentials sent to an external diagnostic service.
+
+Read-only discovery errors: guessed bash_tool.py / ask_tool.py / app_runtime.py / ask.py absent;
+PowerShell wildcard passed as rg literal path invalid. Located real runtime_tools.py and cli.py with rg -g instead.
+No missing required task entry; no source or scope change needed.
+
+Final checks:
+  uv run python -c <load JSON, sum per-case budgets, check four deliverables and trailing whitespace>
+    JSON and request budget: OK (10). Four deliverables and whitespace: OK.
+  git diff --check: no output.
+  git diff --name-only: no tracked modifications.
+  git diff --name-only 47b7ef1 -- src tests pyproject.toml uv.lock: no product/test/dependency differences.
+  git diff --cached --name-only: empty index.
+  git status --short: only probe_cases.json, test_messages_probe.py, worker-01.md untracked.
+  git check-ignore -v docs/tasks/T-035/validation.log: existing .gitignore:27 *.log.
+  validation.log exists and is ignored; no ignore rule changed and no force-add performed.
+Not run: live channels, live model capability tests, full suite, build/install, real terminal acceptance, commit/push.
