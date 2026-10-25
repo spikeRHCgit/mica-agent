@@ -24,4 +24,4 @@ uv --directory C:/Users/10601/Desktop/learning/mica-wt/T-038 run --no-sync --off
 
 本轮没有真实配置、凭据或渠道访问；目录成功不等于 Key 认证、账号资格、额度或推理可用。`/login`、应用/终端维护闭环和 C1 整体仍未交付；POSIX 未实机补跑，不追认为已验收。下一步按配置与选择模块先实现登录维护业务编排，再接应用/终端菜单，不回到 T-036 诊断。
 
-由 master 提交产品与本轮验收文档、ff-only 归并，并按 STATUS 已有收口后授权推送核对远端；具体提交和远端结果随后登记。
+Git 收口结果：master 提交 `e92768a`、ff-only 归并并按 STATUS 已有授权推送；本地 main 与远端 refs/heads/main 精确核对为 `e92768ab41568358b14cfe4e6cc3a0539286893b`，主仓和 T-038 worktree 均干净。下一张 T-039 的派工文档随后仅本地保存，不混为已推送产品。
