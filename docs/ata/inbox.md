@@ -3,6 +3,8 @@
 > 由 master 维护。这里的条目是候选，不是规则，任何会话都不按它行事。
 > 格式：`- YYYY-MM-DD · 来源 · 现象和证据位置 → 建议去向`
 
+- 2026-10-25 · T-038 worker · HTTPX 的 `Response(content=AsyncIterable)` 包装层不一定把 aclose 转发到内层测试流；用 `Response(stream=...)` 时应分别观察响应、客户端和自定义流关闭，并保留取消任务收口断言。证据见 `docs/tasks/T-038/validation.md` §2 → 网络测试边界与资源观察的 worker 实践候选，尚未晋升。
+
 - 2026-09-30 · T-015 / T-016 跨平台审计 · Git 源码输出需明确按 UTF-8 解码；CRLF 工作树与 LF
   blob 的原始字节不同，也可能具有相同过滤后 object ID。证据见 `c6c7997:docs/tasks/T-015.md`、
   `26383d5:docs/tasks/T-016.md` → 区分物理字节契约与 Git 内容检查的审计实践候选，尚未晋升。
