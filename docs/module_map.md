@@ -10,7 +10,7 @@
 | 组（模块） | 管什么 |
 |---|---|
 | 应用入口 | CLI、应用装配和取消生命周期 |
-| 配置与选择 | JSON 配置、来源、能力、凭据只读保护 |
+| 配置与选择 | JSON 配置、来源、能力、凭据保护与安全存储 |
 | 公共契约 | 消息、事件、工具、会话和校验边界 |
 | 会话与工作区 | 工作区身份、上下文、JSONL 和会话服务 |
 | 工具与权限 | 工具注册、执行、权限、文件和命令 |
@@ -39,13 +39,16 @@
 规格：`docs/phase6_plan.md`。
 
 - `src/mica_agent/config_contracts.py`：不可变设置、能力、来源与独立连接绑定。
-- `src/mica_agent/config_store.py`：配置 JSON 读取及默认目标项锁内原子保存。
+- `src/mica_agent/_config_validation.py`：ConfigStore 与 ConfigService 单向共享的文本/URL、渠道与接口标识规则。
+- `src/mica_agent/config_store.py`：配置 JSON 读取、默认模型与 models 目标条目的锁内原子保存和删除。
 - `src/mica_agent/config_service.py`：配置校验合并、三接口与渠道连接绑定及启动选择；共享纯函数计算展示和每轮预算/有效思考，保留显式声明、偏好及来源；保护已装配连接的 URL/Key/接口/渠道不发生来源漂移。
-- `src/mica_agent/_credential_permissions.py`：凭据文件及父目录的实际权限保护与只读访问。
+- `src/mica_agent/credential_store.py`：auth.json API Key 记录的新增、更换和删除；锁内重读合并、目标记录冲突检测及写入后受保护复核。
+- `src/mica_agent/_credential_permissions.py`：凭据文件及父目录的实际权限保护、受保护只读访问和凭据临时文件的安全创建。
 - `tests/test_config_contracts.py`：配置类型、预算及映射不可变性。
-- `tests/test_config_store.py`：严格 JSON、并发保存及失败字节保护。
-- `tests/test_config_service.py`：三接口继承与覆盖、连接可用性与来源选择、接口默认/显式能力、偏好降级、预算保护及敏感诊断。
-- `tests/test_credential_permissions.py`：隔离文件/目录真实权限与查询失败验证。
+- `tests/test_config_store.py`：严格 JSON、目标条目并发保存/删除及失败字节保护。
+- `tests/test_config_service.py`：三接口继承与覆盖、连接可用性与来源选择、接口默认/显式能力、偏好降级、预算保护及敏感诊断；存储结果接入现有读取与解析的窄集成。
+- `tests/test_credential_store.py`：API Key 新增/更换/删除、冲突、并发、失败保护及实际权限验证。
+- `tests/test_credential_permissions.py`：隔离文件/目录真实权限、只读访问及查询失败验证。
 
 ## 公共契约
 

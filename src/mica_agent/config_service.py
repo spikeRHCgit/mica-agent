@@ -9,6 +9,21 @@ from collections.abc import Mapping
 
 import httpx
 
+from ._config_validation import (
+    API_IDS as _API_IDS,
+)
+from ._config_validation import (
+    CHANNELS as _CHANNELS,
+)
+from ._config_validation import (
+    RESERVED_PREFIXES as _RESERVED,
+)
+from ._config_validation import (
+    is_text as _text,
+)
+from ._config_validation import (
+    validate_url as _url,
+)
 from .config_contracts import (
     ConfigError,
     ConfigSnapshot,
@@ -51,13 +66,11 @@ _API_DEFAULTS = {
     "openai-responses": (RESPONSES_MAX_TOKENS, RESPONSES_THINKING_LEVEL_MAP),
     "anthropic-messages": (MESSAGES_MAX_TOKENS, MESSAGES_THINKING_LEVEL_MAP),
 }
-_CHANNELS = {"custom", "chatgpt-subscription", "openrouter", "deepseek", "opencode-go"}
 _SETTINGS = {
     "reasoningEffort": (ReasoningEffort, ReasoningEffort.OFF),
     "permissionMode": (PermissionMode, PermissionMode.DEFAULT),
     "reasoningDisplay": (ReasoningDisplayMode, ReasoningDisplayMode.COLLAPSED),
 }
-_RESERVED = ("mica-env:", "mica-direct:")
 _SECRET_KEYS = {
     "apikey",
     "api_key",
@@ -85,30 +98,6 @@ def effective_model_options(
     if not capabilities.reasoning or effort not in mapping:
         effort = ReasoningEffort.OFF
     return budget, mapping if capabilities.reasoning else {}, effort
-
-
-def _text(value: object) -> bool:
-    return isinstance(value, str) and bool(value.strip()) and value.isprintable()
-
-
-def _url(value: object) -> str:
-    if not _text(value):
-        raise ConfigError("connection address is invalid")
-    try:
-        url = httpx.URL(value)
-        if (
-            url.scheme not in {"http", "https"}
-            or not url.host
-            or url.userinfo
-            or url.query
-            or url.fragment
-            or "?" in value
-            or "#" in value
-        ):
-            raise ValueError()
-        return str(url)
-    except (ValueError, httpx.InvalidURL):
-        raise ConfigError("connection address is invalid") from None
 
 
 def _has_secrets(value: object) -> bool:
@@ -320,7 +309,7 @@ class ConfigService:
                 channel = "custom"
                 warnings.append("invalid channel; custom default used")
             api = raw.get("api", "openai-completions")
-            if not isinstance(api, str) or api not in _API_DEFAULTS:
+            if not isinstance(api, str) or api not in _API_IDS:
                 warnings.append("invalid provider protocol; connection unavailable")
                 continue
             try:
@@ -373,7 +362,7 @@ class ConfigService:
                     warnings,
                 )
                 model_api = model_raw.get("api", api)
-                if not isinstance(model_api, str) or model_api not in _API_DEFAULTS:
+                if not isinstance(model_api, str) or model_api not in _API_IDS:
                     warnings.append("invalid model protocol; model unavailable")
                     continue
                 model_name = model_raw.get("name", model_raw["id"])

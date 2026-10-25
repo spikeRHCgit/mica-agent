@@ -9,6 +9,7 @@ from test_credential_permissions import protect
 from mica_agent.config_contracts import ConfigError
 from mica_agent.config_service import ConfigService, effective_model_options
 from mica_agent.config_store import ConfigStore
+from mica_agent.credential_store import CredentialStore
 from mica_agent.permissions import PermissionMode
 from mica_agent.reasoning import ReasoningEffort
 from mica_agent.session_contracts import SessionSelection
@@ -729,3 +730,90 @@ def test_effective_options_share_computation_without_early_capacity_validation(
     )
     with pytest.raises(ConfigError, match="output budget conflicts"):
         service.for_run(connection.selection, current=connection)
+
+
+def test_provider_and_credential_stores_feed_the_existing_parser(tmp_path):
+    root = tmp_path / "data"
+    root.mkdir()
+    protect(root)
+    workspace = tmp_path / "workspace"
+    (workspace / ".mica").mkdir(parents=True)
+    store = ConfigStore(root, workspace)
+    credentials = CredentialStore(root)
+    service = ConfigService(store, environment={})
+
+    store.update_provider(
+        "local",
+        {
+            "name": "Local",
+            "baseUrl": "https://example.test/v1",
+            "api": "openai-completions",
+            "models": [{"id": "a"}, {"id": "b"}],
+        },
+        expected_value=None,
+    )
+    store.update_provider(
+        "other",
+        {"name": "Other", "baseUrl": "https://other.test/v1", "models": []},
+        expected_value=None,
+    )
+    credentials.save_api_key("local", "TEST_ONLY_SECRET", expected_record=None)
+    credentials.save_api_key("other", "TEST_ONLY_OTHER", expected_record=None)
+    snapshot = service.load()
+    ready = service.resolve(snapshot, explicit=SessionSelection("local", "a"))
+    assert ready.status == "ready"
+    assert ready.connection.api_key == "TEST_ONLY_SECRET"
+    assert {provider.provider_id for provider in snapshot.providers} == {
+        "local",
+        "other",
+    }
+
+    store.save_default_model(SessionSelection("local", "a"), None)
+    record = store.read("models")["providers"]["local"]
+    store.update_provider(
+        "local",
+        {"name": "Renamed", "models": [{"id": "c", "name": "C"}]},
+        expected_value=record,
+    )
+    snapshot = service.load()
+    local = next(
+        provider for provider in snapshot.providers if provider.provider_id == "local"
+    )
+    assert local.name == "Renamed"
+    assert [model.selection.model_id for model in local.models] == ["c"]
+    assert (
+        service.resolve(snapshot, explicit=SessionSelection("local", "c")).status
+        == "ready"
+    )
+    assert (
+        service.resolve(snapshot, explicit=SessionSelection("local", "a")).status
+        == "unresolved"
+    )
+
+    record = store.read("auth")["providers"]["local"]
+    credentials.save_api_key("local", "TEST_ONLY_SECRET_2", expected_record=record)
+    ready = service.resolve(service.load(), explicit=SessionSelection("local", "c"))
+    assert ready.connection.api_key == "TEST_ONLY_SECRET_2"
+
+    provider_record = store.read("models")["providers"]["local"]
+    credential_record = store.read("auth")["providers"]["local"]
+    store.delete_provider("local", expected_value=provider_record)
+    credentials.delete("local", expected_record=credential_record)
+    snapshot = service.load()
+    assert [provider.provider_id for provider in snapshot.providers] == ["other"]
+    assert snapshot.default_model == SessionSelection("local", "a")
+    assert store.read("config")["defaultModel"] == {
+        "provider": "local",
+        "model": "a",
+    }
+    assert store.read("auth") == {
+        "providers": {"other": {"type": "api_key", "apiKey": "TEST_ONLY_OTHER"}}
+    }
+    assert not (root / "sessions").exists()
+
+
+def test_shared_api_ids_stay_in_sync_with_provider_defaults() -> None:
+    from mica_agent._config_validation import API_IDS
+    from mica_agent.config_service import _API_DEFAULTS
+
+    assert frozenset(_API_DEFAULTS) == API_IDS
