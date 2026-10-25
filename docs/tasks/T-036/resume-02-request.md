@@ -2,11 +2,13 @@
 
 依据：[原任务卡](T-036.md)、[受限真实授权与执行分支](resume-01-request.md)、[第二轮审查](review-02.md)。用户本日表示已自行删除第一个供应商，并明确指定使用 `test_bytecat_chat` 进行测试。连接选择歧义已解除，不重新申请权限或追加预算。
 
-## 当前前置阻塞
+## 前置阻塞已解除
 
-master 禁网、无 auth 的只读检查确认：当前模型目录 JSON 缺少根字段 `providers`，供应商记录直接位于根层；根层有 3 个包含 models 数组的供应商形状对象，指定记录存在、启用且声明 Completions。依据 `config_service.py::_parse_directory`，产品只枚举 `directory.get("providers", {})`，不能将这些根层对象当成可用连接。
+本日最初的只读检查发现模型目录缺少根字段 `providers`，供应商记录直接位于根层；产品只枚举 `directory.get("providers", {})`，因此当时在 auth/请求前停止。这不是 Messages A/H 的根因或模型请求失败。
 
-这不是本轮模型请求失败，也不证明 Messages A/H 的根因。真实请求新增 0 次，累计仍为 **3/8**。master 未读 auth、未改真实配置。需用户将现有供应商条目恢复到根字段 `providers` 对象内，保持条目内容不变；worker 不得代为修改真实配置或使用宽松解析绕过产品格式。
+用户随后表示已恢复格式。master 禁网、无 auth 复核确认：`providers` 已为对象，指定 `test_bytecat_chat` 内的启用 Completions 模型条目为 1，启用 Messages 候选为 1，两者基址、模型标识及 channel 比对一致。前置阻塞解除，可转交独立 worker 执行；worker 仍须在自己的进程内重新核对并冻结连接，不把 master 的元数据检查当作凭据有效或模型请求成功。
+
+本次新增真实请求 0 次，累计仍为 **3/8**。master 未读 auth、未改真实配置。worker 不得修改真实配置或使用宽松解析绕过产品格式。
 
 ## 唯一选择与恢复闸门
 
