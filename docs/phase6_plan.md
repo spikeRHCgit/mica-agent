@@ -15,7 +15,7 @@
 | C2 · ChatGPT 官方订阅 | 浏览器授权、身份验证、token 刷新、推理和工具调用 | 用户用真实 ChatGPT 授权并跑一次工具对话；账号或额度不足时标为未验收 |
 | D · 设置、重载与多窗口 | `/settings` 修改三项共享设置；`/reload` 重读配置；运行中快捷切换权限待 Run 收口后保存；其他窗口按时机读到新值 | 用户验收设置、重载、忙时提醒和双窗口生效 |
 
-交付顺序：A2 → B → C1 → C2 → D。每项在最后一张卡通过后由用户做真实验收。主线收口时，运行 `uv run pytest -q -W error`、`uv run ruff check src/mica_agent tests`、`uv run ruff format --check src/mica_agent tests`；依赖变化后运行 `uv lock --check` 和 `uv build`。
+默认交付顺序：A2 → B → C1 → C2 → D。2026-10-25 用户要求推进交付、停止原地诊断后，master 调整本轮施工排期：B 的未通过真实渠道项保留待验，先行推进不依赖真实渠道的 C1 实现，不降低 B 或 C1 的验收标准。C1 按配置与凭据存储（T-037）→ 目录业务 → 应用/终端登录维护闭环顺序施工；每项在最后一张卡通过后由用户做真实验收。主线收口时，运行 `uv run pytest -q -W error`、`uv run ruff check src/mica_agent tests`、`uv run ruff format --check src/mica_agent tests`；依赖变化后运行 `uv lock --check` 和 `uv build`。
 
 ---
 
