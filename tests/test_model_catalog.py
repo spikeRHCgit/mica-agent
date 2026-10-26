@@ -21,6 +21,7 @@ from mica_agent.model_catalog import (
     CatalogModel,
     CatalogResult,
     CatalogTarget,
+    connection_defaults,
     discover,
     save_selection,
 )
@@ -1383,6 +1384,24 @@ def test_save_requires_the_complete_expected_record(tmp_path: Path) -> None:
     with pytest.raises(TypeError):
         save_selection(store, "catalog", {}, catalog, "new")
     assert (root / "models.json").read_bytes() == before
+
+
+def test_builtin_connection_defaults_come_from_the_fixed_table() -> None:
+    assert connection_defaults("deepseek") == (
+        "https://api.deepseek.com",
+        "openai-completions",
+    )
+    assert connection_defaults("openrouter") == (
+        "https://openrouter.ai/api/v1",
+        "openai-completions",
+    )
+    assert connection_defaults("opencode-go") == (
+        "https://opencode.ai/inference/go/openai/v1",
+        "openai-completions",
+    )
+    assert connection_defaults("custom") is None
+    assert connection_defaults("unknown") is None
+    assert connection_defaults(None) is None
 
 
 def test_validation_failure_does_not_partially_save(tmp_path: Path) -> None:

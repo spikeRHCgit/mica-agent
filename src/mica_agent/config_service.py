@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 import httpx
 
@@ -60,6 +61,9 @@ from .providers.openai_responses import (
 )
 from .reasoning import ReasoningDisplayMode, ReasoningEffort
 from .session_contracts import SessionSelection
+
+if TYPE_CHECKING:
+    from ._connection_maintenance import ConnectionMaintenance
 
 _API_DEFAULTS = {
     "openai-completions": (COMPLETIONS_MAX_TOKENS, COMPLETIONS_THINKING_LEVEL_MAP),
@@ -521,3 +525,9 @@ class ConfigService:
                 "default model must reference an available saved connection"
             )
         self.store.save_default_model(selection, expected_value)
+
+    def _connection_maintenance(self) -> ConnectionMaintenance:
+        """Build the internal maintenance facade over this service's store."""
+        from ._connection_maintenance import ConnectionMaintenance
+
+        return ConnectionMaintenance(self.store)

@@ -1,4 +1,4 @@
-"""Bounded directory discovery and selected-model merging for saved connections."""
+"""Built-in connection defaults, bounded directory discovery and selection merging."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ _MAX_ENTRIES = 10000
 _USER_AGENT = "Mica/0.1 model-catalog"
 _ANTHROPIC_VERSION = "2023-06-01"
 _GO_CATALOG_URL = "https://opencode.ai/inference/go/v1/models"
+_GO_DEFAULT_BASE = "https://opencode.ai/inference/go/openai/v1"
 _GO_BASE_PREFIX = "/inference/go/"
 
 _STATUS_OK = "ok"
@@ -92,6 +93,18 @@ _DIRECTORIES = MappingProxyType(
         ),
     }
 )
+
+
+def connection_defaults(channel: str) -> tuple[str, str] | None:
+    """Return the verified built-in base address and default API for a channel."""
+    if not isinstance(channel, str):
+        return None
+    if channel == "opencode-go":
+        return _GO_DEFAULT_BASE, "openai-completions"
+    directory = _DIRECTORIES.get(channel)
+    if directory is None:
+        return None
+    return directory.base_url, directory.api
 
 
 @dataclass(frozen=True, slots=True, repr=False)

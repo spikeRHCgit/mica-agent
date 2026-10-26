@@ -41,14 +41,16 @@
 - `src/mica_agent/config_contracts.py`：不可变设置、能力、来源与独立连接绑定。
 - `src/mica_agent/_config_validation.py`：ConfigStore 与 ConfigService 单向共享的文本/URL、渠道与接口标识规则。
 - `src/mica_agent/config_store.py`：配置 JSON 读取、默认模型与 models 目标条目的锁内原子保存和删除。
-- `src/mica_agent/config_service.py`：配置校验合并、三接口与渠道连接绑定及启动选择；共享纯函数计算展示和每轮预算/有效思考，保留显式声明、偏好及来源；保护已装配连接的 URL/Key/接口/渠道不发生来源漂移。
-- `src/mica_agent/model_catalog.py`：三内置渠道与自定义目录的有界发现、按渠道独立解析、显式勾选模型合并及既有目标记录保存；不持有配置或凭据状态。
+- `src/mica_agent/config_service.py`：配置校验合并、三接口与渠道连接绑定及启动选择；共享纯函数计算展示和每轮预算/有效思考，保留显式声明、偏好及来源；保护已装配连接的 URL/Key/接口/渠道不发生来源漂移；提供延迟构造的内部控制维护入口。
+- `src/mica_agent/_connection_maintenance.py`：连接维护业务编排；安全列表与编辑基线、添加/改名/启停/改 Key/自定义地址、目录发现与勾选/手填保存、确认删除、跨文件部分失效与迟到结果 CAS；不反向依赖 ConfigService。
+- `src/mica_agent/model_catalog.py`：三内置渠道与自定义目录的有界发现、按渠道独立解析、显式勾选模型合并及既有目标记录保存；不持有配置或凭据状态；为连接维护提供内置渠道默认地址/接口的唯一查表入口。
 - `src/mica_agent/credential_store.py`：auth.json API Key 记录的新增、更换和删除；锁内重读合并、目标记录冲突检测及写入后受保护复核。
 - `src/mica_agent/_credential_permissions.py`：凭据文件及父目录的实际权限保护、受保护只读访问和凭据临时文件的安全创建。
 - `tests/test_config_contracts.py`：配置类型、预算及映射不可变性。
 - `tests/test_config_store.py`：严格 JSON、目标条目并发保存/删除及失败字节保护。
 - `tests/test_config_service.py`：三接口继承与覆盖、连接可用性与来源选择、接口默认/显式能力、偏好降级、预算保护及敏感诊断；存储结果接入现有读取与解析的窄集成。
-- `tests/test_model_catalog.py`：三渠道目录请求/解析/取消/资源收口、勾选合并与并发冲突保护，以及目录结果接入 ConfigService 的隔离集成。
+- `tests/test_model_catalog.py`：三渠道目录请求/解析/取消/资源收口、勾选合并与并发冲突保护、内置默认查表，以及目录结果接入 ConfigService 的隔离集成。
+- `tests/test_connection_maintenance.py`：真实临时存储与模拟网络下的添加/维护/删除闭环、跨文件部分完成、过期基线、发现期间并发、取消与锁边界、敏感值清洗。
 - `tests/test_credential_store.py`：API Key 新增/更换/删除、冲突、并发、失败保护及实际权限验证。
 - `tests/test_credential_permissions.py`：隔离文件/目录真实权限、只读访问及查询失败验证。
 
